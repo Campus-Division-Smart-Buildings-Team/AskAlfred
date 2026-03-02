@@ -8,22 +8,21 @@ Usage:
   python cli/resolve_buildings.py --path data --property-csv Dim-Property.csv
 """
 from __future__ import annotations
-
 import argparse
 import csv
+from collections.abc import Iterable
 from dataclasses import dataclass
 from difflib import SequenceMatcher, get_close_matches
 from pathlib import Path
-from typing import Iterable, Optional
-
+from typing import Optional
 import sys
+from filename_building_parser import extract_building_from_filename
+from building.normaliser import normalise_building_name
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-from building.normaliser import normalise_building_name
-from filename_building_parser import extract_building_from_filename
 
 
 @dataclass(frozen=True)
@@ -88,7 +87,8 @@ def _fuzzy_match(name: str, canonicals: list[str], threshold: float) -> tuple[Op
         return None, 0.0
     name_lower = name.lower()
     canonical_lower = [c.lower() for c in canonicals]
-    match = get_close_matches(name_lower, canonical_lower, n=1, cutoff=threshold)
+    match = get_close_matches(
+        name_lower, canonical_lower, n=1, cutoff=threshold)
     if not match:
         return None, 0.0
     idx = canonical_lower.index(match[0])
@@ -128,11 +128,16 @@ def _print_resolution(res: Resolution) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Resolve building names for files.")
-    parser.add_argument("--path", required=True, help="File or directory to scan.")
-    parser.add_argument("--property-csv", required=True, help="Path to Dim-Property CSV.")
-    parser.add_argument("--fuzzy-strong", type=float, default=0.80, help="Strong fuzzy match threshold.")
-    parser.add_argument("--fuzzy-weak", type=float, default=0.70, help="Weak fuzzy match threshold.")
+    parser = argparse.ArgumentParser(
+        description="Resolve building names for files.")
+    parser.add_argument("--path", required=True,
+                        help="File or directory to scan.")
+    parser.add_argument("--property-csv", required=True,
+                        help="Path to Dim-Property CSV.")
+    parser.add_argument("--fuzzy-strong", type=float,
+                        default=0.80, help="Strong fuzzy match threshold.")
+    parser.add_argument("--fuzzy-weak", type=float,
+                        default=0.70, help="Weak fuzzy match threshold.")
     parser.add_argument("--output", help="Optional CSV output path.")
     args = parser.parse_args()
 
@@ -144,37 +149,49 @@ def main() -> int:
     if not csv_path.exists():
         raise SystemExit(f"Property CSV not found: {csv_path}")
 
-    canonicals, name_to_canonical, alias_to_canonical = _load_property_csv(csv_path)
+    canonicals, name_to_canonical, alias_to_canonical = _load_property_csv(
+        csv_path)
     output_path = Path(args.output).resolve() if args.output else None
-    writer = None
-    handle = None
-    if output_path:
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        handle = output_path.open("w", newline="", encoding="utf-8")
-        writer = csv.writer(handle)
-        writer.writerow(["file", "extracted", "canonical", "confidence", "source"])
 
     print("file\textracted\tcanonical\tconfidence\tsource")
-    for file_path in _iter_files(base):
-        res = resolve_building(
-            filename=file_path.name,
-            canonicals=canonicals,
-            name_to_canonical=name_to_canonical,
-            alias_to_canonical=alias_to_canonical,
-            fuzzy_strong=args.fuzzy_strong,
-            fuzzy_weak=args.fuzzy_weak,
-        )
-        _print_resolution(res)
-        if writer:
-            writer.writerow([
-                res.filename,
-                res.extracted or "",
-                res.canonical,
-                f"{res.confidence:.2f}",
-                res.source,
-            ])
-    if handle:
-        handle.close()
+
+    # Use context manager to ensure file is properly closed
+    if output_path:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with output_path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(
+                ["file", "extracted", "canonical", "confidence", "source"])
+
+            for file_path in _iter_files(base):
+                res = resolve_building(
+                    filename=file_path.name,
+                    canonicals=canonicals,
+                    name_to_canonical=name_to_canonical,
+                    alias_to_canonical=alias_to_canonical,
+                    fuzzy_strong=args.fuzzy_strong,
+                    fuzzy_weak=args.fuzzy_weak,
+                )
+                _print_resolution(res)
+                writer.writerow([
+                    res.filename,
+                    res.extracted or "",
+                    res.canonical,
+                    f"{res.confidence:.2f}",
+                    res.source,
+                ])
+    else:
+        # No output file, just print
+        for file_path in _iter_files(base):
+            res = resolve_building(
+                filename=file_path.name,
+                canonicals=canonicals,
+                name_to_canonical=name_to_canonical,
+                alias_to_canonical=alias_to_canonical,
+                fuzzy_strong=args.fuzzy_strong,
+                fuzzy_weak=args.fuzzy_weak,
+            )
+            _print_resolution(res)
     return 0
 
 

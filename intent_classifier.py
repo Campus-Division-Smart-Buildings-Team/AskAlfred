@@ -3,13 +3,12 @@
 # -*- coding: utf-8 -*-
 """
 NLP Intent Classifier with context-aware biasing and calibrated confidence.
-
 Upgrades:
 - Contextual bias using QueryContext (building, business_terms)
 - Dynamic softmax calibration for confidence scores
 - Extended pattern-based fallback (maintenance, counting, ranking)
 - Safer cache validation
-- Modular, well-logged design
+- Fast-path for high-precision patterns
 """
 
 from typing import Any, Optional, TYPE_CHECKING, Protocol, cast
@@ -309,9 +308,8 @@ class NLPIntentClassifier:
 
     def _load_cache_secure(self):
         """Load embeddings without pickle - uses JSON + npz."""
-        cache_base = Path(self.cache_path).with_suffix('')
-        json_path = cache_base.with_suffix('.json')
-        npz_path = cache_base.with_suffix('.npz')
+        json_path = Path(self.cache_path).with_suffix('').with_suffix('.json')
+        npz_path = Path(self.cache_path).with_suffix('').with_suffix('.npz')
 
         if not (json_path.exists() and npz_path.exists()):
             return False
@@ -336,9 +334,9 @@ class NLPIntentClassifier:
                 for intent_str, intent_meta in metadata['intents'].items():
                     try:
                         intent = QueryType(intent_str)
-                    except Exception:
+                    except Exception as e:
                         self.logger.warning(
-                            "Unknown intent in cache: %s", intent_str)
+                            "Unknown intent in cache: %s (error: %s)", intent_str, e)
                         continue
 
                     mean_key = f"{intent_str}_mean"
@@ -750,13 +748,16 @@ class NLPIntentClassifier:
             # 1) Match enum VALUE (most common): "semantic_search"
             try:
                 return QueryType(s)
-            except Exception:
-                pass
+            except (ValueError, KeyError) as e:
+                self.logger.debug(
+                    "Failed to match QueryType by value '%s': %s", s, e)
 
             # 2) Match enum NAME: "SEMANTIC_SEARCH"
             try:
                 return QueryType[s]
-            except Exception:
+            except (ValueError, KeyError) as e:
+                self.logger.debug(
+                    "Failed to match QueryType by name '%s': %s", s, e)
                 return None
 
         # Unknown type
@@ -849,10 +850,8 @@ class NLPIntentClassifier:
                     bias[QueryType.PROPERTY_CONDITION] += self.BUILDING_CONDITION_BIAS
         except Exception as e:
             # Don't fail the request if a context accessor changes
-            try:
-                self.logger.debug("Business-term bias skipped: %r", e)
-            except Exception:
-                pass
+            self.logger.debug(
+                "Business-term bias skipped: %r", e, exc_info=True)
 
         # -----------------------------------------------------
         # 3) Memory-based bias: previous_intent continuity on follow-ups

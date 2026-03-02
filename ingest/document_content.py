@@ -28,6 +28,12 @@ from building import normalise_building_name
 from alfred_exceptions import ParseError, ValidationError
 from interfaces import EmbeddingsResult
 from maintenance_utils import normalise_priority
+from file_operations_validator import (
+    validate_file_safety,
+    FileSizeError,
+    FileTypeError,
+    ALLOWED_INGEST_EXTENSIONS
+)
 from config import (
     INGEST_BACKOFF_BASE,
     INGEST_BACKOFF_CAP,
@@ -117,15 +123,32 @@ def fetch_bytes_secure(
 ) -> bytes:
     """
     Securely read file from local filesystem with size validation.
+
+    Uses the file_operations_validator for comprehensive security checks.
     """
-    filepath = validate_safe_path(base_path, key, logger=logger)
-    size_mb = filepath.stat().st_size / (1024 * 1024)
-    if max_size_mb > 0 and size_mb > max_size_mb:
-        raise ValidationError(
-            f"File too large: {size_mb:.2f}MB exceeds limit of {max_size_mb}MB"
+    log = _get_logger(logger)
+
+    try:
+        # Use file_operations_validator for comprehensive safety checks
+        filepath = validate_file_safety(
+            base_path,
+            key,
+            allowed_extensions=ALLOWED_INGEST_EXTENSIONS,
+            max_size_mb=max_size_mb
         )
-    with open(filepath, "rb") as file_handle:
-        return file_handle.read()
+
+        with open(filepath, "rb") as file_handle:
+            return file_handle.read()
+
+    except FileSizeError as e:
+        log.error("File size validation failed: %s", e)
+        raise ValidationError(str(e)) from e
+    except FileTypeError as e:
+        log.error("File type not allowed: %s", e)
+        raise ParseError(str(e)) from e
+    except Exception as e:
+        log.error("Failed to read file %s: %s", key, e)
+        raise ValidationError(f"Cannot read file: {key}") from e
 
 
 def extract_text(

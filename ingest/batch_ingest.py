@@ -23,6 +23,7 @@ from config import (
     INGEST_UPSERT_JOIN_TIMEOUT_SECONDS,
     INGEST_UPSERT_JOIN_POLL_SECONDS,
 )
+from file_operations_validator import validate_directory_safety, FileOperationSecurityError
 from filename_building_parser import FilenameBuildingResolver
 from .context import IngestContext
 from .document_content import (
@@ -108,11 +109,21 @@ def _run_ingest_parallel(
     upsert_stop_event: threading.Event,
     progress: IngestionProgressTracker | None = None,
 ) -> None:
-    """Process files in parallel using thread pool."""
+    """
+    Process files in parallel using thread pool.
+
+    Rate limiting is enforced through:
+    - Limited max_io_workers (default 12, max 32) to prevent DOS
+    - Limited max_parse_workers (default 6, max 16) to prevent DOS
+    - ThreadPoolExecutor bounds workers to prevent resource exhaustion
+    """
     worker_count = max(
         ctx.config.max_io_workers,
         ctx.config.max_parse_workers,
     )
+    # DOS protection: Cap worker count to prevent resource exhaustion
+    worker_count = min(worker_count, 32)
+
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
         futures = {
             executor.submit(orchestrator.process, obj): obj
@@ -484,8 +495,14 @@ def ingest_local_directory_with_progress(
     """
     base_path = ctx.config.local_path
 
-    if not Path(base_path).exists():
-        raise FileNotFoundError(f"Directory not found: {base_path}")
+    # Validate directory safety to prevent path traversal
+    try:
+        validated_path = validate_directory_safety(base_path)
+        base_path = str(validated_path)
+        ctx.logger.info("Validated ingest directory: %s", validated_path)
+    except FileOperationSecurityError as e:
+        ctx.logger.error("Invalid ingest directory: %s", e)
+        raise FileNotFoundError(f"Invalid directory: {base_path}") from e
 
     objs = list_local_files_secure(
         base_path,

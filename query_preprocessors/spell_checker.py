@@ -11,6 +11,7 @@ from building import (
     BUILDING_NAMES_CACHE,
     normalise_building_name,
 )
+from log_sanitiser import sanitise_error
 
 
 class SpellCheckPreprocessor(BasePreprocessor):
@@ -187,5 +188,5 @@ class SpellCheckPreprocessor(BasePreprocessor):
         except Exception as e:
             # Never fail the pipeline because of spell check
             self.logger.error(
-                "SpellCheckPreprocessor failed: %s", e, exc_info=True)
+                "SpellCheckPreprocessor failed: %s", sanitise_error(e), exc_info=False)
             context.add_to_cache("spell_corrected", False)

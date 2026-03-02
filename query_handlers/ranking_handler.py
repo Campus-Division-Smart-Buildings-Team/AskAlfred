@@ -19,6 +19,7 @@ from structured_queries import (
     is_counting_query,
     generate_ranking_answer
 )
+from log_sanitiser import sanitise_error
 # Local import
 from .base_handler import BaseQueryHandler
 
@@ -115,7 +116,8 @@ class RankingHandler(BaseQueryHandler):
             )
 
         except Exception as e:
-            self.logger.error("Ranking handler error: %s", e, exc_info=True)
+            self.logger.error("Ranking handler error: %s",
+                              sanitise_error(e), exc_info=False)
 
             return QueryResult(
                 query=query_text,

@@ -8,7 +8,6 @@ import sys
 import io
 import logging
 from pathlib import Path
-from typing import List, Tuple
 import argparse
 
 # Fix Unicode encoding for Windows console to support emojis
@@ -31,6 +30,14 @@ try:
 except ImportError:
     print("ERROR: send2trash not found. Install with: pip install send2trash")
     sys.exit(1)
+
+# Security: Import log sanitiser to prevent sensitive data exposure
+try:
+    from log_sanitiser import sanitise_error
+except ImportError:
+    # Fallback if log_sanitiser not available
+    def sanitise_error(error: Exception) -> str:
+        return f"{type(error).__name__}: {str(error)}"
 
 # Setup logging
 logging.basicConfig(
@@ -57,7 +64,7 @@ stats = {
 }
 
 
-def find_word_documents(base_path: str, recursive: bool = True) -> List[Path]:
+def find_word_documents(base_path: str, recursive: bool = True) -> list[Path]:
     """
     Find all Word documents in the specified directory.
 
@@ -66,7 +73,7 @@ def find_word_documents(base_path: str, recursive: bool = True) -> List[Path]:
         recursive: If True, search subdirectories
 
     Returns:
-        List of Path objects for Word documents
+        list of Path objects for Word documents
     """
     base_path_obj = Path(base_path)
 
@@ -93,7 +100,7 @@ def find_word_documents(base_path: str, recursive: bool = True) -> List[Path]:
     return sorted(word_files)
 
 
-def convert_word_to_pdf(word_path: Path) -> Tuple[bool, str, Path]:
+def convert_word_to_pdf(word_path: Path) -> tuple[bool, str, Path]:
     """
     Convert a single Word document to PDF using Microsoft Word COM interface.
 
@@ -101,7 +108,7 @@ def convert_word_to_pdf(word_path: Path) -> Tuple[bool, str, Path]:
         word_path: Path to the Word document
 
     Returns:
-        Tuple of (success: bool, message: str, pdf_path: Path)
+        tuple of (success: bool, message: str, pdf_path: Path)
     """
     pdf_path = word_path.with_suffix('.pdf')
 
@@ -149,7 +156,7 @@ def convert_word_to_pdf(word_path: Path) -> Tuple[bool, str, Path]:
         CoUninitialize()
 
 
-def move_to_recycle_bin(file_path: Path) -> Tuple[bool, str]:
+def move_to_recycle_bin(file_path: Path) -> tuple[bool, str]:
     """
     Move a file to the Windows Recycle Bin.
 
@@ -157,7 +164,7 @@ def move_to_recycle_bin(file_path: Path) -> Tuple[bool, str]:
         file_path: Path to the file to move
 
     Returns:
-        Tuple of (success: bool, message: str)
+        tuple of (success: bool, message: str)
     """
     try:
         send2trash(str(file_path))
@@ -365,7 +372,8 @@ def main():
         logging.info("\n\n⚠️  Operation cancelled by user")
         sys.exit(0)
     except Exception as e:  # pylint: disable=broad-except
-        logging.error("\n❌ Unexpected error: %s", e, exc_info=True)
+        logging.error("\n❌ Unexpected error: %s",
+                      sanitise_error(e), exc_info=False)
         sys.exit(1)
 
 

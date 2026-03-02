@@ -27,6 +27,11 @@ from tqdm import tqdm
 from config import (
     _route_namespace,
 )
+from file_operations_validator import (
+    validate_directory_safety,
+    list_files_safe,
+    FileOperationSecurityError
+)
 from alfred_exceptions import RoutingError, ValidationError, ExternalServiceError
 from pinecone_utils import sanitise_metadata_for_pinecone
 

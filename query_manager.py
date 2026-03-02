@@ -34,6 +34,7 @@ from query_types import QueryType
 from session_manager import SessionManager
 from building.validation import INVALID_BUILDING_NAMES
 from emojis import EMOJI_CROSS, EMOJI_TICK, EMOJI_CAUTION, EMOJI_TIME
+from log_sanitiser import sanitise_error
 from config import (
     QUERY_RULE_OVERRIDE_THRESHOLD,
     QUERY_CONF_THRESHOLD,
@@ -450,8 +451,9 @@ class QueryManager:
                     pre.process(context)
             except Exception as e:
                 self.logger.error(
-                    "Preprocessor %s failed: %s", pre.__class__.__name__, e,
-                    exc_info=True)
+                    "Preprocessor %s failed: %s", pre.__class__.__name__, sanitise_error(
+                        e),
+                    exc_info=False)
 
     # =========================================================================
     # Query routing
@@ -474,8 +476,8 @@ class QueryManager:
                 self.logger.error(
                     "Handler %s failed during can_handle(): %s",
                     h.__class__.__name__,
-                    e,
-                    exc_info=True
+                    sanitise_error(e),
+                    exc_info=False
                 )
 
         # Fallback
@@ -510,8 +512,8 @@ class QueryManager:
                         best_handler = h
             except Exception as e:
                 self.logger.error(
-                    "Handler %s failed during can_handle(): %s", h.__class__.__name__, e,
-                    exc_info=True
+                    "Handler %s failed during can_handle(): %s", h.__class__.__name__, sanitise_error(e),
+                    exc_info=False
                 )
 
         # --------------------------------------------------------
@@ -539,7 +541,8 @@ class QueryManager:
                     ml.intent, "value") else ml.intent, ml.confidence
             )
         except Exception as e:
-            self.logger.error("Intent classifier failed: %s", e, exc_info=True)
+            self.logger.error("Intent classifier failed: %s",
+                              sanitise_error(e), exc_info=False)
             ml = None
 
         # --------------------------------------------------------
@@ -618,7 +621,7 @@ class QueryManager:
         except Exception as e:
             self.logger.error(
                 "Handler %s failed during negotiation: %s",
-                target_handler.__class__.__name__, e, exc_info=True
+                target_handler.__class__.__name__, sanitise_error(e), exc_info=False
             )
             context.routing_notes.append("ml_selected_handler_error")
 

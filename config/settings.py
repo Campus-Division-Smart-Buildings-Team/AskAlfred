@@ -11,8 +11,6 @@ import os
 import logging
 from pathlib import Path
 
-import streamlit as st
-
 from alfred_exceptions import ConfigError, RoutingError
 from .constant import (
     ANSWER_MODEL,
@@ -51,16 +49,14 @@ try:
 except Exception:  # pylint: disable=broad-except
     pass
 
-# Streamlit Cloud secrets fallback
-try:
-    if "PINECONE_API_KEY" not in os.environ and "PINECONE_API_KEY" in st.secrets:
-        # type: ignore
-        os.environ["PINECONE_API_KEY"] = st.secrets["PINECONE_API_KEY"]
-    if "OPENAI_API_KEY" not in os.environ and "OPENAI_API_KEY" in st.secrets:
-        # type: ignore
-        os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
-except Exception:  # pylint: disable=broad-except
-    pass
+# NOTE: Do NOT store secrets in environment variables
+# (they remain as plaintext in process memory and child processes can access them)
+# Use credential_manager module instead, which loads credentials on-demand.
+# The credential_manager loads credentials fresh from environment each time,
+# not storing them in memory longer than the client initialization needs.
+#
+# If using Streamlit Cloud secrets, ensure they're only accessed via
+# streamlit.secrets interface directly (not stored in os.environ).
 
 # ===========================================================================
 # NAMESPACE UTILITIES
@@ -320,10 +316,36 @@ class BatchIngestConfig:
         if self.max_io_workers < 1:
             raise ConfigError("max_io_workers must be >= 1")
 
+        # DOS protection: Enforce reasonable limits on parallel file processing
+        # Prevents resource exhaustion from unlimited worker count
+        if self.max_io_workers > 32:
+            logging.warning(
+                "max_io_workers=%d is very high (>32). Limiting to 32 to prevent DOS.",
+                self.max_io_workers
+            )
+            self.max_io_workers = 32
+
         if self.max_parse_workers < 1:
             raise ConfigError("max_parse_workers must be >= 1")
+
+        # DOS protection: Enforce reasonable limits on parse workers
+        if self.max_parse_workers > 16:
+            logging.warning(
+                "max_parse_workers=%d is very high (>16). Limiting to 16 to prevent DOS.",
+                self.max_parse_workers
+            )
+            self.max_parse_workers = 16
+
         if self.upsert_workers < 1:
             raise ConfigError("upsert_workers must be >= 1")
+
+        # DOS protection: Limit upsert workers
+        if self.upsert_workers > 8:
+            logging.warning(
+                "upsert_workers=%d is very high (>8). Limiting to 8 to prevent DOS.",
+                self.upsert_workers
+            )
+            self.upsert_workers = 8
         if self.fra_supersession_single_threaded and self.upsert_workers != 1:
             logging.warning(
                 "fra_supersession_single_threaded is enabled; forcing upsert_workers=1 "

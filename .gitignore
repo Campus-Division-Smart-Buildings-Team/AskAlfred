@@ -35,6 +35,9 @@ Alfred/
 data/
 *.csv
 
+# markdowns
+*.md
+!README.md
 
 # metrics
 #*.prom

@@ -16,6 +16,7 @@ from search_instructions import SearchInstructions
 from alfred_exceptions import RoutingError
 import search_core
 from search_core.search_router import execute
+from log_sanitiser import sanitise_error
 
 from .base_handler import BaseQueryHandler
 
@@ -131,7 +132,8 @@ class SemanticSearchHandler(BaseQueryHandler):
             )
 
         except Exception as e:
-            logging.error("Semantic search failure: %s", e, exc_info=True)
+            logging.error("Semantic search failure: %s",
+                          sanitise_error(e), exc_info=False)
             elapsed = round(time.time() - start, 3)
 
             return QueryResult(
@@ -200,7 +202,8 @@ class SemanticSearchHandler(BaseQueryHandler):
             )
 
         except Exception as e:
-            logging.error("Search instruction failed: %s", e, exc_info=True)
+            logging.error("Search instruction failed: %s",
+                          sanitise_error(e), exc_info=False)
             elapsed = round(time.time() - start, 3)
 
             return QueryResult(

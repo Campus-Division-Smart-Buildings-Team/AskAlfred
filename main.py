@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Main Streamlit application for Alfred the Gorilla chatbot.
+Main Streamlit application for AskAlfred chatbot.
 With dynamic building cache initialisation across all indexes.
 """
 import os
@@ -12,10 +12,18 @@ import zipfile
 import time
 import streamlit as st
 from openai import OpenAI
+from markupsafe import escape
+from log_sanitiser import sanitise_error
+from sanitise_context import (
+    safe_markdown, display_safe_publication_date_info, display_safe_low_score_warning)
+from input_validator import (
+    validate_query_security, get_validation_summary)
+from rate_limiter import (
+    initialise_rate_limiter, check_query_rate_limit,
+    get_query_reset_time)
 from ui_components import (
     setup_page_config, render_custom_css, render_header, render_tabs,
-    render_sidebar, display_publication_date_info,
-    display_low_score_warning, initialise_chat_history, display_chat_history
+    render_sidebar, initialise_chat_history, display_chat_history
 )
 from search_core.search_router import execute
 from search_instructions import SearchInstructions
@@ -33,9 +41,11 @@ from config import (
     UI_SUMMARY_MAX_TOKENS,
     UI_RECENT_TURNS_FOR_SUMMARY,
 )
+from config.constant import IS_PRODUCTION
 from emojis import (EMOJI_GORILLA, EMOJI_CAUTION,
-                    EMOJI_BOOKS, EMOJI_MEDAL, EMOJI_TIME)
+                    EMOJI_BOOKS, EMOJI_TIME)
 from query_manager import QueryManager
+from clients import ClientManager
 
 
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
@@ -180,8 +190,7 @@ def initialise_building_cache():
         logging.error(
             "❌ Error initialising building cache after %.2f sec: %s",
             elapsed,
-            e,
-            exc_info=True
+            sanitise_error(e)
         )
         return {
             'populated': False,
@@ -229,7 +238,7 @@ def handle_chat_input(top_k: int):
 
     # Display user message
     with st.chat_message("user"):
-        st.markdown(query)
+        safe_markdown(query)
 
     # Route through query manager or legacy system
     if USE_QUERY_MANAGER:
@@ -267,14 +276,15 @@ def handle_query_with_manager(query: str, top_k: int):
 
                 # Display answer
                 if result.answer:
-                    st.markdown(result.answer)
+                    safe_markdown(result.answer)
 
                 # Optional UI elements
                 if getattr(result, "publication_date_info", None):
-                    display_publication_date_info(result.publication_date_info)
+                    display_safe_publication_date_info(
+                        result.publication_date_info)
 
                 if getattr(result, "score_too_low", False):
-                    display_low_score_warning()
+                    display_safe_low_score_warning()
 
                 # Store in chat history
                 st.session_state.messages.append({
@@ -288,8 +298,9 @@ def handle_query_with_manager(query: str, top_k: int):
                 # # Clear processing flag
                 # st.session_state.processing_query = False
 
-                # Debug info
-                if st.session_state.get('debug_mode', False):
+                # Debug info - Only show in development mode to prevent information disclosure
+                # Shows system architecture details that could aid attackers
+                if not IS_PRODUCTION and st.session_state.get('debug_mode', False):
                     with st.expander("🔍 Debug Info"):
                         st.json({
                             'query_type': result.query_type,
@@ -306,19 +317,49 @@ def handle_query_with_manager(query: str, top_k: int):
 
 def validate_query(query: str) -> tuple[bool, Optional[str]]:
     """
-    Validate user query.
+    Validate user query with enhanced security checks.
+
+    Validates for:
+    - Empty/null input
+    - Length constraints
+    - Prompt injection attempts
+    - Excessive special characters
+    - Suspicious patterns
+
     Returns (is_valid, error_message)
     """
-    if not query or not query.strip():
-        return False, "Please enter a question."
+    # Use enhanced security validation
+    is_valid, error_message = validate_query_security(
+        query,
+        min_length=MIN_QUERY_LENGTH,
+        max_length=MAX_QUERY_LENGTH
+    )
 
-    if len(query.strip()) < MIN_QUERY_LENGTH:
-        return False, f"Query too short (minimum {MIN_QUERY_LENGTH} characters)."
+    if is_valid and not error_message:
+        # Enhanced rate limiting check
+        user_id = st.session_state.get('user_id', 'anonymous')
 
-    if len(query) > MAX_QUERY_LENGTH:
-        return False, f"Query too long (maximum {MAX_QUERY_LENGTH} characters)."
+        # Use Redis-backed rate limiter if available, falls back to in-memory
+        if not check_query_rate_limit(user_id):
+            reset_time = get_query_reset_time(user_id)
+            retry_after = max(0, int(reset_time - time.time()))
 
-    return True, None
+            error_msg = (
+                f"Rate limit exceeded. You have made too many queries. "
+                f"Please wait {retry_after} seconds before trying again."
+            )
+            logging.warning(
+                "Rate limit exceeded for user %s. Reset in %d seconds",
+                user_id, retry_after
+            )
+            return False, error_msg
+
+        # Log validation details in development mode only (to prevent information disclosure in production)
+        if not IS_PRODUCTION and st.session_state.get('debug_mode', False):
+            validation_info = get_validation_summary(query)
+            logging.debug("Query validation info: %s", validation_info)
+
+    return is_valid, error_message
 
 
 def render_result_item(
@@ -331,10 +372,8 @@ def render_result_item(
     Render a single search result item.
     """
     if is_top:
-        st.markdown(
-            f'<div class="top-result-highlight">{EMOJI_MEDAL} <strong>TOP RESULT</strong></div>',
-            unsafe_allow_html=True
-        )
+        # Display top result indicator safely
+        st.markdown("📍 **TOP RESULT**")
 
     # Format score and metadata
     score = result.get('score', 0)
@@ -342,9 +381,10 @@ def render_result_item(
     index_name = result.get('index', '?')
     namespace = result.get('namespace', '__default__')
 
+    # Display metadata safely (escaping key value which could contain user input)
     st.markdown(
         f"**{index}. Score:** {score:.3f}  \n"
-        f"_Document:_ `{key}`  •  _Index:_ `{index_name}`  •  _Namespace:_ `{namespace}`"
+        f"_Document:_ `{escape(str(key))}`  •  _Index:_ `{escape(str(index_name))}`  •  _Namespace:_ `{escape(str(namespace))}`"
     )
 
     # Display text snippet
@@ -365,6 +405,16 @@ def render_result_item(
 
 def main():
     """Main application function."""
+    # Initialise rate limiter with Redis client if available
+    try:
+        redis_client = ClientManager.get_redis()
+        initialise_rate_limiter(redis_client)
+        logging.info("Rate limiter initialised with Redis backend")
+    except Exception as e:
+        logging.warning(
+            "Could not initialise Redis-backed rate limiter: %s - using in-memory", e)
+        initialise_rate_limiter(None)  # Falls back to in-memory
+
     # Setup page
     setup_page_config()
     render_custom_css()
@@ -440,7 +490,7 @@ def display_system_status():
 def handle_direct_response(response: str):
     """Handle direct responses without search."""
     with st.chat_message("assistant", avatar=EMOJI_GORILLA):
-        st.markdown(response)
+        safe_markdown(response)
         st.session_state.messages.append({
             "role": "assistant",
             "content": response
@@ -511,8 +561,8 @@ def handle_no_results():
 
 def handle_low_score_results(answer: str, results: list[dict[str, Any]]):
     """Handle case when results have scores below threshold."""
-    st.markdown(answer)
-    display_low_score_warning()
+    safe_markdown(answer)
+    display_safe_low_score_warning()
 
     st.session_state.messages.append({
         "role": "assistant",
@@ -530,11 +580,11 @@ def handle_successful_results(
     """Handle successful search results."""
     if answer:
         # Display LLM-generated answer
-        st.markdown(answer)
+        safe_markdown(answer)
 
         # Display publication date info prominently
         if publication_date_info:
-            display_publication_date_info(publication_date_info)
+            display_safe_publication_date_info(publication_date_info)
 
         # Store message with results and publication date info
         st.session_state.messages.append({
@@ -549,10 +599,25 @@ def handle_successful_results(
 
 
 def handle_search_error(error: Exception):  # pylint: disable=broad-except
-    """Handle errors during search."""
-    error_msg = ERROR_MESSAGE_TEMPLATE.format(error=str(error))
+    """Handle errors during search with environment-aware messages.
+
+    In production: Shows generic messages to prevent information disclosure.
+    In development: Shows error details for debugging.
+    """
+    # Log sanitized error server-side (always sanitized for security)
+    logging.error("Search error: %s", sanitise_error(error))
+
+    # Show appropriate error message based on environment
+    if IS_PRODUCTION:
+        # Generic message in production to prevent information disclosure
+        error_msg = ERROR_MESSAGE_TEMPLATE.format(
+            error="search service"
+        )
+    else:
+        # Detailed message in development for debugging
+        error_msg = f"Error during search: {sanitise_error(error)}"
+
     st.error(error_msg)
-    logging.error("Search error: %s", error, exc_info=True)
 
     st.session_state.messages.append({
         "role": "assistant",
@@ -575,7 +640,7 @@ def display_direct_results(results: list[dict[str, Any]], publication_date_info:
 
     # Display publication date info
     if publication_date_info:
-        display_publication_date_info(publication_date_info)
+        display_safe_publication_date_info(publication_date_info)
 
     # Store in session
     st.session_state.messages.append({

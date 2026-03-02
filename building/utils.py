@@ -25,9 +25,8 @@ from typing import Optional, Any
 from difflib import get_close_matches, SequenceMatcher
 import logging
 import threading
-from .normaliser import normalise_building_name
-from .cache import _CACHE_STATE
 from pinecone_utils import open_index
+from input_validator import validate_building_name
 from config import (
     get_index_config,
     BUILDING_UTILS_FUZZY_MATCH_THRESHOLD,
@@ -36,6 +35,9 @@ from config import (
 )
 from emojis import (EMOJI_CROSS,
                     EMOJI_BUILDING, EMOJI_CAUTION, EMOJI_TICK, EMOJI_SEARCH)
+from .normaliser import normalise_building_name
+from .cache import _CACHE_STATE
+
 # ============================================================================
 # BUILDING NAME CACHE (populated from Pinecone at startup)
 # ============================================================================
@@ -287,9 +289,17 @@ def resolve_building_name_fuzzy(raw_name: Optional[str]) -> Optional[str]:
     Resolve any raw building name to a canonical building name
     using fuzzy matching + alias lookup + normalisation.
 
+    Validates building name for security to prevent injection attacks.
+
     This consolidates logic currently scattered inside search_operations.
     """
     if not raw_name:
+        return None
+
+    # Validate building name for security
+    is_valid, error_msg = validate_building_name(raw_name)
+    if not is_valid:
+        logging.warning("Invalid building name provided: %s", error_msg)
         return None
 
     name = raw_name.strip().lower()
@@ -348,24 +358,28 @@ def create_building_metadata_filter(building_filter: str) -> Optional[dict[str, 
                     filter_conditions.append({field: {"$eq": alias.title()}})
 
     # Add conditions for all known metadata field variations
+    # Optimize: pre-compute unique lowercase variations to avoid redundant transformations
     canonical = _BUILDING_NAMES_CACHE.get(
         building_filter.lower(), building_filter)
     if canonical in _METADATA_FIELDS_CACHE:
-        for variation in _METADATA_FIELDS_CACHE[canonical]:
+        # Use set to collect unique lowercase variations
+        unique_variations = {v.lower()
+                             for v in _METADATA_FIELDS_CACHE[canonical]}
+        for variation in unique_variations:
             for field in BUILDING_METADATA_FIELDS:
                 filter_conditions.append({field: {"$eq": variation}})
-                filter_conditions.append({field: {"$eq": variation.lower()}})
-                filter_conditions.append({field: {"$eq": variation.title()}})
-                filter_conditions.append({field: {"$eq": variation.upper()}})
 
-    # Remove duplicates while preserving order
+    # Remove duplicates while preserving order using frozenset for better performance
     seen = set()
     unique_conditions = []
     for condition in filter_conditions:
-        # Convert dict to string for comparison
-        condition_str = str(sorted(condition.items()))
-        if condition_str not in seen:
-            seen.add(condition_str)
+        # Use frozenset for efficient comparison of dict items
+        condition_key = frozenset(
+            (k, tuple(v.items()) if isinstance(v, dict) else v)
+            for k, v in condition.items()
+        )
+        if condition_key not in seen:
+            seen.add(condition_key)
             unique_conditions.append(condition)
 
     return {"$or": unique_conditions} if unique_conditions else None
@@ -558,19 +572,13 @@ def populate_building_cache_from_index(
                             _BUILDING_ALIASES_CACHE[alias_lower] = canonical
                             new_aliases_count += 1
 
-                        # Always tokenize, not only when full alias is new
+                        # Tokenize to catch standalone short aliases like "bdfi"
                         tokens = re.split(r"[,\[\]]", alias_lower)
                         for token in tokens:
                             token = token.strip().replace(" ", "").replace(".", "")
                             if token and token not in _BUILDING_ALIASES_CACHE:
                                 _BUILDING_ALIASES_CACHE[token] = canonical
                                 new_aliases_count += 1
-                            # NEW: also split alias into tokens to catch standalone short aliases like "bdfi"
-                            for token in re.split(r"[,\[\]]", alias_lower):
-                                token = token.strip()
-                                token = token.replace(" ", "").replace(".", "")
-                                if token and token not in _BUILDING_ALIASES_CACHE:
-                                    _BUILDING_ALIASES_CACHE[token] = canonical
 
                         # Also add to metadata fields
                         _METADATA_FIELDS_CACHE[canonical].add(alias_str)
@@ -960,14 +968,23 @@ def validate_building_name_fuzzy(
     IMPROVED: Checks all metadata field variations with 80% threshold and
     rejects invalid/maintenance-like building names consistently.
 
+    Includes input validation to prevent injection attacks.
+
     Args:
         extracted_name: Extracted building name candidate
         known_buildings: List of known building names
+        log_matches: Whether to log match details (default: True)
 
     Returns:
         Canonical building name if matched, None otherwise
     """
     if not extracted_name:
+        return None
+
+    # Validate extracted name for security
+    is_valid, error_msg = validate_building_name(extracted_name)
+    if not is_valid:
+        logging.warning("Invalid building name in fuzzy match: %s", error_msg)
         return None
 
     # Use cache if no explicit list provided
@@ -1224,7 +1241,8 @@ def result_matches_building(result: dict[str, Any], target_building: str) -> boo
 
     # Compare each value to the target building using fuzzy validation
     for candidate in candidate_values:
-        validated = validate_building_name_fuzzy(str(candidate), log_matches=False)
+        validated = validate_building_name_fuzzy(
+            str(candidate), log_matches=False)
         if not validated:
             continue
         candidate_norm = normalise_building_name(validated)

@@ -13,8 +13,11 @@ from typing import Optional
 # ===========================================================================
 # CORE CONSTANTS
 # ===========================================================================
-# Debug logging for query routing
-DEBUG_QUERY_MODE = True
+# Production environment detection (controls error detail level and debug mode)
+IS_PRODUCTION = os.getenv("ENVIRONMENT", "development").lower() == "production"
+
+# Debug logging for query routing (disabled in production for security)
+DEBUG_QUERY_MODE = not IS_PRODUCTION
 
 DEFAULT_NAMESPACE: Optional[str] = None  # None means default namespace
 

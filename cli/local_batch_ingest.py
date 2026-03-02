@@ -4,19 +4,19 @@ CLI entrypoint for AskAlfred local batch ingestion.
 """
 
 from __future__ import annotations
+import logging
+import argparse
+from dotenv import load_dotenv
+from ingest import validate_namespace_routing, ingest_local_directory_with_progress, IngestContext
+from file_operations_validator import validate_directory_safety, FileOperationSecurityError
+from config import BatchIngestConfig, NAMESPACE_MAPPINGS
+from alfred_exceptions import ConfigError, UnexpectedError
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-
-from alfred_exceptions import ConfigError, UnexpectedError
-from config import BatchIngestConfig, NAMESPACE_MAPPINGS
-from ingest import validate_namespace_routing, ingest_local_directory_with_progress, IngestContext
-from dotenv import load_dotenv
-import argparse
-import logging
 
 
 def parse_args() -> argparse.Namespace:
@@ -91,7 +91,14 @@ def main() -> int:
         config = BatchIngestConfig.from_env()
 
         if args.path:
-            config.local_path = args.path
+            # Validate path argument for security
+            try:
+                validated_path = validate_directory_safety(args.path)
+                config.local_path = str(validated_path)
+                logging.info("Validated ingest directory: %s", validated_path)
+            except FileOperationSecurityError as e:
+                logging.error("Invalid path argument: %s", e)
+                return 1
         if args.io_workers:
             config.max_io_workers = args.io_workers
         if args.parse_workers:

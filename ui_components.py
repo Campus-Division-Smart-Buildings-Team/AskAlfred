@@ -9,6 +9,7 @@ import os
 from datetime import datetime, timezone
 import streamlit as st
 import requests
+from markupsafe import escape
 from clients import get_redis
 from config import (
     TARGET_INDEXES,
@@ -437,16 +438,16 @@ def display_search_results(results):
 
 
 def display_publication_date_info(publication_date_info):
-    """Display publication date information."""
+    """Display publication date information safely."""
     if publication_date_info:
-        st.markdown(f'<div class="publication-date">{publication_date_info}</div>',
-                    unsafe_allow_html=True)
+        # Escape HTML to prevent injection attacks
+        safe_content = escape(publication_date_info)
+        st.markdown(f"📅 {safe_content}")
 
 
 def display_low_score_warning():
-    """Display low score warning."""
-    st.markdown('<div class="low-score-warning">⚠️ Results below relevance threshold</div>',
-                unsafe_allow_html=True)
+    """Display low score warning safely."""
+    st.markdown("⚠️ **Results below relevance threshold**")
 
 
 def initialise_chat_history():
@@ -464,18 +465,12 @@ def initialise_chat_history():
 
 
 def display_chat_history():
-    """Display all chat messages from history."""
-    # Get all messages (make a copy to avoid mutation issues)
-    # messages_to_display = st.session_state.messages.copy()
-
-    # if st.session_state.get("processing_query", False):
-    #     # If processing, exclude the last assistant message to prevent duplication
-    #     if messages_to_display and messages_to_display[-1]["role"] == "assistant":
-    #         messages_to_display = messages_to_display[:-1]
-
+    """Display all chat messages from history safely."""
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+            # Safely render message content with HTML escaping
+            safe_content = escape(message["content"])
+            st.markdown(safe_content, unsafe_allow_html=False)
 
             # Display publication date info if it exists
             if "publication_date_info" in message and message["publication_date_info"]:

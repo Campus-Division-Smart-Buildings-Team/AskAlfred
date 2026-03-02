@@ -2,15 +2,23 @@
 # -*- coding: utf-8 -*-
 """
 Client initialisation for Pinecone, OpenAI, and Redis.
+
+Credentials are loaded on-demand via SecureCredentialManager:
+- Not stored in memory longer than necessary
+- Fresh fetch from environment each time
+- Sanitized error messages to prevent credential exposure
 """
 
 import os
+import logging
 from typing import Optional
 from pinecone import Pinecone
 from openai import OpenAI
 from redis import Redis
 
 from alfred_exceptions import ConfigError
+from log_sanitiser import sanitise_message
+from credential_manager import SecureCredentialManager
 
 # print("pinecone loaded from:", Pinecone.__module__)
 # print("openai loaded from:", OpenAI.__module__)
@@ -29,31 +37,50 @@ class ClientManager:
         """
         Lazy-load Pinecone client.
         Only creates client when first needed.
+        Credentials fetched fresh from environment each time.
         """
         if cls._pc is not None:
             return cls._pc
 
-        api_key = os.environ.get("PINECONE_API_KEY")
-        if not api_key:
+        try:
+            # Get credential fresh from environment (not cached in memory)
+            api_key = SecureCredentialManager.get_pinecone_api_key()
+            cls._pc = Pinecone(api_key=api_key)
+            return cls._pc
+        except KeyError as e:
+            logging.error("Pinecone API key not configured")
             raise ConfigError(
-                "PINECONE_API_KEY is not set. "
-                "Set it in the environment or mock get_pc() during tests."
-            )
-
-        cls._pc = Pinecone(api_key=api_key)
-        return cls._pc
+                "PINECONE_API_KEY not set. Please configure credentials."
+            ) from e
+        except Exception as e:
+            # Log sanitized error - credential manager has already redacted the key
+            logging.error("Failed to initialise Pinecone: %s",
+                          sanitise_message(str(e)))
+            raise ConfigError("Failed to initialise Pinecone client") from e
 
     @classmethod
     def get_oai(cls) -> OpenAI:
+        """
+        Lazy-load OpenAI client.
+        Credentials fetched fresh from environment each time.
+        """
         if cls._oai is not None:
             return cls._oai
 
-        api_key = os.environ.get("OPENAI_API_KEY")
-        if not api_key:
-            raise ConfigError("Missing OPENAI_API_KEY")
-
-        cls._oai = OpenAI(api_key=api_key)
-        return cls._oai
+        try:
+            # Get credential fresh from environment (not cached in memory)
+            api_key = SecureCredentialManager.get_openai_api_key()
+            cls._oai = OpenAI(api_key=api_key)
+            return cls._oai
+        except KeyError as e:
+            logging.error("OpenAI API key not configured")
+            raise ConfigError(
+                "OPENAI_API_KEY not set. Please configure credentials.") from e
+        except Exception as e:
+            # Log sanitized error - credential manager has already redacted the key
+            logging.error("Failed to initialise OpenAI: %s",
+                          sanitise_message(str(e)))
+            raise ConfigError("Failed to initialise OpenAI client") from e
 
     @classmethod
     def get_redis(cls) -> Redis:
@@ -63,30 +90,40 @@ class ClientManager:
         """
         if cls._redis is not None:
             return cls._redis
+
         redis_host = os.environ.get("REDIS_HOST")
-        redis_port = int(os.environ.get("REDIS_PORT", 0)
-                         ) if os.environ.get("REDIS_PORT") else 0
+        redis_port_str = os.environ.get("REDIS_PORT", "0")
         redis_username = os.environ.get("REDIS_USERNAME", "")
         redis_password = os.environ.get("REDIS_PASSWORD", "")
 
-        if not redis_host or not redis_port:
+        if not redis_host:
             raise ConfigError(
-                "REDIS_HOST or REDIS_PORT not set"
+                "REDIS_HOST is not set in environment"
             )
-        try:
-            port = int(redis_port)
-        except ValueError as exc:
-            raise ConfigError(f"Invalid REDIS_PORT: {redis_port}") from exc
 
-        cls._redis = Redis(
-            host=redis_host,
-            port=port,
-            decode_responses=True,
-            username=redis_username,
-            password=redis_password,
-            health_check_interval=30,
-        )
-        return cls._redis
+        try:
+            redis_port = int(redis_port_str)
+        except (ValueError, TypeError) as exc:
+            raise ConfigError(f"Invalid REDIS_PORT: {redis_port_str}") from exc
+
+        if redis_port <= 0 or redis_port > 65535:
+            raise ConfigError("REDIS_PORT must be between 1 and 65535")
+
+        try:
+            cls._redis = Redis(
+                host=redis_host,
+                port=redis_port,
+                decode_responses=True,
+                username=redis_username if redis_username else None,
+                password=redis_password if redis_password else None,
+                health_check_interval=30,
+            )
+            return cls._redis
+        except Exception as e:
+            # Log sanitized error
+            logging.error("Failed to initialise Redis: %s",
+                          sanitise_message(str(e)))
+            raise ConfigError("Failed to initialise Redis client") from e
 
 
 def get_pc() -> Pinecone:
