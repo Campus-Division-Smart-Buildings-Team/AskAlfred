@@ -7,7 +7,7 @@ Shared building cache utilities to avoid circular imports.
 _CACHE_STATE = {
     "populated": False,
 }
-BUILDING_NAMES_CACHE: dict[str, str] = {}   # normalised → canonical
+BUILDING_NAMES_CACHE: dict[str, str] = {}  # normalised → canonical
 BUILDING_ALIASES_CACHE: dict[str, str] = {}  # alias → canonical
 METADATA_FIELDS_CACHE: dict[str, set[str]] = {}
 INDEXES_WITH_BUILDINGS: list[str] = []

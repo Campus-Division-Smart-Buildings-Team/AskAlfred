@@ -8,17 +8,20 @@ Delegates logic to counting_queries.generate_property_condition_answer.
 """
 
 import re
-# First party import
-from query_types import QueryType
+
 from query_context import QueryContext
 from query_result import QueryResult
+
+# First party import
+from query_types import QueryType
 from structured_queries import (
-    is_property_condition_query,
-    is_maintenance_query,
-    is_ranking_query,
+    generate_property_condition_answer,
     is_counting_query,
-    generate_property_condition_answer
+    is_maintenance_query,
+    is_property_condition_query,
+    is_ranking_query,
 )
+
 # Local import
 from .base_handler import BaseQueryHandler
 
@@ -33,29 +36,23 @@ class PropertyHandler(BaseQueryHandler):
 
         # Expanded and precise patterns for property conditions
         self.patterns = [
-
             # direct "condition A/B/C/D"
             re.compile(r"\bcondition\s*[a-d]\b", re.IGNORECASE),
-
             # "in condition A"
             re.compile(r"\b(?:in|is)\s+condition\s+[a-d]\b", re.IGNORECASE),
-
             # derelict
             re.compile(r"\bderelict\b", re.IGNORECASE),
-
             # explicit phrase
             re.compile(r"\bproperty\s+condition\b", re.IGNORECASE),
-
             # properly handle the test case
             re.compile(
                 r"\bwhich\s+buildings?\s+(are|is)\s+condition\s+[a-d](?:\b|[?!.,])",
-                re.IGNORECASE
+                re.IGNORECASE,
             ),
-
             # general fallback for "which buildings ... condition A"
             re.compile(
                 r"\bwhich\s+buildings?.*?\bcondition\s+[a-d](?:\b|[?!.,])",
-                re.IGNORECASE
+                re.IGNORECASE,
             ),
         ]
 
@@ -73,8 +70,7 @@ class PropertyHandler(BaseQueryHandler):
 
         # Avoid overlap with other handlers
         if is_maintenance_query(q):
-            self.logger.info(
-                "🚫 Skipping because query is maintenance-related.")
+            self.logger.info("🚫 Skipping because query is maintenance-related.")
             return False
         if is_ranking_query(q):
             self.logger.info("🚫 Skipping because query is ranking-related.")

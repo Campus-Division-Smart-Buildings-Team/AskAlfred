@@ -1,41 +1,43 @@
 #!/usr/bin/env python3
 """
 Upsert handling for Alfred Local Ingestion.
-This module defines the 
-UpsertPolicy, UpsertExecutor, Batcher, and Dispatcher classes, 
-which together manage the logic for 
-- batching vectors, 
-- executing upsert operations with retries and splits, and 
-- dispatching to worker threads if configured. 
+This module defines the
+UpsertPolicy, UpsertExecutor, Batcher, and Dispatcher classes,
+which together manage the logic for
+- batching vectors,
+- executing upsert operations with retries and splits, and
+- dispatching to worker threads if configured.
 
-The VectorWriteCoordinator class serves as a high-level interface for adding vectors 
+The VectorWriteCoordinator class serves as a high-level interface for adding vectors
 and ensuring they are processed according to the defined policies.
 
-The UpsertPolicy class encapsulates the decision logic for 
-when to retry, split, or fail a batch after an upsert failure, 
-based on the type of error, retry count, split depth, and batch size. 
+The UpsertPolicy class encapsulates the decision logic for
+when to retry, split, or fail a batch after an upsert failure,
+based on the type of error, retry count, split depth, and batch size.
 
-The UpsertExecutor class handles the actual execution of upsert attempts and records relevant metrics. 
+The UpsertExecutor class handles the actual execution of upsert attempts and records relevant metrics.
 
-The Batcher class manages the buffering and grouping of vectors into batches ready for upsert. 
+The Batcher class manages the buffering and grouping of vectors into batches ready for upsert.
 
-The Dispatcher class abstracts the logic for either enqueuing batches for worker processing 
+The Dispatcher class abstracts the logic for either enqueuing batches for worker processing
 or executing them inline, depending on configuration.
 
 This modular design allows for clean separation of concerns, making the code easier to maintain and test.
 """
-import time
-import threading
+
 import random
-from datetime import datetime, timezone
+import threading
+import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from enum import Enum, auto
 from queue import Queue
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+
 from alfred_exceptions import (
     ExternalServiceError,
-    RollbackError,
     RetriableError,
+    RollbackError,
 )
 from config import (
     INGEST_BACKOFF_BASE,
@@ -47,18 +49,19 @@ from config import (
     INGEST_UPSERT_SPLIT_MIN_BATCH_SIZE,
 )
 
+from .document_processor import Writer
 from .helpers import (
     UpsertQueueItem,
     _estimate_batch_bytes,
     _estimate_metadata_bytes_per_vector,
-    _summarise_batch_namespaces,
     _is_rate_limit_error,
+    _summarise_batch_namespaces,
 )
 from .transaction import upsert_vectors_atomic
-from .document_processor import Writer
 from .utils import (
     IngestionProgressTracker,
 )
+
 if TYPE_CHECKING:
     from .context import IngestContext
 
@@ -113,9 +116,10 @@ class UpsertPolicy:
 
     def backoff_seconds(self, retry_index: int) -> float:
         """Calculate backoff for retry attempt (0-indexed)."""
-        exp = min(INGEST_BACKOFF_CAP, INGEST_BACKOFF_BASE * (2 ** retry_index))
-        jitter = INGEST_BACKOFF_JITTER_MIN + \
-            self._rng.random() * INGEST_BACKOFF_JITTER_SPAN
+        exp = min(INGEST_BACKOFF_CAP, INGEST_BACKOFF_BASE * (2**retry_index))
+        jitter = (
+            INGEST_BACKOFF_JITTER_MIN + self._rng.random() * INGEST_BACKOFF_JITTER_SPAN
+        )
         return min(INGEST_BACKOFF_CAP, exp + jitter)
 
     @staticmethod
@@ -168,6 +172,7 @@ class UpsertPolicy:
 # ---------------------------------------------------------------------------
 # 3. UpsertExecutor  (effects — one attempt, no sleeping, no re-queueing)
 # ---------------------------------------------------------------------------
+
 
 class UpsertExecutor:
     """
@@ -222,7 +227,8 @@ class UpsertExecutor:
             stats.observe_histogram("upsert_batch_bytes", bytes_est)
         if metadata_avg is not None:
             stats.observe_histogram(
-                "upsert_batch_metadata_bytes_per_vector", metadata_avg)
+                "upsert_batch_metadata_bytes_per_vector", metadata_avg
+            )
         self._ctx.logger.debug(
             "Upsert batch: %.3fs (%d vectors, ~%d bytes, ~%d metadata bytes/vector,"
             " retry=%d, namespaces=%s)",
@@ -251,8 +257,7 @@ class UpsertExecutor:
         error: str | None = None,
     ) -> None:
         try:
-            _record_ingested_files(
-                self._ctx, batch, status=status, error=error)
+            _record_ingested_files(self._ctx, batch, status=status, error=error)
         except Exception as err:  # pylint: disable=broad-except
             self._ctx.logger.warning("FileRegistry update failed: %s", err)
 
@@ -261,13 +266,16 @@ class UpsertExecutor:
 # 4. Batcher  (pure — buffer/group/flush decisions)
 # ---------------------------------------------------------------------------
 
+
 class Batcher:
     """
     Pure batching logic: groups vectors by namespace and decides when to flush.
     No I/O. Returns ready batches; caller submits them.
     """
 
-    def __init__(self, *, batch_size: int, max_pending: int, flush_seconds: float) -> None:
+    def __init__(
+        self, *, batch_size: int, max_pending: int, flush_seconds: float
+    ) -> None:
         self._batch_size = max(1, batch_size)
         self._max_pending = max(1, max_pending)
         self._flush_seconds = max(0.0, flush_seconds)
@@ -359,7 +367,7 @@ class Batcher:
             return ready
         self._pending -= len(buf)
         for i in range(0, len(buf), self._batch_size):
-            ready.append(buf[i: i + self._batch_size])
+            ready.append(buf[i : i + self._batch_size])
         return ready
 
     def _split_large(
@@ -369,13 +377,14 @@ class Batcher:
         ready: list[list[dict[str, Any]]] = []
         for group in self._group_by_namespace(vectors).values():
             for i in range(0, len(group), self._batch_size):
-                ready.append(group[i: i + self._batch_size])
+                ready.append(group[i : i + self._batch_size])
         return ready
 
 
 # ---------------------------------------------------------------------------
 # 5. Dispatcher  (effects — queue put + worker lifecycle)
 # ---------------------------------------------------------------------------
+
 
 class Dispatcher:
     """
@@ -418,8 +427,7 @@ class Dispatcher:
         queue_start = time.perf_counter()
         self._upsert_queue.put((batch, 0, 0), block=True)
         queue_wait = time.perf_counter() - queue_start
-        self._ctx.stats.observe_timing(
-            "upsert_queue_put_wait_seconds", queue_wait)
+        self._ctx.stats.observe_timing("upsert_queue_put_wait_seconds", queue_wait)
 
     def _execute_inline(
         self,
@@ -428,8 +436,7 @@ class Dispatcher:
         progress: IngestionProgressTracker | None = None,
     ) -> None:
         if progress:
-            progress.write_message(
-                f"Upserting batch of {len(batch)} vectors...")
+            progress.write_message(f"Upserting batch of {len(batch)} vectors...")
 
         executor = UpsertExecutor(self._ctx, self._writer)
         policy = UpsertPolicy(rng=random.Random())
@@ -453,20 +460,17 @@ class Dispatcher:
                     error,
                 )
 
-                action = policy.next_action(
-                    error, retry_index, split_depth, len(batch))
+                action = policy.next_action(error, retry_index, split_depth, len(batch))
 
                 if isinstance(action, _FailAction):
-                    self._ctx.logger.exception(
-                        "Inline upsert failed: %s", error)
+                    self._ctx.logger.exception("Inline upsert failed: %s", error)
                     self._ctx.stats.increment("upsert_batch_failures_total")
                     _mark_batch_failed(self._ctx, batch, reason=action.reason)
                     raise
 
                 elif isinstance(action, _RetryAction):
                     if _is_rate_limit_error(error):
-                        self._ctx.stats.increment(
-                            "upsert_throttle_events_total")
+                        self._ctx.stats.increment("upsert_throttle_events_total")
                         self._ctx.logger.warning(
                             "Rate limit/throttle detected in inline retry %d",
                             retry_index + 1,
@@ -481,7 +485,8 @@ class Dispatcher:
                     self._ctx.stats.increment("upsert_batch_retries_total")
                     sleep_secs = policy.backoff_seconds(retry_index)
                     self._ctx.stats.observe_timing(
-                        "upsert_backoff_sleep_seconds", sleep_secs)
+                        "upsert_backoff_sleep_seconds", sleep_secs
+                    )
                     time.sleep(sleep_secs)
                     retry_index += 1
 
@@ -516,8 +521,7 @@ class VectorWriteCoordinator:
         self._ctx = ctx
         self._stop_event = stop_event
         self._batcher = Batcher(
-            batch_size=max(
-                1, min(int(upsert_batch), max(1, int(max_pending_vectors)))),
+            batch_size=max(1, min(int(upsert_batch), max(1, int(max_pending_vectors)))),
             max_pending=max(1, int(max_pending_vectors)),
             flush_seconds=max(0.0, float(flush_seconds)),
         )
@@ -551,6 +555,7 @@ class VectorWriteCoordinator:
 
 
 # Add this function before the UpsertExecutor class (around line 160-170)
+
 
 def _mark_batch_state(
     ctx: "IngestContext",
@@ -616,10 +621,13 @@ def _record_ingested_files(
         for file_id in file_ids:
             try:
                 ctx.file_registry.mark_state(
-                    file_id=file_id, processing_token="", status=status, error=error)
+                    file_id=file_id, processing_token="", status=status, error=error
+                )
             except Exception as err:  # pylint: disable=broad-except
                 ctx.logger.debug(
-                    "Failed to update file registry for %s: %s", file_id, err)
+                    "Failed to update file registry for %s: %s", file_id, err
+                )
+
 
 # ---------------------------------------------------------------------------
 # Upsert worker  (Delegates to UpsertPolicy + UpsertExecutor)
@@ -675,25 +683,25 @@ def _upsert_worker(
                 error,
             )
 
-            action = policy.next_action(
-                error, retry_index, split_depth, len(batch))
+            action = policy.next_action(error, retry_index, split_depth, len(batch))
 
             if isinstance(action, _FailAction):
                 if action.reason == "rollback_failure":
-                    ctx.logger.critical(
-                        "Upsert worker rollback failed: %s", error)
+                    ctx.logger.critical("Upsert worker rollback failed: %s", error)
                     try:
                         ctx.stats.increment("rollback_failures_total")
                         ctx.event_sink.emit_event(
                             {
                                 "event_type": "rollback_failure",
-                                "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
+                                "timestamp": datetime.now(timezone.utc).isoformat()
+                                + "Z",
                                 "error": str(error),
                             }
                         )
                     except Exception as alert_error:  # pylint: disable=broad-except
                         ctx.logger.warning(
-                            "Rollback alert emission failed: %s", alert_error)
+                            "Rollback alert emission failed: %s", alert_error
+                        )
                     errors.append(error)
                     stop_event.set()
                 else:
@@ -707,8 +715,7 @@ def _upsert_worker(
                     ctx.logger.warning(
                         "Shutdown in progress; failing batch instead of retrying"
                     )
-                    _mark_batch_failed(
-                        ctx, batch, reason="shutdown_during_retry")
+                    _mark_batch_failed(ctx, batch, reason="shutdown_during_retry")
                 else:
                     # Check for rate limiting / throttling
                     if _is_rate_limit_error(error):
@@ -726,8 +733,7 @@ def _upsert_worker(
                     )
                     ctx.stats.increment("upsert_batch_retries_total")
                     sleep_secs = policy.backoff_seconds(retry_index)
-                    ctx.stats.observe_timing(
-                        "upsert_backoff_sleep_seconds", sleep_secs)
+                    ctx.stats.observe_timing("upsert_backoff_sleep_seconds", sleep_secs)
                     time.sleep(sleep_secs)
                     upsert_queue.put((batch, retry_index + 1, split_depth))
 
@@ -737,8 +743,7 @@ def _upsert_worker(
                     ctx.logger.warning(
                         "Shutdown in progress; failing batch instead of splitting"
                     )
-                    _mark_batch_failed(
-                        ctx, batch, reason="shutdown_during_split")
+                    _mark_batch_failed(ctx, batch, reason="shutdown_during_split")
                 else:
                     ctx.logger.warning(
                         "Upsert batch failed after retries; splitting batch of %d",

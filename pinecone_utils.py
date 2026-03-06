@@ -4,10 +4,11 @@
 Pinecone utilities for index management and search operations.
 """
 
-from typing import Any, Optional
 import json
 import logging
-from clients import get_pc, get_oai
+from typing import Any, Optional
+
+from clients import get_oai, get_pc
 from config import normalise_ns
 
 
@@ -72,7 +73,14 @@ def embed_texts(texts: list[str], model: str) -> list[list[float]]:
     return [d.embedding for d in res.data]
 
 
-def vector_query(idx: Any, namespace: Optional[str], query: str, k: int, embed_model: str, metadata_filter: Optional[dict] = None) -> dict[str, Any]:
+def vector_query(
+    idx: Any,
+    namespace: Optional[str],
+    query: str,
+    k: int,
+    embed_model: str,
+    metadata_filter: Optional[dict] = None,
+) -> dict[str, Any]:
     """
     Perform vector search using client-side embeddings.
 
@@ -90,18 +98,14 @@ def vector_query(idx: Any, namespace: Optional[str], query: str, k: int, embed_m
     vec = embed_texts([query], embed_model)[0]
 
     # Build query parameters, only include namespace if not None
-    query_params = {
-        'vector': vec,
-        'top_k': k,
-        'include_metadata': True
-    }
+    query_params = {"vector": vec, "top_k": k, "include_metadata": True}
 
     namespace = normalise_ns(namespace)
     if namespace is not None:
-        query_params['namespace'] = namespace
+        query_params["namespace"] = namespace
 
     if metadata_filter:
-        query_params['filter'] = metadata_filter
+        query_params["filter"] = metadata_filter
 
     return idx.query(**query_params)
 
@@ -134,25 +138,25 @@ def query_all_chunks(
     try:
         # Build query parameters
         query_params = {
-            'vector': query_vector,
-            'top_k': min(top_k, 10000),  # Pinecone max limit
-            'include_metadata': include_metadata
+            "vector": query_vector,
+            "top_k": min(top_k, 10000),  # Pinecone max limit
+            "include_metadata": include_metadata,
         }
         namespace = normalise_ns(namespace)
         if namespace is not None:
-            query_params['namespace'] = namespace
+            query_params["namespace"] = namespace
 
         if filter_dict:
-            query_params['filter'] = filter_dict
+            query_params["filter"] = filter_dict
 
         # Execute query
         response = index.query(**query_params)
 
         # Extract matches
-        if hasattr(response, 'matches'):
+        if hasattr(response, "matches"):
             matches = response.matches
-        elif isinstance(response, dict) and 'matches' in response:
-            matches = response['matches']
+        elif isinstance(response, dict) and "matches" in response:
+            matches = response["matches"]
         else:
             logging.warning("Unexpected response format from Pinecone query")
             return []
@@ -160,15 +164,15 @@ def query_all_chunks(
         # Convert to list of dicts
         results = []
         for match in matches:
-            if hasattr(match, 'to_dict'):
+            if hasattr(match, "to_dict"):
                 match_dict = match.to_dict()
             elif isinstance(match, dict):
                 match_dict = match
             else:
                 match_dict = {
-                    'id': getattr(match, 'id', None),
-                    'score': getattr(match, 'score', 0.0),
-                    'metadata': getattr(match, 'metadata', {})
+                    "id": getattr(match, "id", None),
+                    "score": getattr(match, "score", 0.0),
+                    "metadata": getattr(match, "metadata", {}),
                 }
             results.append(match_dict)
 
@@ -197,10 +201,7 @@ def _as_dict(obj: Any) -> dict[str, Any]:
 
 def safe_metadata(m):
     if isinstance(m, dict):
-        return (m.get("metadata")
-                or m.get("values")
-                or m.get("fields")
-                or {})
+        return m.get("metadata") or m.get("values") or m.get("fields") or {}
     if hasattr(m, "metadata"):
         return m.metadata or {}
     if hasattr(m, "values"):
@@ -243,38 +244,55 @@ def normalise_matches(raw: Any) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
         for m in data["matches"]:
             md = desanitise_metadata_from_pinecone(safe_metadata(m))
-            out.append({
-                "id": m.get("id"),
-                "score": m.get("score"),
-                "metadata": md or {},
-                "text": (md or {}).get("text") or (md or {}).get("content") or (md or {}).get("chunk") or (
-                    md or {}).get("body") or "",
-                "source": (md or {}).get("source") or (md or {}).get("url") or (md or {}).get("doc") or "",
-                # Extract key from metadata
-                "key": (md or {}).get("key") or "",
-                # Skip publication_date from metadata as it's misleading
-            })
+            out.append(
+                {
+                    "id": m.get("id"),
+                    "score": m.get("score"),
+                    "metadata": md or {},
+                    "text": (md or {}).get("text")
+                    or (md or {}).get("content")
+                    or (md or {}).get("chunk")
+                    or (md or {}).get("body")
+                    or "",
+                    "source": (md or {}).get("source")
+                    or (md or {}).get("url")
+                    or (md or {}).get("doc")
+                    or "",
+                    # Extract key from metadata
+                    "key": (md or {}).get("key") or "",
+                    # Skip publication_date from metadata as it's misleading
+                }
+            )
         return out
 
-    hits = (data.get("result") or {}).get(
-        "hits") if isinstance(data, dict) else []
+    hits = (data.get("result") or {}).get("hits") if isinstance(data, dict) else []
     if isinstance(hits, list) and hits:
         out = []
         for h in hits:
             fields = desanitise_metadata_from_pinecone(
                 h.get("fields") or h.get("metadata") or {}
             )
-            text_val = fields.get("text") or fields.get(
-                "content") or fields.get("chunk") or fields.get("body") or ""
-            out.append({
-                "id": h.get("_id"),
-                "score": h.get("_score"),
-                "metadata": fields,
-                "text": text_val,
-                "source": fields.get("source") or fields.get("url") or fields.get("doc") or "",
-                "key": fields.get("key") or "",  # Extract key from metadata
-                # Skip publication_date from metadata
-            })
+            text_val = (
+                fields.get("text")
+                or fields.get("content")
+                or fields.get("chunk")
+                or fields.get("body")
+                or ""
+            )
+            out.append(
+                {
+                    "id": h.get("_id"),
+                    "score": h.get("_score"),
+                    "metadata": fields,
+                    "text": text_val,
+                    "source": fields.get("source")
+                    or fields.get("url")
+                    or fields.get("doc")
+                    or "",
+                    "key": fields.get("key") or "",  # Extract key from metadata
+                    # Skip publication_date from metadata
+                }
+            )
         return out
 
     return []

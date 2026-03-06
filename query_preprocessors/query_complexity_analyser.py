@@ -1,7 +1,8 @@
 # query_complexity_analyser.py
 
-from query_preprocessors.base_preprocessor import BasePreprocessor
 import re
+
+from query_preprocessors.base_preprocessor import BasePreprocessor
 
 
 class QueryComplexityAnalyser(BasePreprocessor):

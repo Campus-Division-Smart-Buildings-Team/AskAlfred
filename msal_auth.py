@@ -7,7 +7,9 @@ Handles secure credential loading from credential manager.
 
 import logging
 from typing import Optional
+
 import msal
+
 from alfred_exceptions import ConfigError
 from credential_manager import SecureCredentialManager
 from log_sanitiser import sanitise_error
@@ -48,7 +50,9 @@ def _get_authority() -> str:
 SCOPES = ["User.Read"]  # minimal, safe default
 
 
-def build_msal_app(cache: Optional[object] = None) -> msal.ConfidentialClientApplication:
+def build_msal_app(
+    cache: Optional[object] = None,
+) -> msal.ConfidentialClientApplication:
     """
     Build MSAL ConfidentialClientApplication for Azure AD authentication.
 
@@ -67,18 +71,13 @@ def build_msal_app(cache: Optional[object] = None) -> msal.ConfidentialClientApp
         config = _get_azure_config()
 
         return msal.ConfidentialClientApplication(
-            client_id=config.get('AZURE_CLIENT_ID'),
+            client_id=config.get("AZURE_CLIENT_ID"),
             authority=_get_authority(),
-            client_credential=config.get('AZURE_CLIENT_SECRET'),
+            client_credential=config.get("AZURE_CLIENT_SECRET"),
             token_cache=cache,
         )
     except ConfigError:
         raise
     except Exception as e:
-        logger.error(
-            "Failed to build MSAL application: %s",
-            sanitise_error(e)
-        )
-        raise ConfigError(
-            "Failed to initialize Azure AD authentication"
-        ) from e
+        logger.error("Failed to build MSAL application: %s", sanitise_error(e))
+        raise ConfigError("Failed to initialize Azure AD authentication") from e

@@ -9,14 +9,16 @@ Usage:
 """
 
 from __future__ import annotations
+
 import argparse
 import cProfile
 import random
-from pathlib import Path
 import sys
-import streamlit as st
-from intent_classifier import NLPIntentClassifier, INTENT_EXAMPLES
+from pathlib import Path
 
+import streamlit as st
+
+from intent_classifier import INTENT_EXAMPLES, NLPIntentClassifier
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:

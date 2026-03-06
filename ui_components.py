@@ -8,22 +8,27 @@ Enhanced with building cache status display.
 import os
 from datetime import datetime, timezone
 from html import escape
-import streamlit as st
+
 import requests
-from sanitise_context import display_safe_publication_date_info, display_safe_low_score_warning
+import streamlit as st
+
+from building import get_building_names_from_cache, get_cache_status
 from clients import get_redis
 from config import (
-    TARGET_INDEXES,
-    SEARCH_ALL_NAMESPACES,
     DEFAULT_NAMESPACE,
-    MIN_SCORE_THRESHOLD,
-    UI_TOP_K_MIN,
-    UI_TOP_K_MAX,
-    UI_TOP_K_DEFAULT,
-    UI_SNIPPET_MAX_CHARS,
     ENABLE_SERVICE_STATUS,
+    MIN_SCORE_THRESHOLD,
+    SEARCH_ALL_NAMESPACES,
+    TARGET_INDEXES,
+    UI_SNIPPET_MAX_CHARS,
+    UI_TOP_K_DEFAULT,
+    UI_TOP_K_MAX,
+    UI_TOP_K_MIN,
 )
-from building import get_building_names_from_cache, get_cache_status
+from sanitise_context import (
+    display_safe_low_score_warning,
+    display_safe_publication_date_info,
+)
 
 
 def setup_page_config():
@@ -114,8 +119,7 @@ def render_tabs():
     tab1, tab2, tab3 = st.tabs(["Welcome", "Info", "Resources"])
 
     with tab1:
-        st.write(
-            """
+        st.write("""
             #### Hi, I'm Alfred! 👋
             You can ask me questions about the following topics: 
             - 🏢 Building Management Systems (BMS)  
@@ -125,12 +129,10 @@ def render_tabs():
             Type your question in the chat below, and I'll search across our knowledge bases to find answers.
             
             **💡 Tip:** You can use building names or their abbreviations (e.g., "BDFI" for "65 Avon Street")
-            """
-        )
+            """)
 
     with tab2:
-        st.write(
-            """
+        st.write("""
             #### ⚠️ Disclaimer
             This app is experimental and should not be used for decision-making.
             The chatbot is configured to say **"Regan has told me to say I don't know."** if the answer isn't in the knowledge base or relevance is too low (below the minimum score threshold of 0.3).
@@ -146,15 +148,13 @@ def render_tabs():
             - Search specifically for documents related to that building
             - Prioritise results from the correct building
             - Show you the building it detected in the results
-            """
-        )
+            """)
 
     with tab3:
         st.markdown("#### 💡 Example queries")
         col1, col2 = st.columns([2, 3])
         with col1:
-            st.markdown(
-                """
+            st.markdown("""
                 **FRA topics:**
                 - How many staff or visitors can Senate House accommodate?
                 - How many floors does Augustines Courtyard have?
@@ -165,11 +165,9 @@ def render_tabs():
                 - Tell me about BDFI
                 - What are the maintenance jobs at DEFRA?
 
-                """
-            )
+                """)
         with col2:
-            st.markdown(
-                """
+            st.markdown("""
                 **BMS topics:**
                 - How does the frost protection sequence operate in the Senate House BMS?
                 - How do the AHUs in Indoor Sports Hall behave?
@@ -180,8 +178,7 @@ def render_tabs():
                 - Which buildings have fras?
                 - How many maintenance requests have been raised at senate house?
                 
-                """
-            )
+                """)
 
 
 def render_sidebar():
@@ -191,16 +188,17 @@ def render_sidebar():
         # Check cache status using function instead of global variable
         try:
             cache_status = get_cache_status()
-            if cache_status['populated']:
-                building_count = cache_status.get('canonical_names', 0)
-                alias_count = cache_status.get('aliases', 0)
+            if cache_status["populated"]:
+                building_count = cache_status.get("canonical_names", 0)
+                alias_count = cache_status.get("aliases", 0)
 
                 st.success(f"✅ Building cache: {building_count} buildings")
                 with st.expander("Cache Details"):
                     st.write(f"**Canonical names:** {building_count}")
                     st.write(f"**Aliases/abbreviations:** {alias_count}")
                     st.write(
-                        f"**Total mappings:** {cache_status.get('total_mappings', 0)}")
+                        f"**Total mappings:** {cache_status.get('total_mappings', 0)}"
+                    )
 
                     # Show sample buildings
                     building_names = get_building_names_from_cache()
@@ -212,8 +210,7 @@ def render_sidebar():
                             st.write(f"... and {len(building_names) - 5} more")
             else:
                 st.warning("⚠️ Building cache not initialised")
-                st.caption(
-                    "Building name detection limited to pattern matching")
+                st.caption("Building name detection limited to pattern matching")
         except Exception as e:  # pylint: disable=broad-except
             st.warning(f"⚠️ Cache status unavailable: {e}")
             st.caption("Building name detection limited to pattern matching")
@@ -235,7 +232,7 @@ def render_sidebar():
         generate_llm_answer = st.checkbox(
             "Generate AI answer from search results",
             value=st.session_state.generate_llm_answer,
-            help="If disabled, you'll only see the retrieved passages."
+            help="If disabled, you'll only see the retrieved passages.",
         )
         st.session_state.generate_llm_answer = generate_llm_answer
 
@@ -253,14 +250,18 @@ def render_sidebar():
         with st.expander("Search Details"):
             st.write(f"**Indexes:** {', '.join(TARGET_INDEXES)}")
             st.write(
-                f"**Namespaces:** {'all available' if SEARCH_ALL_NAMESPACES else DEFAULT_NAMESPACE}")
+                f"**Namespaces:** {'all available' if SEARCH_ALL_NAMESPACES else DEFAULT_NAMESPACE}"
+            )
             st.caption(
-                "Enhanced: Smart query classification, building-aware search with metadata filtering, document-level date search, and relevance threshold.")
+                "Enhanced: Smart query classification, building-aware search with metadata filtering, document-level date search, and relevance threshold."
+            )
             st.caption(
-                "Two-stage search: Stage 1 uses metadata filters for building-specific queries, Stage 2 falls back to semantic search with boosting.")
+                "Two-stage search: Stage 1 uses metadata filters for building-specific queries, Stage 2 falls back to semantic search with boosting."
+            )
 
         # Footer with accessibility statement
-        st.markdown("""
+        st.markdown(
+            """
         ---
         <footer role="contentinfo" style="margin-top: 2rem; padding: 1rem; background-color: rgba(0,0,0,0.05); border-radius: 8px;">
             <small>
@@ -269,7 +270,9 @@ def render_sidebar():
             <strong>University of Bristol</strong> | Experimental Research Application
             </small>
         </footer>
-        """, unsafe_allow_html=True)
+        """,
+            unsafe_allow_html=True,
+        )
 
     return top_k
 
@@ -363,7 +366,9 @@ def render_service_status():
     last_snapshot = st.session_state.get("service_status_snapshot")
     if last_snapshot != current_snapshot:
         st.session_state.service_status_history.insert(0, current_snapshot)
-        st.session_state.service_status_history = st.session_state.service_status_history[:3]
+        st.session_state.service_status_history = (
+            st.session_state.service_status_history[:3]
+        )
         st.session_state.service_status_snapshot = current_snapshot
 
     with st.expander("Status History"):
@@ -413,8 +418,10 @@ def display_search_results(results):
         for i, result in enumerate(results, 1):
             # Highlight the top result
             if i == 1:
-                st.markdown('<div class="top-result-highlight">🥇 <strong>TOP RESULT</strong></div>',
-                            unsafe_allow_html=True)
+                st.markdown(
+                    '<div class="top-result-highlight">🥇 <strong>TOP RESULT</strong></div>',
+                    unsafe_allow_html=True,
+                )
 
             st.markdown(
                 f"**{i}. Score:** {result.get('score', 0):.3f}  \n"
@@ -422,7 +429,7 @@ def display_search_results(results):
             )
 
             # Show building name if available
-            building_name = result.get('building_name', '')
+            building_name = result.get("building_name", "")
             if building_name:
                 st.caption(f"🏢 Building: {building_name}")
 
@@ -444,7 +451,7 @@ def initialise_chat_history():
         st.session_state.messages = [
             {
                 "role": "assistant",
-                "content": "Hello! I'm Alfred 🦍, your helpful assistant at the University of Bristol. I can help you find information about BMS description of operations documents, FRAs and maintenance requests and jobs across the UoB estate. What would you like to know?"
+                "content": "Hello! I'm Alfred 🦍, your helpful assistant at the University of Bristol. I can help you find information about BMS description of operations documents, FRAs and maintenance requests and jobs across the UoB estate. What would you like to know?",
             }
         ]
     # # Add processing flag
@@ -462,8 +469,7 @@ def display_chat_history():
 
             # Display publication date info if it exists
             if "publication_date_info" in message and message["publication_date_info"]:
-                display_safe_publication_date_info(
-                    message["publication_date_info"])
+                display_safe_publication_date_info(message["publication_date_info"])
 
             # Display low score warning if applicable
             if message.get("score_too_low", False):

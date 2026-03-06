@@ -1,16 +1,17 @@
 import re
 from typing import Optional
-from markupsafe import escape
+
 import streamlit as st
+from markupsafe import escape
 
 CODE_BLOCK_RE = re.compile(r"```.*?```", re.DOTALL)
 INLINE_CODE_RE = re.compile(r"`([^`]*)`")
 MARKDOWN_REPLACEMENTS = [
-    (re.compile(r"!\[.*?\]\(.*?\)"), ""),      # images
+    (re.compile(r"!\[.*?\]\(.*?\)"), ""),  # images
     (re.compile(r"\[([^\]]+)\]\([^)]+\)"), r"\1"),  # links → text
     (re.compile(r"^#{1,6}\s*", re.MULTILINE), ""),  # headers
-    (re.compile(r"^\s*>\s?", re.MULTILINE), ""),    # blockquotes
-    (re.compile(r"[*_~]{1,3}"), ""),            # emphasis
+    (re.compile(r"^\s*>\s?", re.MULTILINE), ""),  # blockquotes
+    (re.compile(r"[*_~]{1,3}"), ""),  # emphasis
     (re.compile(r"^\s*[-+*]\s+", re.MULTILINE), ""),  # lists
 ]
 

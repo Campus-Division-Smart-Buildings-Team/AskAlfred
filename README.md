@@ -291,9 +291,11 @@ Recent ingestion changes focus on reliability, idempotency, and observability:
 ### Environment Setup
 
 ```bash
-pip install -r requirements.txt
-streamlit run main.py
+poetry install
+poetry run streamlit run main.py
 ```
+
+If a `requirements.txt` is needed for external tooling, generate it via `poetry export -f requirements.txt -o requirements.txt --without-hashes` rather than editing it manually.
 
 ### Required Environment Variables
 
@@ -317,19 +319,7 @@ MAX_FILE_SECONDS=900
 
 ### Key Dependencies
 
-```
-# Core
-streamlit==1.49.1
-openai>=1.0.0
-pinecone>=3.0.0
-
-# NLP + ML
-hf-hub-ctranslate2>=2.0.0     # CT2 encoder for intent classification
-torch>=2.1.0                  # PyTorch backend for CT2 encoder
-textblob==0.19.0             # Spell checking
-numpy>=1.24                  # Vector operations
-scikit-learn>=1.4.0          # Additional ML utilities
-```
+Managed in `pyproject.toml` and locked in `poetry.lock`.
 
 ### Model Files
 
@@ -600,12 +590,12 @@ def building_cache():
 
 ```bash
 # Run full security scan
-python scripts/security_scan.py --json --strict
+poetry run python scripts/security_scan.py --json --strict
 
 # Individual tools
-safety check -r requirements.txt
-pip-audit
-bandit -r . -ll
+poetry run safety scan --target . --policy-file .safety-policy.json
+poetry run pip-audit
+poetry run bandit -r . -ll
 ```
 
 ### CI/CD Integration
@@ -615,7 +605,7 @@ The `.github/workflows/security-scan.yml` workflow runs on every PR:
 1. **Dependency scanning**: `safety` and `pip-audit` check for known vulnerabilities
 2. **Static analysis**: `bandit` scans for common security issues
 3. **Secret detection**: Checks for accidentally committed credentials
-4. **Requirements pinning**: Validates all dependencies are version-pinned
+4. **Poetry lock**: Validates resolved, pinned dependencies
 
 ### Security Scan Output
 
@@ -838,7 +828,9 @@ Alfred-V3/
 │   └── workflows/
 │       └── security-scan.yml
 │
-├── requirements.txt
+├── pyproject.toml
+├── poetry.lock
+├── requirements.txt           # Generated via Poetry if needed
 ├── README.md
 └── .gitignore
 ```

@@ -4,18 +4,16 @@ Convert Microsoft Word files (.doc, .docx) to PDF and move originals to Recycle 
 Windows-specific script using win32com for Word conversion and send2trash for safe deletion.
 """
 
-import sys
+import argparse
 import io
 import logging
+import sys
 from pathlib import Path
-import argparse
 
 # Fix Unicode encoding for Windows console to support emojis
-if sys.platform == 'win32':
-    sys.stdout = io.TextIOWrapper(
-        sys.stdout.buffer, encoding='utf-8', errors='replace')
-    sys.stderr = io.TextIOWrapper(
-        sys.stderr.buffer, encoding='utf-8', errors='replace')
+if sys.platform == "win32":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 # Windows-specific imports
 try:
@@ -39,28 +37,29 @@ except ImportError:
     def sanitise_error(error: Exception) -> str:
         return f"{type(error).__name__}: {str(error)}"
 
+
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
-        logging.FileHandler("word_to_pdf_conversion.log", encoding='utf-8'),
-        logging.StreamHandler(sys.stdout)
-    ]
+        logging.FileHandler("word_to_pdf_conversion.log", encoding="utf-8"),
+        logging.StreamHandler(sys.stdout),
+    ],
 )
 
 # Constants
 DEFAULT_PATH = r"C:\Users\rd23091\Downloads\Alfred"
-WORD_EXTENSIONS = {'.doc', '.docx'}
+WORD_EXTENSIONS = {".doc", ".docx"}
 PDF_FORMAT = 17  # Word SaveAs PDF format constant
 
 # Statistics tracking
 stats = {
-    'total_found': 0,
-    'converted': 0,
-    'failed': 0,
-    'moved_to_recycle': 0,
-    'failed_files': []
+    "total_found": 0,
+    "converted": 0,
+    "failed": 0,
+    "moved_to_recycle": 0,
+    "failed_files": [],
 }
 
 
@@ -88,14 +87,14 @@ def find_word_documents(base_path: str, recursive: bool = True) -> list[Path]:
     if recursive:
         # Search recursively
         for ext in WORD_EXTENSIONS:
-            word_files.extend(base_path_obj.rglob(f'*{ext}'))
+            word_files.extend(base_path_obj.rglob(f"*{ext}"))
     else:
         # Search only in the root directory
         for ext in WORD_EXTENSIONS:
-            word_files.extend(base_path_obj.glob(f'*{ext}'))
+            word_files.extend(base_path_obj.glob(f"*{ext}"))
 
     # Filter out temporary Word files (starting with ~$)
-    word_files = [f for f in word_files if not f.name.startswith('~$')]
+    word_files = [f for f in word_files if not f.name.startswith("~$")]
 
     return sorted(word_files)
 
@@ -110,7 +109,7 @@ def convert_word_to_pdf(word_path: Path) -> tuple[bool, str, Path]:
     Returns:
         tuple of (success: bool, message: str, pdf_path: Path)
     """
-    pdf_path = word_path.with_suffix('.pdf')
+    pdf_path = word_path.with_suffix(".pdf")
 
     # Check if PDF already exists
     if pdf_path.exists():
@@ -181,7 +180,7 @@ def process_word_documents(
     base_path: str,
     recursive: bool = True,
     keep_originals: bool = False,
-    dry_run: bool = False
+    dry_run: bool = False,
 ) -> None:
     """
     Main function to process all Word documents: convert to PDF and move to Recycle Bin.
@@ -209,7 +208,7 @@ def process_word_documents(
         logging.error(str(e))
         return
 
-    stats['total_found'] = len(word_files)
+    stats["total_found"] = len(word_files)
 
     if not word_files:
         logging.info("No Word documents found.")
@@ -222,34 +221,31 @@ def process_word_documents(
 
     # Process each file
     for i, word_file in enumerate(word_files, 1):
-        logging.info("\n[%d/%d] Processing: %s", i,
-                     len(word_files), word_file.name)
+        logging.info("\n[%d/%d] Processing: %s", i, len(word_files), word_file.name)
         logging.info("    Location: %s", word_file.parent)
 
         if dry_run:
-            logging.info("    Would convert to: %s",
-                         word_file.with_suffix('.pdf').name)
+            logging.info("    Would convert to: %s", word_file.with_suffix(".pdf").name)
             if not keep_originals:
-                logging.info("    Would move to Recycle Bin: %s",
-                             word_file.name)
+                logging.info("    Would move to Recycle Bin: %s", word_file.name)
             continue
 
         # Convert to PDF
         success, _, _ = convert_word_to_pdf(word_file)
 
         if success:
-            stats['converted'] += 1
+            stats["converted"] += 1
 
             # Move original to Recycle Bin if requested
             if not keep_originals:
                 move_success, move_message = move_to_recycle_bin(word_file)
                 if move_success:
-                    stats['moved_to_recycle'] += 1
+                    stats["moved_to_recycle"] += 1
                 else:
                     logging.warning("    ⚠️  %s", move_message)
         else:
-            stats['failed'] += 1
-            stats['failed_files'].append(str(word_file))
+            stats["failed"] += 1
+            stats["failed_files"].append(str(word_file))
 
     # Print summary
     print_summary()
@@ -260,20 +256,20 @@ def print_summary() -> None:
     logging.info("\n%s", "=" * 70)
     logging.info("CONVERSION SUMMARY")
     logging.info("=" * 70)
-    logging.info("Word documents found:       %d", stats['total_found'])
-    logging.info("Successfully converted:     %d", stats['converted'])
-    logging.info("Failed conversions:         %d", stats['failed'])
-    logging.info("Moved to Recycle Bin:       %d", stats['moved_to_recycle'])
+    logging.info("Word documents found:       %d", stats["total_found"])
+    logging.info("Successfully converted:     %d", stats["converted"])
+    logging.info("Failed conversions:         %d", stats["failed"])
+    logging.info("Moved to Recycle Bin:       %d", stats["moved_to_recycle"])
     logging.info("=" * 70)
 
-    if stats['failed_files']:
+    if stats["failed_files"]:
         logging.info("\nFailed files:")
-        for failed_file in stats['failed_files']:
+        for failed_file in stats["failed_files"]:
             logging.info("  ❌ %s", failed_file)
 
-    if stats['converted'] > 0:
+    if stats["converted"] > 0:
         logging.info("\n✅ Conversion complete!")
-    elif stats['total_found'] == 0:
+    elif stats["total_found"] == 0:
         logging.info("\n📭 No Word documents found.")
     else:
         logging.info("\n⚠️  No files were converted.")
@@ -300,32 +296,30 @@ Examples:
   
   # Dry run (show what would be done without doing it)
   python word_to_pdf.py --dry-run
-        """
+        """,
     )
 
     parser.add_argument(
-        '--path',
+        "--path",
         type=str,
         default=DEFAULT_PATH,
-        help=f'Path to directory containing Word documents (default: {DEFAULT_PATH})'
+        help=f"Path to directory containing Word documents (default: {DEFAULT_PATH})",
     )
 
     parser.add_argument(
-        '--no-recursive',
-        action='store_true',
-        help='Do not search subdirectories'
+        "--no-recursive", action="store_true", help="Do not search subdirectories"
     )
 
     parser.add_argument(
-        '--keep-originals',
-        action='store_true',
-        help='Keep original Word files (do not move to Recycle Bin)'
+        "--keep-originals",
+        action="store_true",
+        help="Keep original Word files (do not move to Recycle Bin)",
     )
 
     parser.add_argument(
-        '--dry-run',
-        action='store_true',
-        help='Show what would be done without actually doing it'
+        "--dry-run",
+        action="store_true",
+        help="Show what would be done without actually doing it",
     )
 
     return parser.parse_args()
@@ -346,8 +340,7 @@ def check_requirements() -> bool:
         return True
     except Exception as e:  # pylint: disable=broad-except
         logging.error("Microsoft Word is not available: %s", e)
-        logging.error(
-            "Please ensure Microsoft Word is installed on this system.")
+        logging.error("Please ensure Microsoft Word is installed on this system.")
         return False
 
 
@@ -366,14 +359,13 @@ def main():
             base_path=args.path,
             recursive=not args.no_recursive,
             keep_originals=args.keep_originals,
-            dry_run=args.dry_run
+            dry_run=args.dry_run,
         )
     except KeyboardInterrupt:
         logging.info("\n\n⚠️  Operation cancelled by user")
         sys.exit(0)
     except Exception as e:  # pylint: disable=broad-except
-        logging.error("\n❌ Unexpected error: %s",
-                      sanitise_error(e), exc_info=False)
+        logging.error("\n❌ Unexpected error: %s", sanitise_error(e), exc_info=False)
         sys.exit(1)
 
 

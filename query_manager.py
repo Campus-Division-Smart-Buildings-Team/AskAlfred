@@ -5,64 +5,64 @@ Query Manager - Centralised query orchestration for AskAlfred.
 
 """
 
-
-from typing import Optional, Any
 import logging
 import time
+from typing import Any, Optional
 
-
+from building.validation import INVALID_BUILDING_NAMES
+from config import (
+    QUERY_CONF_THRESHOLD,
+    QUERY_FOLLOWUP_MAX_TOKENS,
+    QUERY_FOLLOWUP_ML_CONF_THRESHOLD,
+    QUERY_RULE_OVERRIDE_THRESHOLD,
+)
+from emojis import EMOJI_CAUTION, EMOJI_CROSS, EMOJI_TICK, EMOJI_TIME
+from intent_classifier import NLPIntentClassifier
+from log_sanitiser import sanitise_error
 from query_context import QueryContext
-from query_route import QueryRoute
-from query_result import QueryResult
-
 from query_handlers import (
     ConversationalHandler,
-    MaintenanceHandler,
-    RankingHandler,
-    PropertyHandler,
     CountingHandler,
+    MaintenanceHandler,
+    PropertyHandler,
+    RankingHandler,
     SemanticSearchHandler,
 )
 from query_preprocessors import (
     BuildingExtractor,
     BusinessTermExtractor,
     QueryComplexityAnalyser,
-    SpellCheckPreprocessor)
-
-from intent_classifier import NLPIntentClassifier
+    SpellCheckPreprocessor,
+)
+from query_result import QueryResult
+from query_route import QueryRoute
 from query_types import QueryType
 from session_manager import SessionManager
-from building.validation import INVALID_BUILDING_NAMES
-from emojis import EMOJI_CROSS, EMOJI_TICK, EMOJI_CAUTION, EMOJI_TIME
-from log_sanitiser import sanitise_error
-from config import (
-    QUERY_RULE_OVERRIDE_THRESHOLD,
-    QUERY_CONF_THRESHOLD,
-    QUERY_FOLLOWUP_ML_CONF_THRESHOLD,
-    QUERY_FOLLOWUP_MAX_TOKENS,
-)
 
 # ============================================================================
 # FOLLOWUP CONFIGs
 # ============================================================================
 
 FOLLOWUP_PREFIXES = {
-    "and", "also", "what about",
-    "those", "them", "that", "this", "these",
-    "any more", "more about", "more on", "tell me more"
+    "and",
+    "also",
+    "what about",
+    "those",
+    "them",
+    "that",
+    "this",
+    "these",
+    "any more",
+    "more about",
+    "more on",
+    "tell me more",
 }
 
-FOLLOWUP_SUFFIXES = {
-    "too", "as well", "also"
-}
+FOLLOWUP_SUFFIXES = {"too", "as well", "also"}
 
-FOLLOWUP_EXACT = {
-    "and", "also", "what about", "tell me more", "more"
-}
+FOLLOWUP_EXACT = {"and", "also", "what about", "tell me more", "more"}
 
-FOLLOWUP_PRONOUNS = {
-    "it", "this", "that", "those", "them", "these"
-}
+FOLLOWUP_PRONOUNS = {"it", "this", "that", "those", "them", "these"}
 
 # ============================================================================
 # QUERY MANAGER
@@ -78,6 +78,7 @@ class QueryManager:
       • Cache responses
       • Track performance stats
     """
+
     # Default Routing Thresholds for Configuration
     DEFAULT_CONFIG = {
         # Thresholds for hybrid routing. Keys map to internal variables.
@@ -122,11 +123,11 @@ class QueryManager:
 
         # Stats
         self.stats = {
-            "handlers": {},       # per-handler stats
-            "query_types": {},    # per QueryType stats
+            "handlers": {},  # per-handler stats
+            "query_types": {},  # per QueryType stats
             "total_queries": 0,
             "overall_total_ms": 0.0,
-            "cached_queries": 0
+            "cached_queries": 0,
         }
 
         self.intent_clf = NLPIntentClassifier()
@@ -174,20 +175,16 @@ class QueryManager:
                 if handler_cls:
                     handlers.append(handler_cls())
                 else:
-                    self.logger.warning(
-                        "Unknown handler: %s", handler_cls_name)
+                    self.logger.warning("Unknown handler: %s", handler_cls_name)
             except Exception as e:
                 self.logger.error("Could not load %s: %s", handler_cls_name, e)
 
         return handlers
 
     @staticmethod
-    def is_followup_query(q: str,
-                          prev_context: dict | None,
-                          *,
-                          previous_intent,
-                          ml_intent_confidence
-                          ) -> bool:
+    def is_followup_query(
+        q: str, prev_context: dict | None, *, previous_intent, ml_intent_confidence
+    ) -> bool:
         if not q:
             return False
 
@@ -233,10 +230,12 @@ class QueryManager:
         q = context.query.strip().lower()
         prev = context.previous_context or {}
 
-        if not self.is_followup_query(q,
-                                      prev,
-                                      previous_intent=context.previous_intent,
-                                      ml_intent_confidence=context.ml_intent_confidence,):
+        if not self.is_followup_query(
+            q,
+            prev,
+            previous_intent=context.previous_intent,
+            ml_intent_confidence=context.ml_intent_confidence,
+        ):
             return
 
         # inherit building
@@ -245,18 +244,21 @@ class QueryManager:
             context.building = prev_building
             # Log the successful inheritance for debugging!
             self.logger.info(
-                "%s CONTEXT INHERITED: Building '%s' from previous turn.", EMOJI_TICK,
-                context.building
+                "%s CONTEXT INHERITED: Building '%s' from previous turn.",
+                EMOJI_TICK,
+                context.building,
             )
-            context.routing_notes.append(
-                "inherited_building_from_previous_turn")
+            context.routing_notes.append("inherited_building_from_previous_turn")
         else:
             # Log why inheritance did not occur
             self.logger.info(
                 "%s CONTEXT INHERITANCE SKIPPED: Followup is '%s' but "
                 "context.building is '%s' or "
-                "previous context missing building (%s).", EMOJI_CROSS,
-                q, context.building, 'building' in prev
+                "previous context missing building (%s).",
+                EMOJI_CROSS,
+                q,
+                context.building,
+                "building" in prev,
             )
 
     # =========================================================================
@@ -269,7 +271,7 @@ class QueryManager:
         Order matters.
         """
         return [
-            SpellCheckPreprocessor(),         # Optional: disabled by default
+            SpellCheckPreprocessor(),  # Optional: disabled by default
             BuildingExtractor(),
             BusinessTermExtractor(),
             QueryComplexityAnalyser(),
@@ -292,7 +294,7 @@ class QueryManager:
         """
         self.logger.warning("RAW QUERY: %s", query)
 
-        start_time = time.time()   # timing for this request
+        start_time = time.time()  # timing for this request
 
         # Create context
         context = QueryContext(query=query, **kwargs)
@@ -306,8 +308,8 @@ class QueryManager:
         # Defensive Logging
         if prev_context_dict:
             self.logger.info(
-                "MEMORY LOADED: Previous building: %r", prev_context_dict.get(
-                    'building')
+                "MEMORY LOADED: Previous building: %r",
+                prev_context_dict.get("building"),
             )
 
         # Attach previous QueryContext data (if any)
@@ -335,7 +337,8 @@ class QueryManager:
         # 🔧 Normalise / clean building extracted by preprocessors
         if context.building and context.building.lower() in INVALID_BUILDING_NAMES:
             self.logger.info(
-                "%s Discarding invalid building from preprocessors: %r", EMOJI_CAUTION,
+                "%s Discarding invalid building from preprocessors: %r",
+                EMOJI_CAUTION,
                 context.building,
             )
             context.building = None
@@ -369,7 +372,7 @@ class QueryManager:
                 handler_class_name=query_result.handler_used or "unknown",
                 query_type=query_result.query_type or "unknown",
                 elapsed_ms=elapsed_ms,
-                success=query_result.success
+                success=query_result.success,
             )
 
             query_result.processing_time_ms = elapsed_ms
@@ -403,7 +406,7 @@ class QueryManager:
             handler_class_name=query_result.handler_used or "unknown",
             query_type=query_result.query_type or "unknown",
             elapsed_ms=handler_elapsed_ms,
-            success=query_result.success
+            success=query_result.success,
         )
 
         # Cache result
@@ -426,16 +429,18 @@ class QueryManager:
                 if context.predicted_intent
                 else route.handler.query_type
             )
-            SessionManager.set_last_intent(
-                final_intent, context.ml_intent_confidence)
+            SessionManager.set_last_intent(final_intent, context.ml_intent_confidence)
         except Exception as e:
             self.logger.error("Failed to persist session memory: %s", e)
 
         # Total round-trip time for everything
         total_elapsed_ms = (time.time() - start_time) * 1000
         query_result.processing_time_ms = total_elapsed_ms
-        logging.info("%s QueryManager.process_query took %.2f ms", EMOJI_TIME,
-                     query_result.processing_time_ms)
+        logging.info(
+            "%s QueryManager.process_query took %.2f ms",
+            EMOJI_TIME,
+            query_result.processing_time_ms,
+        )
 
         return query_result
 
@@ -451,9 +456,11 @@ class QueryManager:
                     pre.process(context)
             except Exception as e:
                 self.logger.error(
-                    "Preprocessor %s failed: %s", pre.__class__.__name__, sanitise_error(
-                        e),
-                    exc_info=False)
+                    "Preprocessor %s failed: %s",
+                    pre.__class__.__name__,
+                    sanitise_error(e),
+                    exc_info=False,
+                )
 
     # =========================================================================
     # Query routing
@@ -464,7 +471,7 @@ class QueryManager:
         Select the best handler using a priority-first strategy.
         """
         best_handler = None
-        best_priority = float('inf')
+        best_priority = float("inf")
 
         for h in self.handlers:
             try:
@@ -477,7 +484,7 @@ class QueryManager:
                     "Handler %s failed during can_handle(): %s",
                     h.__class__.__name__,
                     sanitise_error(e),
-                    exc_info=False
+                    exc_info=False,
                 )
 
         # Fallback
@@ -502,7 +509,7 @@ class QueryManager:
         # 1) RULE LAYER (handlers)
         # -----------------------------
         best_handler = None
-        best_priority = float('inf')
+        best_priority = float("inf")
 
         for h in self.handlers:
             try:
@@ -512,8 +519,10 @@ class QueryManager:
                         best_handler = h
             except Exception as e:
                 self.logger.error(
-                    "Handler %s failed during can_handle(): %s", h.__class__.__name__, sanitise_error(e),
-                    exc_info=False
+                    "Handler %s failed during can_handle(): %s",
+                    h.__class__.__name__,
+                    sanitise_error(e),
+                    exc_info=False,
                 )
 
         # --------------------------------------------------------
@@ -537,12 +546,14 @@ class QueryManager:
             context.predicted_intent = ml.intent
             context.ml_intent_confidence = ml.confidence
             self.logger.info(
-                "ML intent: %s (%.2f)", ml.intent.value if hasattr(
-                    ml.intent, "value") else ml.intent, ml.confidence
+                "ML intent: %s (%.2f)",
+                ml.intent.value if hasattr(ml.intent, "value") else ml.intent,
+                ml.confidence,
             )
         except Exception as e:
-            self.logger.error("Intent classifier failed: %s",
-                              sanitise_error(e), exc_info=False)
+            self.logger.error(
+                "Intent classifier failed: %s", sanitise_error(e), exc_info=False
+            )
             ml = None
 
         # --------------------------------------------------------
@@ -552,9 +563,9 @@ class QueryManager:
         # --------------------------------------------------------
         if rule_candidate:
             if (
-                ml and
-                ml.intent == QueryType.SEMANTIC_SEARCH and
-                ml.confidence >= RULE_OVERRIDE_THRESHOLD
+                ml
+                and ml.intent == QueryType.SEMANTIC_SEARCH
+                and ml.confidence >= RULE_OVERRIDE_THRESHOLD
             ):
                 context.routing_notes.append("ml_override_rule_layer")
                 # fall through to ML-based semantic routing
@@ -567,8 +578,8 @@ class QueryManager:
                         "route": "rule",
                         "ml_intent": getattr(ml.intent, "value", None) if ml else None,
                         "ml_confidence": getattr(ml, "confidence", None),
-                        "ml_route_reason": "rule_not_overridden"
-                    }
+                        "ml_route_reason": "rule_not_overridden",
+                    },
                 )
 
         # -------------------------------------------------------------------
@@ -578,9 +589,12 @@ class QueryManager:
         if ml is None or ml.confidence < CONF_THRESHOLD:
             context.routing_notes.append("ml_low_confidence_to_semantic")
             sem = next(
-                (h for h in self.handlers if h.__class__.__name__ ==
-                 "SemanticSearchHandler"),
-                None
+                (
+                    h
+                    for h in self.handlers
+                    if h.__class__.__name__ == "SemanticSearchHandler"
+                ),
+                None,
             )
             return QueryRoute(
                 handler=sem,
@@ -588,8 +602,8 @@ class QueryManager:
                     "route": "semantic_fallback_low_conf",
                     "ml_intent": ml.intent.value if ml else None,
                     "ml_confidence": ml.confidence if ml else None,
-                    "ml_route_reason": "confidence_below_threshold"
-                }
+                    "ml_route_reason": "confidence_below_threshold",
+                },
             )
 
         # -------------------------------------------------------------------
@@ -599,37 +613,62 @@ class QueryManager:
         if target_handler is None:
             # No dedicated handler? Default to SemanticSearch.
             context.routing_notes.append("ml_handler_missing_to_semantic")
-            sem = next((h for h in self.handlers if h.__class__.__name__ ==
-                       "SemanticSearchHandler"), None)
-            return QueryRoute(handler=sem, metadata={
-                "route": "ml_missing_semantic",
-                "ml_intent": ml.intent.value if hasattr(ml.intent, "value") else str(ml.intent),
-                "ml_confidence": ml.confidence,
-            })
+            sem = next(
+                (
+                    h
+                    for h in self.handlers
+                    if h.__class__.__name__ == "SemanticSearchHandler"
+                ),
+                None,
+            )
+            return QueryRoute(
+                handler=sem,
+                metadata={
+                    "route": "ml_missing_semantic",
+                    "ml_intent": (
+                        ml.intent.value
+                        if hasattr(ml.intent, "value")
+                        else str(ml.intent)
+                    ),
+                    "ml_confidence": ml.confidence,
+                },
+            )
 
         # Give the handler a chance to reject based on enriched context
         try:
             if target_handler.can_handle(context):
                 context.routing_notes.append("ml_selected_handler_accepted")
-                return QueryRoute(handler=target_handler, metadata={
-                    "route": "ml_handler",
-                    "ml_intent": ml.intent.value if hasattr(ml.intent, "value") else str(ml.intent),
-                    "ml_confidence": ml.confidence,
-                })
+                return QueryRoute(
+                    handler=target_handler,
+                    metadata={
+                        "route": "ml_handler",
+                        "ml_intent": (
+                            ml.intent.value
+                            if hasattr(ml.intent, "value")
+                            else str(ml.intent)
+                        ),
+                        "ml_confidence": ml.confidence,
+                    },
+                )
             else:
                 context.routing_notes.append("ml_selected_handler_rejected")
         except Exception as e:
             self.logger.error(
                 "Handler %s failed during negotiation: %s",
-                target_handler.__class__.__name__, sanitise_error(e), exc_info=False
+                target_handler.__class__.__name__,
+                sanitise_error(e),
+                exc_info=False,
             )
             context.routing_notes.append("ml_selected_handler_error")
 
         # Final fallback: SemanticSearch
         sem = next(
-            (h for h in self.handlers if h.__class__.__name__ ==
-             "SemanticSearchHandler"),
-            None
+            (
+                h
+                for h in self.handlers
+                if h.__class__.__name__ == "SemanticSearchHandler"
+            ),
+            None,
         )
         return QueryRoute(
             handler=sem,
@@ -637,8 +676,8 @@ class QueryManager:
                 "route": "semantic_fallback_negotiation",
                 "ml_intent": ml.intent.value if ml else None,
                 "ml_confidence": ml.confidence if ml else None,
-                "ml_route_reason": "handler_rejected_or_missing"
-            }
+                "ml_route_reason": "handler_rejected_or_missing",
+            },
         )
 
     # =========================================================================
@@ -647,8 +686,8 @@ class QueryManager:
 
     def _make_cache_key(self, context: QueryContext) -> str:
         """
-        Deterministic cache key. Uses the corrected query if preprocessors 
-        ran, as this reflects the content actually processed by handlers, 
+        Deterministic cache key. Uses the corrected query if preprocessors
+        ran, as this reflects the content actually processed by handlers,
         improving cache validity.
         """
         # Use the corrected query if SpellCheck or another preprocessor ran,
@@ -660,21 +699,26 @@ class QueryManager:
 
         return f"{query_part}:{context.top_k}:{building_part}"
 
-    def _update_stats(self, handler_class_name: str, query_type: str, elapsed_ms: float, success: bool):
+    def _update_stats(
+        self, handler_class_name: str, query_type: str, elapsed_ms: float, success: bool
+    ):
         # --- Update global totals ---
         self.stats["total_queries"] += 1
         self.stats["overall_total_ms"] += elapsed_ms
 
         # --- Per-handler stats ---
-        hstats = self.stats["handlers"].setdefault(handler_class_name, {
-            "count": 0,
-            "total_ms": 0.0,
-            "min_ms": float("inf"),
-            "max_ms": 0.0,
-            "successes": 0,
-            "success_rate": 0.0,
-            "avg_ms": 0.0
-        })
+        hstats = self.stats["handlers"].setdefault(
+            handler_class_name,
+            {
+                "count": 0,
+                "total_ms": 0.0,
+                "min_ms": float("inf"),
+                "max_ms": 0.0,
+                "successes": 0,
+                "success_rate": 0.0,
+                "avg_ms": 0.0,
+            },
+        )
 
         hstats["count"] += 1
         hstats["total_ms"] += elapsed_ms
@@ -687,15 +731,18 @@ class QueryManager:
         hstats["success_rate"] = hstats["successes"] / hstats["count"]
 
         # --- Per query type stats ---
-        tstats = self.stats["query_types"].setdefault(query_type, {
-            "count": 0,
-            "total_ms": 0.0,
-            "min_ms": float("inf"),
-            "max_ms": 0.0,
-            "successes": 0,
-            "success_rate": 0.0,
-            "avg_ms": 0.0
-        })
+        tstats = self.stats["query_types"].setdefault(
+            query_type,
+            {
+                "count": 0,
+                "total_ms": 0.0,
+                "min_ms": float("inf"),
+                "max_ms": 0.0,
+                "successes": 0,
+                "success_rate": 0.0,
+                "avg_ms": 0.0,
+            },
+        )
 
         tstats["count"] += 1
         tstats["total_ms"] += elapsed_ms
@@ -722,9 +769,7 @@ class QueryManager:
         print("\n=== Alfred Telemetry ===")
 
         total = self.stats["total_queries"]
-        overall_avg = (
-            self.stats["overall_total_ms"] / total if total > 0 else 0.0
-        )
+        overall_avg = self.stats["overall_total_ms"] / total if total > 0 else 0.0
 
         print(f"Total queries: {total}")
         print(f"Overall avg time: {overall_avg:.2f} ms\n")
@@ -735,7 +780,8 @@ class QueryManager:
             print(f"    Count:          {h_stats['count']}")
             print(f"    Avg time:       {h_stats['avg_ms']:.2f} ms")
             print(
-                f"    Min/Max:        {h_stats['min_ms']:.2f} / {h_stats['max_ms']:.2f} ms")
+                f"    Min/Max:        {h_stats['min_ms']:.2f} / {h_stats['max_ms']:.2f} ms"
+            )
             print(f"    Success rate:   {h_stats['success_rate']:.1%}")
 
         print("\nQuery Types:")
@@ -744,16 +790,15 @@ class QueryManager:
             print(f"    Count:          {q_stats['count']}")
             print(f"    Avg time:       {q_stats['avg_ms']:.2f} ms")
             print(
-                f"    Min/Max:        {q_stats['min_ms']:.2f} / {q_stats['max_ms']:.2f} ms")
+                f"    Min/Max:        {q_stats['min_ms']:.2f} / {q_stats['max_ms']:.2f} ms"
+            )
             print(f"    Success rate:   {q_stats['success_rate']:.1%}")
 
         print("\n=========================\n")
 
     def get_statistics(self):
         total = self.stats["total_queries"]
-        avg_time = (
-            self.stats["overall_total_ms"] / total if total > 0 else 0.0
-        )
+        avg_time = self.stats["overall_total_ms"] / total if total > 0 else 0.0
 
         return {
             "total_queries": total,
@@ -769,15 +814,12 @@ class QueryManager:
 # ============================================================================
 
 
-def process_query_unified(
-        user_query: str,
-        top_k: int = 10,
-        **kwargs
-) -> tuple[list[Any],       # results from semantic search
-           Optional[str],             # answer
-           Any,             # publication_date_info
-           Optional[bool]   # score_too_low
-           ]:
+def process_query_unified(user_query: str, top_k: int = 10, **kwargs) -> tuple[
+    list[Any],  # results from semantic search
+    Optional[str],  # answer
+    Any,  # publication_date_info
+    Optional[bool],  # score_too_low
+]:
     """
     Convenience wrapper for backward compatibility with existing code.
 
@@ -798,7 +840,7 @@ def process_query_unified(
         query_result.results,
         query_result.answer,
         query_result.publication_date_info,
-        query_result.score_too_low
+        query_result.score_too_low,
     )
 
 
@@ -810,8 +852,7 @@ def process_query_unified(
 if __name__ == "__main__":
     # Setup logging
     logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s [%(levelname)s] %(name)s: %(message)s'
+        level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
     )
 
     # Create manager
@@ -824,7 +865,7 @@ if __name__ == "__main__":
         "Show maintenance requests for Senate House",
         "Rank buildings by area",
         "What buildings are Condition A?",
-        "What is the BMS configuration for HVAC?"
+        "What is the BMS configuration for HVAC?",
     ]
 
     print("=" * 80)
@@ -838,7 +879,8 @@ if __name__ == "__main__":
         print(f"⏱️  Time: {result.processing_time_ms:.2f}ms")
         print(f"📊 Handler: {result.handler_used}")
         print(
-            f"💬 Answer preview: {result.answer[:100] if result.answer else 'No answer available'}...")
+            f"💬 Answer preview: {result.answer[:100] if result.answer else 'No answer available'}..."
+        )
 
     # Show statistics
     print("\n" + "=" * 80)

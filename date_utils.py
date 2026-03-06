@@ -5,14 +5,13 @@ Date parsing and publication date search utilities.
 Optimised version with pre-compiled patterns and better validation.
 """
 
-import re
 import logging
-from datetime import datetime, date
-from typing import Optional, Any
+import re
+from datetime import date, datetime
+from typing import Any, Optional
 
+from config import DEFAULT_EMBED_MODEL, DIMENSION
 from pinecone_utils import normalise_matches, vector_query
-from config import DIMENSION, DEFAULT_EMBED_MODEL
-
 
 logger = logging.getLogger(__name__)
 # ============================================================================
@@ -28,25 +27,24 @@ DAYS_PER_YEAR = 365.25  # Account for leap years
 DUMMY_VECTOR = [0.0] * DIMENSION
 
 # Metadata date fields in priority order (skip unreliable fields)
-METADATA_DATE_FIELDS = ['review_date', 'updated',
-                        'revised', 'date', 'document_date']
+METADATA_DATE_FIELDS = ["review_date", "updated", "revised", "date", "document_date"]
 
 # Date format strings for parsing
 DATE_FORMATS = [
-    "%d %B %Y",      # 19 March 2020
-    "%d.%m.%Y",      # 12.06.2025 (dot format)
-    "%Y.%m.%d",      # 2025.06.12 (dot format)
-    "%Y-%m-%d",      # 2025-07-28
-    "%B %d, %Y",     # July 28, 2025
-    "%d/%m/%Y",      # 28/07/2025
-    "%m/%d/%Y",      # 07/28/2025
-    "%Y",            # 2025
-    "%B %Y",         # July 2025 (IMPORTANT: handles August 2024, etc.)
-    "%b %Y",         # Aug 2025 (abbreviated month with year)
-    "%d-%m-%Y",      # 28-07-2025
-    "%Y/%m/%d",      # 2025/07/28
-    "%d %b %Y",      # 19 Mar 2020 (abbreviated month)
-    "%d-%b-%Y",      # 19-Mar-2020
+    "%d %B %Y",  # 19 March 2020
+    "%d.%m.%Y",  # 12.06.2025 (dot format)
+    "%Y.%m.%d",  # 2025.06.12 (dot format)
+    "%Y-%m-%d",  # 2025-07-28
+    "%B %d, %Y",  # July 28, 2025
+    "%d/%m/%Y",  # 28/07/2025
+    "%m/%d/%Y",  # 07/28/2025
+    "%Y",  # 2025
+    "%B %Y",  # July 2025 (IMPORTANT: handles August 2024, etc.)
+    "%b %Y",  # Aug 2025 (abbreviated month with year)
+    "%d-%m-%Y",  # 28-07-2025
+    "%Y/%m/%d",  # 2025/07/28
+    "%d %b %Y",  # 19 Mar 2020 (abbreviated month)
+    "%d-%b-%Y",  # 19-Mar-2020
 ]
 
 # Pre-compiled regex patterns for date extraction
@@ -58,25 +56,25 @@ DATE_FORMATS = [
 
 def _build_label_pattern(labels: list[str], date_format: str) -> str:
     """Build a regex pattern for labeled dates."""
-    label_group = '|'.join(labels)
-    return f'(?:{label_group})[:\\s]+({date_format})'
+    label_group = "|".join(labels)
+    return f"(?:{label_group})[:\\s]+({date_format})"
 
 
 # ============================================================================
 # DATE FORMAT REGEX COMPONENTS
 # ============================================================================
-DATE_TEXT = r'[0-3]?[0-9][\s][A-Z][a-z]+[\s][0-9]{{4}}'
-DATE_TEXT_FLEX = r'[0-3]?[0-9][\s/][A-Za-z]{{3,9}}[\s/][0-9]{{4}}'
-DATE_NUMERIC = r'[0-3]?[0-9][\s/.-][0-3]?[0-9][\s/.-][0-9]{{4}}'
-DATE_ABBREV = r'[0-3]?[0-9][\s][A-Z][a-z]{{2}}[\s][0-9]{{4}}'
-DATE_DOT_DMY = r'[0-3]?[0-9]\.[0-1]?[0-9]\.[0-9]{{4}}'
-DATE_DOT_YMD = r'[0-9]{{4}}\.[0-1]?[0-9]\.[0-3]?[0-9]'
-DATE_ISO = r'[0-9]{{4}}[/-][0-1]?[0-9][/-][0-3]?[0-9]'
-YEAR_ONLY = r'[0-9]{{4}}'
-DATE_TEXT_ORDINAL = r'[0-3]?[0-9](?:st|nd|rd|th)?[\s][A-Z][a-z]+[\s][0-9]{4}'
+DATE_TEXT = r"[0-3]?[0-9][\s][A-Z][a-z]+[\s][0-9]{{4}}"
+DATE_TEXT_FLEX = r"[0-3]?[0-9][\s/][A-Za-z]{{3,9}}[\s/][0-9]{{4}}"
+DATE_NUMERIC = r"[0-3]?[0-9][\s/.-][0-3]?[0-9][\s/.-][0-9]{{4}}"
+DATE_ABBREV = r"[0-3]?[0-9][\s][A-Z][a-z]{{2}}[\s][0-9]{{4}}"
+DATE_DOT_DMY = r"[0-3]?[0-9]\.[0-1]?[0-9]\.[0-9]{{4}}"
+DATE_DOT_YMD = r"[0-9]{{4}}\.[0-1]?[0-9]\.[0-3]?[0-9]"
+DATE_ISO = r"[0-9]{{4}}[/-][0-1]?[0-9][/-][0-3]?[0-9]"
+YEAR_ONLY = r"[0-9]{{4}}"
+DATE_TEXT_ORDINAL = r"[0-3]?[0-9](?:st|nd|rd|th)?[\s][A-Z][a-z]+[\s][0-9]{4}"
 
 # IMPROVED: More flexible pattern for "August 2024", "Aug 2024", etc.
-DATE_MONTH_YEAR_FLEX = r'(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{4}'
+DATE_MONTH_YEAR_FLEX = r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{4}"
 
 # Pre-compiled date patterns with priorities
 
@@ -85,78 +83,199 @@ DATE_MONTH_YEAR_FLEX = r'(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May
 # ============================================================================
 DATE_PATTERNS = [
     # Highest priority: Explicitly labeled dates
-    (re.compile(_build_label_pattern([r'Last\s+Updated', r'Last\s+Revised', r'Date\s+Updated',
-     r'Date\s+Revised'], DATE_TEXT_ORDINAL), re.IGNORECASE), 'labeled_updated', 15),
-    (re.compile(_build_label_pattern([r'Last\s+Updated', r'Last\s+Revised', r'Date\s+Updated',
-     r'Date\s+Revised'], DATE_NUMERIC), re.IGNORECASE), 'labeled_updated_numeric', 15),
-    (re.compile(_build_label_pattern([r'Last\s+Updated', r'Last\s+Revised', r'Date\s+Updated',
-     r'Date\s+Revised'], DATE_MONTH_YEAR_FLEX), re.IGNORECASE), 'labeled_updated_month_year', 15),
-
+    (
+        re.compile(
+            _build_label_pattern(
+                [
+                    r"Last\s+Updated",
+                    r"Last\s+Revised",
+                    r"Date\s+Updated",
+                    r"Date\s+Revised",
+                ],
+                DATE_TEXT_ORDINAL,
+            ),
+            re.IGNORECASE,
+        ),
+        "labeled_updated",
+        15,
+    ),
+    (
+        re.compile(
+            _build_label_pattern(
+                [
+                    r"Last\s+Updated",
+                    r"Last\s+Revised",
+                    r"Date\s+Updated",
+                    r"Date\s+Revised",
+                ],
+                DATE_NUMERIC,
+            ),
+            re.IGNORECASE,
+        ),
+        "labeled_updated_numeric",
+        15,
+    ),
+    (
+        re.compile(
+            _build_label_pattern(
+                [
+                    r"Last\s+Updated",
+                    r"Last\s+Revised",
+                    r"Date\s+Updated",
+                    r"Date\s+Revised",
+                ],
+                DATE_MONTH_YEAR_FLEX,
+            ),
+            re.IGNORECASE,
+        ),
+        "labeled_updated_month_year",
+        15,
+    ),
     # Document header patterns
-    (re.compile(_build_label_pattern([r'Document\s+Date', r'Issue\s+Date',
-                                      r'Date\s+of\s+fire\s+risk\s+assessment', r'Effective\s+Date'], DATE_TEXT_ORDINAL), re.IGNORECASE), 'doc_header', 14),
-    (re.compile(_build_label_pattern([r'Document\s+Date', r'Issue\s+Date',
-                                      r'Date\s+of\s+fire\s+risk\s+assessment', r'Effective\s+Date'], DATE_MONTH_YEAR_FLEX), re.IGNORECASE), 'doc_header_month_year', 14),
-    (re.compile(
-        r'(?:Version|Rev\.?\s+|Revision)[:\s]*([0-9]{1,2}[\s/.-][A-Z][a-z]{2}[\s/.-][0-9]{4})', re.IGNORECASE), 'version_date', 13),
-
+    (
+        re.compile(
+            _build_label_pattern(
+                [
+                    r"Document\s+Date",
+                    r"Issue\s+Date",
+                    r"Date\s+of\s+fire\s+risk\s+assessment",
+                    r"Effective\s+Date",
+                ],
+                DATE_TEXT_ORDINAL,
+            ),
+            re.IGNORECASE,
+        ),
+        "doc_header",
+        14,
+    ),
+    (
+        re.compile(
+            _build_label_pattern(
+                [
+                    r"Document\s+Date",
+                    r"Issue\s+Date",
+                    r"Date\s+of\s+fire\s+risk\s+assessment",
+                    r"Effective\s+Date",
+                ],
+                DATE_MONTH_YEAR_FLEX,
+            ),
+            re.IGNORECASE,
+        ),
+        "doc_header_month_year",
+        14,
+    ),
+    (
+        re.compile(
+            r"(?:Version|Rev\.?\s+|Revision)[:\s]*([0-9]{1,2}[\s/.-][A-Z][a-z]{2}[\s/.-][0-9]{4})",
+            re.IGNORECASE,
+        ),
+        "version_date",
+        13,
+    ),
     # General labeled dates
-    (re.compile(_build_label_pattern(['Updated', 'Revised', r'Review\s+Date', r'Publication\s+Date',
-     'Published'], DATE_TEXT_ORDINAL), re.IGNORECASE), 'labeled_general', 12),
-    (re.compile(_build_label_pattern(
-        ['Updated', 'Revised'], DATE_NUMERIC), re.IGNORECASE), 'labeled_general_numeric', 12),
-    (re.compile(_build_label_pattern(['Updated', 'Revised', r'Review\s+Date', r'Publication\s+Date',
-     'Published'], DATE_MONTH_YEAR_FLEX), re.IGNORECASE), 'labeled_general_month_year', 12),
-
+    (
+        re.compile(
+            _build_label_pattern(
+                [
+                    "Updated",
+                    "Revised",
+                    r"Review\s+Date",
+                    r"Publication\s+Date",
+                    "Published",
+                ],
+                DATE_TEXT_ORDINAL,
+            ),
+            re.IGNORECASE,
+        ),
+        "labeled_general",
+        12,
+    ),
+    (
+        re.compile(
+            _build_label_pattern(["Updated", "Revised"], DATE_NUMERIC), re.IGNORECASE
+        ),
+        "labeled_general_numeric",
+        12,
+    ),
+    (
+        re.compile(
+            _build_label_pattern(
+                [
+                    "Updated",
+                    "Revised",
+                    r"Review\s+Date",
+                    r"Publication\s+Date",
+                    "Published",
+                ],
+                DATE_MONTH_YEAR_FLEX,
+            ),
+            re.IGNORECASE,
+        ),
+        "labeled_general_month_year",
+        12,
+    ),
     # Standard text dates (with ordinals)
-    (re.compile(rf'\b({DATE_TEXT_ORDINAL})\b',
-     re.IGNORECASE), 'standard_text_ordinal', 10),
-    (re.compile(rf'\b({DATE_TEXT})\b', re.IGNORECASE), 'standard_text', 10),
+    (
+        re.compile(rf"\b({DATE_TEXT_ORDINAL})\b", re.IGNORECASE),
+        "standard_text_ordinal",
+        10,
+    ),
+    (re.compile(rf"\b({DATE_TEXT})\b", re.IGNORECASE), "standard_text", 10),
     # ADDED: Standalone month-year pattern with priority 9 (between standard text and dot formats)
-    (re.compile(rf'\b({DATE_MONTH_YEAR_FLEX})\b',
-     re.IGNORECASE), 'month_year_flex', 9),
-    (re.compile(rf'\b({DATE_DOT_DMY})\b', re.IGNORECASE), 'dot_dmy', 8),
-    (re.compile(rf'\b({DATE_DOT_YMD})\b', re.IGNORECASE), 'dot_ymd', 8),
-    (re.compile(rf'\b({DATE_TEXT_FLEX})\b',
-     re.IGNORECASE), 'standard_text_slash', 7),
-    (re.compile(rf'\b({DATE_ABBREV})\b',
-     re.IGNORECASE), 'abbreviated_text', 7),
-
+    (re.compile(rf"\b({DATE_MONTH_YEAR_FLEX})\b", re.IGNORECASE), "month_year_flex", 9),
+    (re.compile(rf"\b({DATE_DOT_DMY})\b", re.IGNORECASE), "dot_dmy", 8),
+    (re.compile(rf"\b({DATE_DOT_YMD})\b", re.IGNORECASE), "dot_ymd", 8),
+    (re.compile(rf"\b({DATE_TEXT_FLEX})\b", re.IGNORECASE), "standard_text_slash", 7),
+    (re.compile(rf"\b({DATE_ABBREV})\b", re.IGNORECASE), "abbreviated_text", 7),
     # Numeric formats
-    (re.compile(rf'\b({DATE_NUMERIC})\b',
-     re.IGNORECASE), 'standard_numeric', 6),
-    (re.compile(rf'\b({DATE_ISO})\b', re.IGNORECASE), 'iso_date', 6),
-
+    (re.compile(rf"\b({DATE_NUMERIC})\b", re.IGNORECASE), "standard_numeric", 6),
+    (re.compile(rf"\b({DATE_ISO})\b", re.IGNORECASE), "iso_date", 6),
     # Low priority: Copyright/version years (often template dates)
-    (re.compile(
-        rf'(?:©|Copyright)[:\s]*({YEAR_ONLY})', re.IGNORECASE), 'copyright_year', 3),
-    (re.compile(
-        rf'(?:Rev\.?\s*|Version\s+)[:\s]*({YEAR_ONLY})', re.IGNORECASE), 'version_year', 3),
+    (
+        re.compile(rf"(?:©|Copyright)[:\s]*({YEAR_ONLY})", re.IGNORECASE),
+        "copyright_year",
+        3,
+    ),
+    (
+        re.compile(rf"(?:Rev\.?\s*|Version\s+)[:\s]*({YEAR_ONLY})", re.IGNORECASE),
+        "version_year",
+        3,
+    ),
 ]
 PLANON_DATE_PATTERNS = [
     re.compile(
-        r'Property condition assessment date[:\s]+([0-9]{2}\s+[A-Za-z]+\s+[0-9]{4})', re.IGNORECASE),
+        r"Property condition assessment date[:\s]+([0-9]{2}\s+[A-Za-z]+\s+[0-9]{4})",
+        re.IGNORECASE,
+    ),
     re.compile(
-        r'condition assessment date[:\s]+([0-9]{2}\s+[A-Za-z]+\s+[0-9]{4})', re.IGNORECASE),
+        r"condition assessment date[:\s]+([0-9]{2}\s+[A-Za-z]+\s+[0-9]{4})",
+        re.IGNORECASE,
+    ),
     re.compile(
-        r'assessment date[:\s]+([0-9]{2}\s+[A-Za-z]+\s+[0-9]{4})', re.IGNORECASE),
+        r"assessment date[:\s]+([0-9]{2}\s+[A-Za-z]+\s+[0-9]{4})", re.IGNORECASE
+    ),
 ]
 
 # Quick patterns for single-result extraction (pre-compiled)
 QUICK_DATE_PATTERNS = [
     re.compile(
-        r'(?:Last\s+Updated|Last\s+Revised|Updated|Revised|Published)[:\s]+([0-3]?[0-9](?:st|nd|rd|th)?[\s/.-][A-Za-z]+[\s/.-][0-9]{4})', re.IGNORECASE),
+        r"(?:Last\s+Updated|Last\s+Revised|Updated|Revised|Published)[:\s]+([0-3]?[0-9](?:st|nd|rd|th)?[\s/.-][A-Za-z]+[\s/.-][0-9]{4})",
+        re.IGNORECASE,
+    ),
     re.compile(
-        r'(?:Last\s+Updated|Last\s+Revised|Updated|Revised)[:\s]+([0-3]?[0-9][\s/.-][0-3]?[0-9][\s/.-][0-9]{4})', re.IGNORECASE),
+        r"(?:Last\s+Updated|Last\s+Revised|Updated|Revised)[:\s]+([0-3]?[0-9][\s/.-][0-3]?[0-9][\s/.-][0-9]{4})",
+        re.IGNORECASE,
+    ),
     # ADDED: Month-year pattern to quick patterns
     re.compile(
-        rf'(?:Last\s+Updated|Last\s+Revised|Updated|Revised|Published)[:\s]+({DATE_MONTH_YEAR_FLEX})', re.IGNORECASE),
-    re.compile(rf'\b({DATE_TEXT_ORDINAL})\b', re.IGNORECASE),
-    re.compile(rf'\b({DATE_TEXT})\b', re.IGNORECASE),
-    re.compile(rf'\b({DATE_MONTH_YEAR_FLEX})\b', re.IGNORECASE),
+        rf"(?:Last\s+Updated|Last\s+Revised|Updated|Revised|Published)[:\s]+({DATE_MONTH_YEAR_FLEX})",
+        re.IGNORECASE,
+    ),
+    re.compile(rf"\b({DATE_TEXT_ORDINAL})\b", re.IGNORECASE),
+    re.compile(rf"\b({DATE_TEXT})\b", re.IGNORECASE),
+    re.compile(rf"\b({DATE_MONTH_YEAR_FLEX})\b", re.IGNORECASE),
 ]
-DATE_FIELDS_PRIORITY = ['review_date', 'updated',
-                        'revised', 'date', 'document_date']
+DATE_FIELDS_PRIORITY = ["review_date", "updated", "revised", "date", "document_date"]
 
 # ============================================================================
 # DATE PARSING
@@ -176,7 +295,7 @@ def parse_date_string(date_str: str) -> datetime:
 
     # Handle ordinal suffixes (1st, 2nd, 3rd, 21st, etc.)
     # Remove ordinal suffixes before parsing
-    date_str_clean = re.sub(r'\b(\d{1,2})(st|nd|rd|th)\b', r'\1', date_str)
+    date_str_clean = re.sub(r"\b(\d{1,2})(st|nd|rd|th)\b", r"\1", date_str)
 
     for fmt in DATE_FORMATS:
         try:
@@ -256,8 +375,7 @@ def extract_date_from_metadata(metadata: dict[str, Any]) -> Optional[str]:
         if date_val and date_val != "publication date unknown":
             parsed = parse_date_string(str(date_val))
             if is_valid_date(parsed):
-                logging.debug(
-                    "Found date in metadata[%s]: %s", date_field, date_val)
+                logging.debug("Found date in metadata[%s]: %s", date_field, date_val)
                 return str(date_val)
 
     return None
@@ -285,7 +403,7 @@ def extract_dates_from_text(text: str) -> list[tuple[datetime, str, str, int]]:
 
         for match in matches:
             # Clean up the match
-            match = re.sub(r'\s+', ' ', match.strip())
+            match = re.sub(r"\s+", " ", match.strip())
 
             parsed = parse_date_string(match)
 
@@ -293,7 +411,9 @@ def extract_dates_from_text(text: str) -> list[tuple[datetime, str, str, int]]:
                 found_dates.append((parsed, match, pattern_type, priority))
                 logging.debug(
                     "Found date in text (%s, priority=%d): %s",
-                    pattern_type, priority, match
+                    pattern_type,
+                    priority,
+                    match,
                 )
 
     return found_dates
@@ -303,10 +423,9 @@ def extract_dates_from_text(text: str) -> list[tuple[datetime, str, str, int]]:
 # COMPREHENSIVE DATE SEARCH
 # ============================================================================
 
+
 def search_source_for_latest_date(
-    idx: Any,
-    key_value: str,
-    namespace: Optional[str] = None
+    idx: Any, key_value: str, namespace: Optional[str] = None
 ) -> tuple[Optional[str], list[dict[str, Any]]]:
     """
     Search for all chunks/documents with the same key and find the latest date.
@@ -324,9 +443,9 @@ def search_source_for_latest_date(
         display_ns = namespace if namespace is not None else "None (default)"
         logging.debug(
             "Searching for dates - Index: %s, Namespace: %s, Key: %s",
-            getattr(idx, '_index_name', 'unknown'),
+            getattr(idx, "_index_name", "unknown"),
             display_ns,
-            key_value
+            key_value,
         )
 
         matching_docs = _fetch_document_chunks(idx, key_value, namespace)
@@ -350,22 +469,22 @@ def search_source_for_latest_date(
             if metadata_date:
                 parsed = parse_date_string(metadata_date)
                 if is_valid_date(parsed):
-                    all_dates.append(
-                        (parsed, metadata_date, doc_id, "metadata", 20))
+                    all_dates.append((parsed, metadata_date, doc_id, "metadata", 20))
                     chunks_with_dates.add(chunk_num)
 
             # Then search text
             text_dates = extract_dates_from_text(text)
             for parsed, date_str, pattern_type, priority in text_dates:
-                all_dates.append(
-                    (parsed, date_str, doc_id, pattern_type, priority))
+                all_dates.append((parsed, date_str, doc_id, pattern_type, priority))
                 chunks_with_dates.add(chunk_num)
 
         # Log summary
         logging.info(
             "Date search for '%s': %d chunks, %d with dates, %d total dates",
-            key_value, len(matching_docs), len(
-                chunks_with_dates), len(all_dates)
+            key_value,
+            len(matching_docs),
+            len(chunks_with_dates),
+            len(all_dates),
         )
 
         if not all_dates:
@@ -380,26 +499,29 @@ def search_source_for_latest_date(
 
         logging.info(
             "Selected date: '%s' (source: %s, priority: %d, from: %s)",
-            latest_date_str, source_type, priority, doc_id
+            latest_date_str,
+            source_type,
+            priority,
+            doc_id,
         )
 
         # Log alternative candidates for transparency
         if len(all_dates) > 1:
             alternatives = all_dates[1:4]
-            logging.debug("Alternative dates: %s", [
-                          d[1] for d in alternatives])
+            logging.debug("Alternative dates: %s", [d[1] for d in alternatives])
 
         return latest_date_str, matching_docs
 
     except Exception as e:  # pylint: disable=broad-except
         logging.error(
-            "Error searching dates for key='%s': %s",
-            key_value, e, exc_info=True
+            "Error searching dates for key='%s': %s", key_value, e, exc_info=True
         )
         return None, []
 
 
-def _fetch_document_chunks(idx, key_value: str, namespace: Optional[str]) -> list[dict[str, Any]]:
+def _fetch_document_chunks(
+    idx, key_value: str, namespace: Optional[str]
+) -> list[dict[str, Any]]:
     """
     Fetch all chunks for a document using metadata filtering or semantic search.
 
@@ -415,14 +537,14 @@ def _fetch_document_chunks(idx, key_value: str, namespace: Optional[str]) -> lis
     try:
         # Build query parameters, only include namespace if not None
         query_params = {
-            'vector': DUMMY_VECTOR,
-            'filter': {"key": {"$eq": key_value}},
-            'top_k': 100,
-            'include_metadata': True
+            "vector": DUMMY_VECTOR,
+            "filter": {"key": {"$eq": key_value}},
+            "top_k": 100,
+            "include_metadata": True,
         }
 
         if namespace is not None:
-            query_params['namespace'] = namespace
+            query_params["namespace"] = namespace
 
         raw = idx.query(**query_params)
         matching_docs = normalise_matches(raw)
@@ -430,7 +552,8 @@ def _fetch_document_chunks(idx, key_value: str, namespace: Optional[str]) -> lis
         if matching_docs:
             logging.debug(
                 "Found %d chunks using metadata filter for key='%s'",
-                len(matching_docs), key_value
+                len(matching_docs),
+                key_value,
             )
             return matching_docs
 
@@ -453,7 +576,8 @@ def _fetch_document_chunks(idx, key_value: str, namespace: Optional[str]) -> lis
 
     logging.debug(
         "Found %d chunks via semantic search for key='%s'",
-        len(matching_docs), key_value
+        len(matching_docs),
+        key_value,
     )
 
     return matching_docs
@@ -498,6 +622,7 @@ def extract_date_from_single_result(result: dict[str, Any]) -> Optional[str]:
     except Exception as e:  # pylint: disable=broad-except
         logging.warning("Error extracting date from single result: %s", e)
         return None
+
 
 # ============================================================================
 # FRA DATE PARSERS

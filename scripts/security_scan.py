@@ -5,7 +5,7 @@ Security dependency scanning script for Alfred V3.
 
 This script performs comprehensive security checks on project dependencies:
 1. Checks for known vulnerabilities using safety scan (new command)
-2. Validates dependency pinning
+2. Validates Poetry lock
 3. Runs pip-audit checks
 4. Generates detailed reports
 5. Can be integrated into CI/CD pipelines
@@ -23,20 +23,20 @@ Note: Uses .safety-policy.json for vulnerability suppressions.
 
 from __future__ import annotations
 
+import argparse
+import json
+import os
 import subprocess
 import sys
-import json
-import argparse
-import os
 import time
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 # Force UTF-8 encoding for Windows compatibility
-if hasattr(sys.stdout, 'reconfigure'):
-    sys.stdout.reconfigure(encoding='utf-8')  # type: ignore
-os.environ['PYTHONIOENCODING'] = 'utf-8'
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")  # type: ignore
+os.environ["PYTHONIOENCODING"] = "utf-8"
 
 
 class ProgressTracker:
@@ -54,11 +54,15 @@ class ProgressTracker:
         """Mark the start of a check."""
         self.check_start[check_name] = time.time()
         elapsed = time.time() - self.start_time
-        progress = (self.completed_checks / self.total_checks *
-                    50) if self.total_checks > 0 else 0
+        progress = (
+            (self.completed_checks / self.total_checks * 50)
+            if self.total_checks > 0
+            else 0
+        )
         bar = "=" * int(progress) + "-" * (50 - int(progress))
         print(
-            f"\n[{bar}] [{self.completed_checks}/{self.total_checks}] {check_name}...")
+            f"\n[{bar}] [{self.completed_checks}/{self.total_checks}] {check_name}..."
+        )
         sys.stdout.flush()
 
     def end_check(self, check_name: str, success: bool = True) -> None:
@@ -68,7 +72,11 @@ class ProgressTracker:
             self.check_times[check_name] = elapsed
         self.completed_checks += 1
         status = "[OK]" if success else "[!] "
-        time_str = f"({self.check_times.get(check_name, 0):.1f}s)" if check_name in self.check_times else ""
+        time_str = (
+            f"({self.check_times.get(check_name, 0):.1f}s)"
+            if check_name in self.check_times
+            else ""
+        )
         print(f"  {status} {check_name} {time_str}")
         sys.stdout.flush()
 
@@ -76,8 +84,7 @@ class ProgressTracker:
         """Get timing summary."""
         total_time = time.time() - self.start_time
         times_str = ", ".join(
-            f"{name}: {duration:.1f}s"
-            for name, duration in self.check_times.items()
+            f"{name}: {duration:.1f}s" for name, duration in self.check_times.items()
         )
         return f"Total: {total_time:.1f}s ({times_str})"
 
@@ -89,9 +96,9 @@ def run_command(cmd: list[str]) -> tuple[int, str, str]:
             cmd,
             capture_output=True,
             text=True,
-            encoding='utf-8',
-            errors='replace',
-            check=False
+            encoding="utf-8",
+            errors="replace",
+            check=False,
         )
         return result.returncode, result.stdout, result.stderr
     except FileNotFoundError:
@@ -100,8 +107,7 @@ def run_command(cmd: list[str]) -> tuple[int, str, str]:
 
 def check_safety_installed() -> bool:
     """Check if safety package is installed."""
-    returncode, _, _ = run_command(
-        [sys.executable, "-m", "safety", "--version"])
+    returncode, _, _ = run_command([sys.executable, "-m", "safety", "--version"])
     return returncode == 0
 
 
@@ -176,8 +182,7 @@ def run_safety_scan(json_format: bool = False) -> dict[str, Any]:
 def run_pip_audit(json_format: bool = False) -> dict[str, Any]:
     """Run pip-audit for dependency security."""
     # Try executable first, then module invocation for environment consistency
-    commands: list[list[str]] = [["pip-audit"],
-                                 [sys.executable, "-m", "pip_audit"]]
+    commands: list[list[str]] = [["pip-audit"], [sys.executable, "-m", "pip_audit"]]
 
     if json_format:
         commands = [cmd + ["--format", "json"] for cmd in commands]
@@ -196,9 +201,8 @@ def run_pip_audit(json_format: bool = False) -> dict[str, Any]:
             continue
         break
 
-    pip_audit_missing = (
-        ("command not found" in stderr.lower())
-        or ("no module named pip_audit" in stderr.lower())
+    pip_audit_missing = ("command not found" in stderr.lower()) or (
+        "no module named pip_audit" in stderr.lower()
     )
 
     if pip_audit_missing and not stdout.strip():
@@ -218,50 +222,28 @@ def run_pip_audit(json_format: bool = False) -> dict[str, Any]:
     }
 
 
-def check_requirements_pinning() -> dict[str, Any]:
-    """Check that all dependencies in requirements.txt are pinned."""
-    req_file = Path(__file__).parent.parent / "requirements.txt"
+def check_poetry_lock() -> dict[str, Any]:
+    """Check that poetry.lock exists (dependencies are resolved and pinned)."""
+    lock_file = Path(__file__).parent.parent / "poetry.lock"
 
-    if not req_file.exists():
+    if not lock_file.exists():
         return {
-            "tool": "requirements-pinning",
+            "tool": "poetry-lock",
             "success": False,
-            "error": f"requirements.txt not found at {req_file}"
+            "error": f"poetry.lock not found at {lock_file}",
         }
 
-    unpinned = []
-    pinned = []
-
-    with open(req_file, 'r', encoding='utf-8') as f:
-        for line_num, line in enumerate(f, 1):
-            line = line.strip()
-
-            # Skip empty lines and comments
-            if not line or line.startswith('#'):
-                continue
-
-            # Skip platform-specific lines
-            if ';' in line:
-                line = line.split(';')[0].strip()
-
-            # Check if pinned
-            if '==' in line:
-                pinned.append((line_num, line))
-            elif any(op in line for op in ['>=', '<=', '>', '<', '~=']):
-                unpinned.append((line_num, line))
-            elif line and not line.startswith('-'):
-                unpinned.append((line_num, line))
-
+    lock_size = lock_file.stat().st_size
     return {
-        "tool": "requirements-pinning",
-        "success": len(unpinned) == 0,
-        "pinned_count": len(pinned),
-        "unpinned_count": len(unpinned),
-        "unpinned_packages": unpinned,
+        "tool": "poetry-lock",
+        "success": lock_size > 0,
+        "lock_bytes": lock_size,
     }
 
 
-def generate_html_report(results: dict[str, Any], output_file: str = "security_report.html"):
+def generate_html_report(
+    results: dict[str, Any], output_file: str = "security_report.html"
+):
     """Generate an HTML report of security scan results."""
     html_content = f"""
     <!DOCTYPE html>
@@ -294,7 +276,7 @@ def generate_html_report(results: dict[str, Any], output_file: str = "security_r
     </html>
     """
 
-    with open(output_file, 'w', encoding='utf-8') as f:
+    with open(output_file, "w", encoding="utf-8") as f:
         f.write(html_content)
 
     print(f"HTML report generated: {output_file}")
@@ -306,54 +288,43 @@ def main():
         description="Security dependency scanning for Alfred V3"
     )
     parser.add_argument(
-        "--json",
-        action="store_true",
-        help="Output results in JSON format"
+        "--json", action="store_true", help="Output results in JSON format"
     )
     parser.add_argument(
         "--strict",
         action="store_true",
-        help="Exit with non-zero code if any vulnerabilities found"
+        help="Exit with non-zero code if any vulnerabilities found",
     )
-    parser.add_argument(
-        "--html",
-        action="store_true",
-        help="Generate HTML report"
-    )
+    parser.add_argument("--html", action="store_true", help="Generate HTML report")
     args = parser.parse_args()
 
     print("[OK]  Alfred V3 - Security Dependency Scanner")
     print("=" * 60)
     print("[*] Starting security checks...\n")
 
-    results = {
-        "timestamp": datetime.now().isoformat(),
-        "checks": []
-    }
+    results = {"timestamp": datetime.now().isoformat(), "checks": []}
 
     # Initialize progress tracker
     tracker = ProgressTracker(total_checks=3)
 
-    # Check 1: Requirements pinning
-    tracker.start_check("Requirements pinning validation")
-    pinning_result = check_requirements_pinning()
-    tracker.end_check("Requirements pinning validation",
-                      pinning_result["success"])
-    results["checks"].append(pinning_result)
+    # Check 1: Poetry lock file
+    tracker.start_check("Poetry lock validation")
+    lock_result = check_poetry_lock()
+    tracker.end_check("Poetry lock validation", lock_result["success"])
+    results["checks"].append(lock_result)
 
-    if pinning_result["success"]:
-        print(
-            f"    {pinning_result['pinned_count']} packages verified")
+    if lock_result["success"]:
+        print(f"    poetry.lock present ({lock_result['lock_bytes']} bytes)")
     else:
-        print(
-            f"    Found {pinning_result['unpinned_count']} unpinned packages")
+        print("    poetry.lock missing - run: poetry lock")
 
     # Check 2: Safety scan (new command)
     if check_safety_installed():
         tracker.start_check("Vulnerability database scan (safety)")
         safety_result = run_safety_scan(json_format=args.json)
-        tracker.end_check("Vulnerability database scan (safety)",
-                          safety_result["success"])
+        tracker.end_check(
+            "Vulnerability database scan (safety)", safety_result["success"]
+        )
         results["checks"].append(safety_result)
 
         if safety_result["success"]:
@@ -369,17 +340,20 @@ def main():
     # Check 3: Pip audit (if available)
     tracker.start_check("Dependency audit scan (pip-audit)")
     pip_audit_result = run_pip_audit(json_format=args.json)
-    tracker.end_check("Dependency audit scan (pip-audit)",
-                      pip_audit_result["success"])
+    tracker.end_check("Dependency audit scan (pip-audit)", pip_audit_result["success"])
     results["checks"].append(pip_audit_result)
-    if not pip_audit_result["success"] and "not installed" in pip_audit_result.get("error", "").lower():
+    if (
+        not pip_audit_result["success"]
+        and "not installed" in pip_audit_result.get("error", "").lower()
+    ):
         print("    pip-audit not installed in active environment")
         print("    Install with: python -m pip install pip-audit")
 
     # Summary
     total_checks = len(results["checks"])
     successful_checks = sum(
-        1 for check in results["checks"] if check.get("success", False))
+        1 for check in results["checks"] if check.get("success", False)
+    )
 
     summary = f"{successful_checks}/{total_checks} security checks passed"
     results["summary"] = summary
@@ -396,7 +370,9 @@ def main():
         generate_html_report(results)
 
     # Exit code
-    if args.strict and not all(check.get("success", False) for check in results["checks"]):
+    if args.strict and not all(
+        check.get("success", False) for check in results["checks"]
+    ):
         sys.exit(1)
     else:
         sys.exit(0)

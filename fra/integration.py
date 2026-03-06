@@ -1,25 +1,27 @@
 """
 FRA-specific integration utilities for ingest process.
 """
+
 from __future__ import annotations
 
+import zlib
 from collections.abc import Mapping
 from datetime import datetime, timezone
-import zlib
-from typing import Any, TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from redis.exceptions import RedisError
 
-from date_utils import parse_iso_date
-from alfred_exceptions import wrap_exception, IngestError, ExternalServiceError
+from alfred_exceptions import ExternalServiceError, IngestError, wrap_exception
 from building.normaliser import normalise_building_name
 from config import (
     FRA_RISK_ITEMS_NAMESPACE,
-    PAGE_LIMIT,
     INGEST_DEDUP_FETCH_BATCH_SIZE,
+    PAGE_LIMIT,
 )
 from config.constant import FRA_PARTITION_KEY_BUCKET_SIZE
+from date_utils import parse_iso_date
 from interfaces import JobRecord
+
 from .types import EnrichedRiskItem
 
 if TYPE_CHECKING:
@@ -30,7 +32,9 @@ if TYPE_CHECKING:
 # ============================================================================
 
 
-def _fra_partition_key(building: str, buckets: int = FRA_PARTITION_KEY_BUCKET_SIZE) -> str:
+def _fra_partition_key(
+    building: str, buckets: int = FRA_PARTITION_KEY_BUCKET_SIZE
+) -> str:
     """Generate a partition key for a building name to distribute load across index partitions."""
     normalised = building.strip().lower().encode("utf-8")
     bucket = zlib.crc32(normalised) % buckets
@@ -47,9 +51,9 @@ def _assessment_date_to_int(value: str | None) -> int | None:
     return parsed.year * 10000 + parsed.month * 100 + parsed.day
 
 
-def mark_superseded_risk_items(ctx: IngestContext,
-                               building: str,
-                               new_assessment_date: str) -> list[str]:
+def mark_superseded_risk_items(
+    ctx: IngestContext, building: str, new_assessment_date: str
+) -> list[str]:
     """Mark existing risk items for the same building with older assessment dates as superseded."""
     building_key = normalise_building_name(building)
     registry_id = f"fra_supersede:{building_key}:{new_assessment_date}"
@@ -71,7 +75,8 @@ def mark_superseded_risk_items(ctx: IngestContext,
             except (RedisError, OSError, ValueError, TypeError) as e:
                 mapped_error = wrap_exception(e)
                 ctx.logger.warning(
-                    "JobRegistry lookup failed for %s: %s", registry_id, mapped_error)
+                    "JobRegistry lookup failed for %s: %s", registry_id, mapped_error
+                )
             if existing and existing.status == "success":
                 ctx.logger.info(
                     "Supersession already recorded for %s (assessment: %s); skipping",
@@ -88,14 +93,16 @@ def mark_superseded_risk_items(ctx: IngestContext,
     except (RedisError, OSError, ValueError, TypeError) as e:
         mapped_error = wrap_exception(e)
         ctx.logger.warning(
-            "JobRegistry start failed for %s: %s", registry_id, mapped_error)
+            "JobRegistry start failed for %s: %s", registry_id, mapped_error
+        )
 
     try:
         existing = ctx.job_registry.get(registry_id)
     except (RedisError, OSError, ValueError, TypeError) as e:
         mapped_error = wrap_exception(e)
         ctx.logger.warning(
-            "JobRegistry lookup failed for %s: %s", registry_id, mapped_error)
+            "JobRegistry lookup failed for %s: %s", registry_id, mapped_error
+        )
         existing = None
     if existing and existing.status == "success":
         ctx.logger.info(
@@ -133,7 +140,9 @@ def mark_superseded_risk_items(ctx: IngestContext,
 
     try:
         if getattr(ctx.config, "dry_run", False):
-            raise IngestError("Dry-run enabled: supersession query must not be executed")
+            raise IngestError(
+                "Dry-run enabled: supersession query must not be executed"
+            )
         query_vector: list[float] | None = None
         cached = ctx.cache.get_embedding(building)
         if cached:
@@ -169,18 +178,25 @@ def mark_superseded_risk_items(ctx: IngestContext,
             include_metadata=True,
             include_values=False,
         )
-    except (ExternalServiceError, IngestError, OSError, ValueError, TypeError, ConnectionError, TimeoutError, RuntimeError) as e:
+    except (
+        ExternalServiceError,
+        IngestError,
+        OSError,
+        ValueError,
+        TypeError,
+        ConnectionError,
+        TimeoutError,
+        RuntimeError,
+    ) as e:
         mapped_error = wrap_exception(e)
-        ctx.logger.error(
-            "Failed to query existing risk items: %s", mapped_error)
+        ctx.logger.error("Failed to query existing risk items: %s", mapped_error)
         try:
             ctx.job_registry.upsert(
                 JobRecord(
                     job_id=registry_id,
                     job_type="fra_supersession",
                     status="failed",
-                    started_at_iso=datetime.now(
-                        timezone.utc).isoformat() + "Z",
+                    started_at_iso=datetime.now(timezone.utc).isoformat() + "Z",
                     finished_at_iso=None,
                     error=str(mapped_error),
                     meta={
@@ -222,8 +238,7 @@ def mark_superseded_risk_items(ctx: IngestContext,
                     job_id=registry_id,
                     job_type="fra_supersession",
                     status="partial",
-                    started_at_iso=datetime.now(
-                        timezone.utc).isoformat() + "Z",
+                    started_at_iso=datetime.now(timezone.utc).isoformat() + "Z",
                     finished_at_iso=None,
                     error=f"query_truncated_top_k_{top_k}",
                     meta={
@@ -304,7 +319,16 @@ def mark_superseded_risk_items(ctx: IngestContext,
         except Exception:
             pass
         updated_ids.extend(eligible_ids)
-    except (ExternalServiceError, IngestError, OSError, ValueError, TypeError, ConnectionError, TimeoutError, RuntimeError) as e:
+    except (
+        ExternalServiceError,
+        IngestError,
+        OSError,
+        ValueError,
+        TypeError,
+        ConnectionError,
+        TimeoutError,
+        RuntimeError,
+    ) as e:
         mapped_error = wrap_exception(e)
         ctx.logger.warning(
             "Bulk supersession update failed; falling back to per-item updates: %s",
@@ -322,23 +346,33 @@ def mark_superseded_risk_items(ctx: IngestContext,
                     set_metadata={
                         "superseded_by": new_assessment_date,
                         "is_current": False,
-                        "supersession_epoch": new_assessment_date_int or new_assessment_date,
+                        "supersession_epoch": new_assessment_date_int
+                        or new_assessment_date,
                     },
                 )
                 try:
-                    ctx.stats.increment(
-                        "fra_supersession_per_item_updates_total")
+                    ctx.stats.increment("fra_supersession_per_item_updates_total")
                 except Exception:
                     pass
                 updated_ids.append(item_id)
-            except (ExternalServiceError, IngestError, OSError, ValueError, TypeError, ConnectionError, TimeoutError, RuntimeError) as per_item_error:
+            except (
+                ExternalServiceError,
+                IngestError,
+                OSError,
+                ValueError,
+                TypeError,
+                ConnectionError,
+                TimeoutError,
+                RuntimeError,
+            ) as per_item_error:
                 mapped_per_item_error = wrap_exception(per_item_error)
                 ctx.logger.error(
                     "Failed to update %s: %s", item_id, mapped_per_item_error
                 )
                 try:
                     ctx.stats.increment(
-                        "fra_supersession_per_item_updates_failed_total")
+                        "fra_supersession_per_item_updates_failed_total"
+                    )
                 except Exception:
                     pass
 
@@ -368,7 +402,8 @@ def mark_superseded_risk_items(ctx: IngestContext,
     except (RedisError, OSError, ValueError, TypeError) as e:
         mapped_error = wrap_exception(e)
         ctx.logger.warning(
-            "JobRegistry update failed for %s: %s", registry_id, mapped_error)
+            "JobRegistry update failed for %s: %s", registry_id, mapped_error
+        )
     return updated_ids
 
 
@@ -394,19 +429,26 @@ def restore_superseded_items(ctx: IngestContext, item_ids: list[str]) -> int:
                 set_metadata={
                     "is_current": True,
                     # Pinecone metadata values cannot be null; use empty string to clear marker.
-                    "superseded_by": ""
+                    "superseded_by": "",
                 },
-                namespace=FRA_RISK_ITEMS_NAMESPACE
+                namespace=FRA_RISK_ITEMS_NAMESPACE,
             )
             restored += 1
-        except (ExternalServiceError, IngestError, OSError, ValueError, TypeError, ConnectionError, TimeoutError, RuntimeError) as e:
+        except (
+            ExternalServiceError,
+            IngestError,
+            OSError,
+            ValueError,
+            TypeError,
+            ConnectionError,
+            TimeoutError,
+            RuntimeError,
+        ) as e:
             ctx.logger.error(f"Failed to restore {item_id}: {e}")
 
     total = len(item_ids)
     if restored == 0:
-        ctx.logger.error(
-            "Rollback failed: restored 0/%d superseded risk items", total
-        )
+        ctx.logger.error("Rollback failed: restored 0/%d superseded risk items", total)
     elif restored < total:
         ctx.logger.warning(
             "Partial rollback: restored %d/%d superseded risk items",
@@ -417,14 +459,14 @@ def restore_superseded_items(ctx: IngestContext, item_ids: list[str]) -> int:
         ctx.logger.info("Restored %d superseded risk items", restored)
     return restored
 
+
 # ============================================================================
 # BUILDING EXTRACTION FROM TEXT (FRA-SPECIFIC)
 # ============================================================================
 
 
 def deduplicate_risk_items(
-    ctx: IngestContext,
-    new_items: list[EnrichedRiskItem]
+    ctx: IngestContext, new_items: list[EnrichedRiskItem]
 ) -> list[EnrichedRiskItem]:
     """Remove items that already exist in index."""
     new_ids = [item["risk_item_id"] for item in new_items]
@@ -437,13 +479,10 @@ def deduplicate_risk_items(
     )
     for i in range(0, len(new_ids), batch_size):
         batch = [
-            item_id
-            for item_id in new_ids[i:i + batch_size]
-            if item_id is not None
+            item_id for item_id in new_ids[i : i + batch_size] if item_id is not None
         ]
         if batch:
-            response = ctx.index.fetch(
-                ids=batch, namespace=FRA_RISK_ITEMS_NAMESPACE)
+            response = ctx.index.fetch(ids=batch, namespace=FRA_RISK_ITEMS_NAMESPACE)
             existing_ids.update(response.vectors.keys())
 
     # Filter out existing

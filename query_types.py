@@ -8,6 +8,7 @@ from enum import Enum
 
 class QueryType(Enum):
     """All supported query types."""
+
     CONVERSATIONAL = "conversational"
     COUNTING = "counting"
     MAINTENANCE = "maintenance"

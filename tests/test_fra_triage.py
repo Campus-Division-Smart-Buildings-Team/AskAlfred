@@ -4,8 +4,9 @@ import importlib.util
 import sys
 import types
 from datetime import date, timedelta
-import pytest
 from pathlib import Path
+
+import pytest
 
 
 def _load_triage(repo_root: Path):
@@ -171,14 +172,14 @@ def test_critical_overdue_triggers_immediate_action(triage_computer):
     repo_root = Path(__file__).resolve().parents[1]
     _, config = _load_triage(repo_root)
     today = date.today()
-    overdue_days = int(config.FRA_CRITICAL_OVERDUE_DAYS) + \
-        1  # pylint: disable=no-member
+    overdue_days = (
+        int(config.FRA_CRITICAL_OVERDUE_DAYS) + 1
+    )  # pylint: disable=no-member
     item = _base_item(
         risk_level=2,
         job_reference="123456",
         fra_assessment_date=(today - timedelta(days=400)).isoformat(),
-        expected_completion_date=(
-            today - timedelta(days=overdue_days)).isoformat(),
+        expected_completion_date=(today - timedelta(days=overdue_days)).isoformat(),
     )
 
     enriched = triage_computer.compute_flags(item)

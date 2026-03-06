@@ -1,23 +1,25 @@
 # session_manager.py
 from __future__ import annotations
-from dataclasses import dataclass
-from typing import Any, Optional
+
 import time
 from contextlib import contextmanager
+from dataclasses import dataclass
+from typing import Any, Optional
+
 from config import (
-    SESSION_LONG_MESSAGE_LENGTH,
     SESSION_HIGH_CONFIDENCE_THRESHOLD,
-    SESSION_SUMMARY_PREVIEW_LEN,
-    SESSION_SUMMARY_MAX_KEY_POINTS,
-    SESSION_IMPORTANT_KEEP_RATIO,
-    SESSION_IMPORTANT_MIN_KEEP,
     SESSION_IMPORTANCE_BASELINE,
-    SESSION_IMPORTANCE_USER_BONUS,
-    SESSION_IMPORTANCE_INTENT_BONUS,
     SESSION_IMPORTANCE_BUILDING_BONUS,
     SESSION_IMPORTANCE_CONFIDENCE_BONUS,
     SESSION_IMPORTANCE_ERROR_BONUS,
+    SESSION_IMPORTANCE_INTENT_BONUS,
     SESSION_IMPORTANCE_LONG_MESSAGE_BONUS,
+    SESSION_IMPORTANCE_USER_BONUS,
+    SESSION_IMPORTANT_KEEP_RATIO,
+    SESSION_IMPORTANT_MIN_KEEP,
+    SESSION_LONG_MESSAGE_LENGTH,
+    SESSION_SUMMARY_MAX_KEY_POINTS,
+    SESSION_SUMMARY_PREVIEW_LEN,
 )
 
 try:
@@ -33,7 +35,7 @@ _fallback_store: dict[str, Any] = {}
 
 @dataclass
 class ChatMessage:
-    role: str                 # "user" | "assistant" | "system"
+    role: str  # "user" | "assistant" | "system"
     content: str
     metadata: Optional[dict[str, Any]] = None
     ts: Optional[float] = None
@@ -50,13 +52,13 @@ class ChatMessage:
 @dataclass
 class ConversationState:
     messages: list[ChatMessage]
-    rolling_summary: str = ""             # compact summary of prior turns
-    tokens_budget: int = 1200             # soft cap for "context window"
-    window_turns: int = 6                 # last N turns for short-term memory
+    rolling_summary: str = ""  # compact summary of prior turns
+    tokens_budget: int = 1200  # soft cap for "context window"
+    window_turns: int = 6  # last N turns for short-term memory
     max_messages_before_summary: int = 50  # When to start summarizing
-    summary_keep_recent: int = 10          # How many recent messages to keep verbatim
-    summary_key_points: int = 20           # How many key points in summary
-    max_content_length: int = 160          # Characters to keep per message in summary
+    summary_keep_recent: int = 10  # How many recent messages to keep verbatim
+    summary_key_points: int = 20  # How many key points in summary
+    max_content_length: int = 160  # Characters to keep per message in summary
     last_intent: Optional[str] = None
     last_building: Optional[str] = None
     last_handler: Optional[str] = None
@@ -70,7 +72,7 @@ def _get_store() -> dict[str, Any]:
         if "alfred_session" not in st.session_state:
             st.session_state["alfred_session"] = {
                 "state": ConversationState(messages=[]),
-                "skip_semantic_answer": False
+                "skip_semantic_answer": False,
             }
         return st.session_state["alfred_session"]
     # Non-Streamlit fallback
@@ -85,6 +87,7 @@ def _get_conversation_state():
     """Context manager to safely retrieve the ConversationState."""
     store = _get_store()
     yield store["state"]
+
 
 # ---------- Public API ----------
 
@@ -139,14 +142,22 @@ class SessionManager:
     def add_user_message(text: str, metadata: Optional[dict[str, Any]] = None):
         with _get_conversation_state() as state:
             state.messages.append(
-                ChatMessagerole="user", content=text, metadata=metadata or {}, ts=time.time())
+                ChatMessagerole="user",
+                content=text,
+                metadata=metadata or {},
+                ts=time.time(),
+            )
             SessionManager._update_rolling_summary(state)
 
     @staticmethod
     def add_assistant_message(text: str, metadata: Optional[dict[str, Any]] = None):
         with _get_conversation_state() as state:
             state.messages.append(
-                ChatMessagerole="assistant", content=text, metadata=metadata or {}, ts=time.time())
+                ChatMessagerole="assistant",
+                content=text,
+                metadata=metadata or {},
+                ts=time.time(),
+            )
             SessionManager._update_rolling_summary(state)
         SessionManager._update_rolling_summary(state)
 
@@ -191,7 +202,7 @@ class SessionManager:
         max_messages: int = 50,
         keep_recent: int = 10,
         key_points: int = 20,
-        max_content_len: int = 160
+        max_content_len: int = 160,
     ):
         """
         Configure rolling summary behavior.
@@ -227,7 +238,7 @@ class SessionManager:
             state.summary_key_points = key_points
             state.max_content_length = max_content_len
 
-# --- simple, cheap "rolling summary" without extra API calls ---
+    # --- simple, cheap "rolling summary" without extra API calls ---
     @staticmethod
     def _update_rolling_summary(state: ConversationState):
         """
@@ -265,8 +276,7 @@ class SessionManager:
             try:
                 if msg.role == "user":
                     # Truncate user message content
-                    content_preview = (msg.content or "")[
-                        :state.max_content_length]
+                    content_preview = (msg.content or "")[: state.max_content_length]
                     if len(msg.content or "") > state.max_content_length:
                         content_preview += "..."
                     key_points.append(f"U: {content_preview}")
@@ -277,9 +287,9 @@ class SessionManager:
                     if msg.metadata:
                         # Handle both possible metadata structures
                         intent = (
-                            msg.metadata.get("query_type") or
-                            msg.metadata.get("intent") or
-                            msg.metadata.get("predicted_intent")
+                            msg.metadata.get("query_type")
+                            or msg.metadata.get("intent")
+                            or msg.metadata.get("predicted_intent")
                         )
                         handler = msg.metadata.get("handler_used")
                         building = msg.metadata.get("building")
@@ -299,7 +309,7 @@ class SessionManager:
                     # Truncate assistant response
                     content = msg.content or ""
                     if len(content) > state.max_content_length:
-                        content_preview = content[:state.max_content_length] + "..."
+                        content_preview = content[: state.max_content_length] + "..."
                     else:
                         content_preview = content
 
@@ -313,8 +323,7 @@ class SessionManager:
             except Exception as e:
                 # Gracefully handle any errors in summarisation
                 # Don't let a bad message break the entire summary
-                key_points.append(
-                    f"[Error processing message: {type(e).__name__}]")
+                key_points.append(f"[Error processing message: {type(e).__name__}]")
 
         # Keep only the most recent key points to avoid summary explosion
         max_key_points = state.summary_key_points
@@ -335,8 +344,9 @@ class SessionManager:
 
                 # Recent context
                 end_points = key_points[-end_points_count:]
-                key_points = start_points + \
-                    ["... [middle messages omitted] ..."] + end_points
+                key_points = (
+                    start_points + ["... [middle messages omitted] ..."] + end_points
+                )
 
         # Create the summary
         state.rolling_summary = " | ".join(key_points)
@@ -348,6 +358,7 @@ class SessionManager:
         # Optional: Log summary stats for debugging/monitoring
         # print(f"Summary created: {len(messages_to_summarize)} messages → "
         #       f"{len(key_points)} key points. Kept {len(messages_to_keep)} recent.")
+
     # ---------------------------------------------------------
     # QueryContext tracking (required by QueryManager)
     # ---------------------------------------------------------
@@ -372,8 +383,7 @@ class SessionManager:
                 "corrected_query": context.corrected_query,
                 "created_at": context.created_at,
                 "predicted_intent": (
-                    context.predicted_intent.value
-                    if context.predicted_intent else None
+                    context.predicted_intent.value if context.predicted_intent else None
                 ),
                 "ml_intent_confidence": context.ml_intent_confidence,
             }
@@ -401,9 +411,7 @@ class SessionManager:
         with _get_conversation_state() as state:
 
             # intent may be a QueryType enum or string
-            state.last_intent = (
-                intent.value if hasattr(intent, "value") else intent
-            )
+            state.last_intent = intent.value if hasattr(intent, "value") else intent
             state.last_intent_confidence = confidence
 
     @staticmethod
@@ -420,8 +428,7 @@ class SessionManager:
         """Sync internal messages to Streamlit's session_state.messages"""
         if st is not None:
             with _get_conversation_state() as state:
-                st.session_state.messages = [
-                    m.to_dict() for m in state.messages]
+                st.session_state.messages = [m.to_dict() for m in state.messages]
 
     @staticmethod
     def sync_from_streamlit():
@@ -432,19 +439,20 @@ class SessionManager:
                     ChatMessage(**msg) for msg in st.session_state.messages
                 ]
 
+
 # Alternative: More sophisticated approach with importance scoring
 # ================================================================
 
 
 class SessionManagerAdvanced:
     """
-        EXPERIMENTAL: Advanced version with importance-based message retention.
+    EXPERIMENTAL: Advanced version with importance-based message retention.
 
-        This version scores message importance before summarising, keeping more 
-        important messages even if they're older. Use SessionManager for 
-        production; this class is for testing enhanced memory strategies.
+    This version scores message importance before summarising, keeping more
+    important messages even if they're older. Use SessionManager for
+    production; this class is for testing enhanced memory strategies.
 
-        Keeps more important messages even if they're older.
+    Keeps more important messages even if they're older.
     """
 
     # --- Helper Constants for Readability ---
@@ -522,12 +530,13 @@ class SessionManagerAdvanced:
         scored_messages.sort(key=lambda x: x[1], reverse=True)
 
         # Keep top N% of important messages, summarize the rest
-        keep_count = max(SESSION_IMPORTANT_MIN_KEEP, len(scored_messages) //
-                         SessionManagerAdvanced._IMPORTANT_MESSAGES_KEEP_RATIO)
-        messages_to_keep_full = [msg for msg,
-                                 score in scored_messages[:keep_count]]
-        messages_to_summarize = [msg for msg,
-                                 score in scored_messages[keep_count:]]
+        keep_count = max(
+            SESSION_IMPORTANT_MIN_KEEP,
+            len(scored_messages)
+            // SessionManagerAdvanced._IMPORTANT_MESSAGES_KEEP_RATIO,
+        )
+        messages_to_keep_full = [msg for msg, score in scored_messages[:keep_count]]
+        messages_to_summarize = [msg for msg, score in scored_messages[keep_count:]]
 
         # Create summary of less important messages
         key_points = []
@@ -548,7 +557,8 @@ class SessionManagerAdvanced:
 
         max_points = SessionManagerAdvanced._SUMMARY_MAX_KEY_POINTS
         state.rolling_summary = " | ".join(
-            key_points[-max_points:])  # Last 15 key points
+            key_points[-max_points:]
+        )  # Last 15 key points
 
         # Reconstruct messages: important old + recent
         state.messages = messages_to_keep_full + recent_messages
@@ -577,8 +587,7 @@ class SessionManagerAdvanced:
                 "corrected_query": context.corrected_query,
                 "created_at": context.created_at,
                 "predicted_intent": (
-                    context.predicted_intent.value
-                    if context.predicted_intent else None
+                    context.predicted_intent.value if context.predicted_intent else None
                 ),
                 "ml_intent_confidence": context.ml_intent_confidence,
             }
@@ -606,9 +615,7 @@ class SessionManagerAdvanced:
         """
         with _get_conversation_state() as state:
             # intent may be a QueryType enum or string
-            state.last_intent = (
-                intent.value if hasattr(intent, "value") else intent
-            )
+            state.last_intent = intent.value if hasattr(intent, "value") else intent
             state.last_intent_confidence = confidence
 
     @staticmethod

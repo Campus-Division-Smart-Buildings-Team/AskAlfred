@@ -10,15 +10,14 @@ Tests rate limiting controls:
 - Lease acquisition for concurrency control
 """
 
-
 import time
+
 from rate_limiter import (
-    InMemoryRateLimiter,
-    QUERY_RATE_LIMIT_PER_MINUTE,
     API_CALL_RATE_LIMIT_PER_MINUTE,
     FILE_PROCESSING_CONCURRENT_LIMIT,
     FILE_PROCESSING_RATE_LIMIT,
-    BURST_ALLOWANCE,
+    QUERY_RATE_LIMIT_PER_MINUTE,
+    InMemoryRateLimiter,
 )
 
 
@@ -32,12 +31,12 @@ class TestInMemoryRateLimiter:
     def test_first_call_always_allowed(self):
         """Test that first call is always allowed."""
         assert not self.limiter.is_rate_limited(
-            'user_1', max_calls=5, window_seconds=60
+            "user_1", max_calls=5, window_seconds=60
         )
 
     def test_rate_limit_respected(self):
         """Test that rate limit is enforced."""
-        key = 'user_1'
+        key = "user_1"
         max_calls = 3
 
         # First 3 calls should succeed
@@ -49,7 +48,7 @@ class TestInMemoryRateLimiter:
 
     def test_window_reset_allows_new_calls(self):
         """Test that calls reset after window expires."""
-        key = 'user_1'
+        key = "user_1"
         max_calls = 2
         window = 1  # 1 second window
 
@@ -71,16 +70,16 @@ class TestInMemoryRateLimiter:
         max_calls = 2
 
         # User 1 uses up quota
-        self.limiter.is_rate_limited('user_1', max_calls, 60)
-        self.limiter.is_rate_limited('user_1', max_calls, 60)
-        assert self.limiter.is_rate_limited('user_1', max_calls, 60)
+        self.limiter.is_rate_limited("user_1", max_calls, 60)
+        self.limiter.is_rate_limited("user_1", max_calls, 60)
+        assert self.limiter.is_rate_limited("user_1", max_calls, 60)
 
         # User 2 should still have quota
-        assert not self.limiter.is_rate_limited('user_2', max_calls, 60)
+        assert not self.limiter.is_rate_limited("user_2", max_calls, 60)
 
     def test_get_remaining_calls_positive(self):
         """Test remaining calls calculation when under limit."""
-        key = 'user_1'
+        key = "user_1"
         max_calls = 5
 
         # Make 2 calls
@@ -92,7 +91,7 @@ class TestInMemoryRateLimiter:
 
     def test_get_remaining_calls_zero(self):
         """Test remaining calls when limit reached."""
-        key = 'user_1'
+        key = "user_1"
         max_calls = 2
 
         # Exhaust quota
@@ -104,7 +103,7 @@ class TestInMemoryRateLimiter:
 
     def test_get_remaining_calls_negative_overflow(self):
         """Test remaining calls calculation when over limit."""
-        key = 'user_1'
+        key = "user_1"
         max_calls = 2
 
         # Make 4 calls (exceeding limit)
@@ -116,7 +115,7 @@ class TestInMemoryRateLimiter:
 
     def test_get_reset_time(self):
         """Test that reset time is returned."""
-        key = 'user_1'
+        key = "user_1"
         window = 60
 
         # Make a call
@@ -139,17 +138,17 @@ class TestLeaseManagement:
 
     def test_acquire_lease_success(self):
         """Test successful lease acquisition."""
-        assert self.limiter.acquire_lease('resource_1', duration_seconds=5)
+        assert self.limiter.acquire_lease("resource_1", duration_seconds=5)
 
     def test_acquire_lease_already_held(self):
         """Test that second lease acquisition fails while held."""
-        resource = 'resource_1'
+        resource = "resource_1"
         assert self.limiter.acquire_lease(resource, duration_seconds=5)
         assert not self.limiter.acquire_lease(resource, duration_seconds=5)
 
     def test_lease_expires_and_can_be_reacquired(self):
         """Test that expired leases can be reacquired."""
-        resource = 'resource_1'
+        resource = "resource_1"
         assert self.limiter.acquire_lease(resource, duration_seconds=1)
         assert not self.limiter.acquire_lease(resource, duration_seconds=1)
 
@@ -161,7 +160,7 @@ class TestLeaseManagement:
 
     def test_release_lease(self):
         """Test lease release."""
-        resource = 'resource_1'
+        resource = "resource_1"
         assert self.limiter.acquire_lease(resource, duration_seconds=5)
 
         # Release the lease
@@ -172,17 +171,17 @@ class TestLeaseManagement:
 
     def test_release_nonexistent_lease(self):
         """Test releasing a lease that doesn't exist."""
-        assert not self.limiter.release_lease('nonexistent')
+        assert not self.limiter.release_lease("nonexistent")
 
     def test_multiple_resources_independent_leases(self):
         """Test that resources have independent leases."""
-        assert self.limiter.acquire_lease('resource_1', duration_seconds=5)
-        assert self.limiter.acquire_lease('resource_2', duration_seconds=5)
+        assert self.limiter.acquire_lease("resource_1", duration_seconds=5)
+        assert self.limiter.acquire_lease("resource_2", duration_seconds=5)
 
         # First resource still held
-        assert not self.limiter.acquire_lease('resource_1', duration_seconds=5)
+        assert not self.limiter.acquire_lease("resource_1", duration_seconds=5)
         # Second resource still held
-        assert not self.limiter.acquire_lease('resource_2', duration_seconds=5)
+        assert not self.limiter.acquire_lease("resource_2", duration_seconds=5)
 
 
 class TestRateLimitingScenarios:
@@ -194,7 +193,7 @@ class TestRateLimitingScenarios:
 
     def test_query_rate_limiting_scenario(self):
         """Test real-world query rate limiting."""
-        user_id = 'user_123'
+        user_id = "user_123"
 
         # Simulate 25 queries (below limit of 30/minute)
         for i in range(25):
@@ -216,7 +215,7 @@ class TestRateLimitingScenarios:
 
     def test_api_call_rate_limiting_scenario(self):
         """Test API call rate limiting."""
-        user_id = 'user_456'
+        user_id = "user_456"
 
         # Simulate 50 API calls (below limit of 100/minute)
         for i in range(50):
@@ -231,9 +230,7 @@ class TestRateLimitingScenarios:
             )
 
         # 101 should be rate limited
-        assert self.limiter.is_rate_limited(
-            user_id, API_CALL_RATE_LIMIT_PER_MINUTE, 60
-        )
+        assert self.limiter.is_rate_limited(user_id, API_CALL_RATE_LIMIT_PER_MINUTE, 60)
 
     def test_file_processing_concurrency_limit(self):
         """Test concurrent file processing limit."""
@@ -243,9 +240,10 @@ class TestRateLimitingScenarios:
         leased_resources = []
         # Acquire 5 concurrent leases with unique keys
         for i in range(FILE_PROCESSING_CONCURRENT_LIMIT):
-            resource_key = f'file_processor_{i}'
-            assert self.limiter.acquire_lease(resource_key, duration_seconds=30), \
-                f"Should acquire lease {i+1}"
+            resource_key = f"file_processor_{i}"
+            assert self.limiter.acquire_lease(
+                resource_key, duration_seconds=30
+            ), f"Should acquire lease {i+1}"
             leased_resources.append(resource_key)
 
         # All 5 leases should be active
@@ -256,7 +254,7 @@ class TestRateLimitingScenarios:
 
     def test_file_processing_rate_limiting(self):
         """Test file processing rate limiting."""
-        user_id = 'file_user'
+        user_id = "file_user"
 
         # Simulate 10 file operations (at limit)
         for i in range(FILE_PROCESSING_RATE_LIMIT):
@@ -265,9 +263,7 @@ class TestRateLimitingScenarios:
             )
 
         # 11th should be rate limited
-        assert self.limiter.is_rate_limited(
-            user_id, FILE_PROCESSING_RATE_LIMIT, 60
-        )
+        assert self.limiter.is_rate_limited(user_id, FILE_PROCESSING_RATE_LIMIT, 60)
 
 
 class TestBurstHandling:
@@ -281,7 +277,7 @@ class TestBurstHandling:
         """Test burst allowance constant is defined."""
         # Note: BURST_ALLOWANCE is defined but not currently used in is_rate_limited
         # The implementation uses strict sliding window without burst support
-        user_id = 'burst_user'
+        user_id = "burst_user"
         limit = 10
 
         # Standard rate limiting applies (10 calls allowed, 11th blocked)
@@ -303,7 +299,7 @@ class TestConcurrentUsagePattern:
 
     def test_multiple_users_concurrent_queries(self):
         """Test that multiple users can make concurrent queries."""
-        users = [f'user_{i}' for i in range(5)]
+        users = [f"user_{i}" for i in range(5)]
 
         # Each user makes a query
         for user in users:
@@ -314,7 +310,7 @@ class TestConcurrentUsagePattern:
     def test_interleaved_user_queries(self):
         """Test interleaved queries from different users."""
         for iteration in range(5):
-            for user_id in ['user_a', 'user_b', 'user_c']:
+            for user_id in ["user_a", "user_b", "user_c"]:
                 assert not self.limiter.is_rate_limited(
                     user_id, 10, 60
                 ), f"User {user_id} iteration {iteration} should succeed"
@@ -330,35 +326,30 @@ class TestEdgeCases:
     def test_zero_max_calls(self):
         """Test behavior with zero max calls."""
         # Even first call should be limited
-        assert self.limiter.is_rate_limited(
-            'user', max_calls=0, window_seconds=60)
+        assert self.limiter.is_rate_limited("user", max_calls=0, window_seconds=60)
 
     def test_negative_max_calls(self):
         """Test behavior with negative max calls."""
         # All calls should be limited
-        assert self.limiter.is_rate_limited(
-            'user', max_calls=-1, window_seconds=60)
+        assert self.limiter.is_rate_limited("user", max_calls=-1, window_seconds=60)
 
     def test_very_small_window(self):
         """Test with very small time window."""
-        key = 'user'
+        key = "user"
 
         # Make a call
-        assert not self.limiter.is_rate_limited(
-            key, max_calls=2, window_seconds=1)
-        assert not self.limiter.is_rate_limited(
-            key, max_calls=2, window_seconds=1)
+        assert not self.limiter.is_rate_limited(key, max_calls=2, window_seconds=1)
+        assert not self.limiter.is_rate_limited(key, max_calls=2, window_seconds=1)
 
         # Wait for window to expire
         time.sleep(1.1)
 
         # Should be able to make more calls
-        assert not self.limiter.is_rate_limited(
-            key, max_calls=2, window_seconds=1)
+        assert not self.limiter.is_rate_limited(key, max_calls=2, window_seconds=1)
 
     def test_very_large_max_calls(self):
         """Test with very large max call limit."""
-        key = 'user'
+        key = "user"
         max_calls = 1000000
 
         # Make 100 calls
@@ -368,35 +359,30 @@ class TestEdgeCases:
     def test_empty_key(self):
         """Test with empty string as key."""
         # Empty key should still work
-        assert not self.limiter.is_rate_limited(
-            '', max_calls=1, window_seconds=60)
-        assert self.limiter.is_rate_limited('', max_calls=1, window_seconds=60)
+        assert not self.limiter.is_rate_limited("", max_calls=1, window_seconds=60)
+        assert self.limiter.is_rate_limited("", max_calls=1, window_seconds=60)
 
     def test_unicode_key(self):
         """Test with unicode in key."""
-        key = 'user_café_123'
-        assert not self.limiter.is_rate_limited(
-            key, max_calls=1, window_seconds=60)
-        assert self.limiter.is_rate_limited(
-            key, max_calls=1, window_seconds=60)
+        key = "user_café_123"
+        assert not self.limiter.is_rate_limited(key, max_calls=1, window_seconds=60)
+        assert self.limiter.is_rate_limited(key, max_calls=1, window_seconds=60)
 
     def test_very_long_key(self):
         """Test with very long key."""
-        key = 'user_' + 'x' * 1000
-        assert not self.limiter.is_rate_limited(
-            key, max_calls=1, window_seconds=60)
+        key = "user_" + "x" * 1000
+        assert not self.limiter.is_rate_limited(key, max_calls=1, window_seconds=60)
 
     def test_special_characters_in_key(self):
         """Test with special characters in key."""
         keys = [
-            'user:123',
-            'user-123',
-            'user.123',
-            'user@domain.com',
+            "user:123",
+            "user-123",
+            "user.123",
+            "user@domain.com",
         ]
         for key in keys:
-            assert not self.limiter.is_rate_limited(
-                key, max_calls=1, window_seconds=60)
+            assert not self.limiter.is_rate_limited(key, max_calls=1, window_seconds=60)
 
 
 class TestInMemoryRateLimiterMemory:
@@ -408,7 +394,7 @@ class TestInMemoryRateLimiterMemory:
 
     def test_cleanup_old_timestamps(self):
         """Test that old timestamps are cleaned up."""
-        key = 'user'
+        key = "user"
         window = 1
 
         # Make a call
@@ -431,9 +417,8 @@ class TestInMemoryRateLimiterMemory:
         """Test memory usage with many users."""
         # Create 1000 users
         for i in range(1000):
-            user_id = f'user_{i}'
-            self.limiter.is_rate_limited(
-                user_id, max_calls=10, window_seconds=60)
+            user_id = f"user_{i}"
+            self.limiter.is_rate_limited(user_id, max_calls=10, window_seconds=60)
 
         # Should have 1000 entries
         assert len(self.limiter._query_timestamps) == 1000

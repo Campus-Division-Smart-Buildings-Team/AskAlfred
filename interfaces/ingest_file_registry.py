@@ -4,14 +4,15 @@ from __future__ import annotations
 import json
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Protocol, Optional, cast
 from datetime import datetime, timedelta, timezone
+from typing import Optional, Protocol, cast
 
 from redis import Redis
+
 from config.constant import (
-    INGEST_FILE_TTL_SUCCESS_SECONDS,
     INGEST_FILE_TTL_FAILED_SECONDS,
     INGEST_FILE_TTL_PROCESSING_SECONDS,
+    INGEST_FILE_TTL_SUCCESS_SECONDS,
 )
 
 
@@ -37,8 +38,9 @@ class IngestFileRegistry(Protocol):
     def bulk_exists(self, file_ids: Iterable[str]) -> dict[str, bool]: ...
     def upsert(self, record: FileRecord) -> None: ...
 
-    def upsert_with_token(self, record: FileRecord, *,
-                          processing_token: str | None) -> None: ...
+    def upsert_with_token(
+        self, record: FileRecord, *, processing_token: str | None
+    ) -> None: ...
 
     def record_discovered(
         self,
@@ -92,8 +94,7 @@ class RedisIngestFileRegistry:
         self._success_ttl_seconds = int(success_ttl_seconds)
         self._failed_ttl_seconds = int(failed_ttl_seconds)
         self._processing_ttl_seconds = int(processing_ttl_seconds)
-        self._try_start_script = self._client.register_script(
-            """
+        self._try_start_script = self._client.register_script("""
             local key = KEYS[1]
             local now_epoch = tonumber(ARGV[1])
             local status = ARGV[2]
@@ -136,10 +137,8 @@ class RedisIngestFileRegistry:
             )
             redis.call("EXPIRE", key, ttl_seconds)
             return 1
-            """
-        )
-        self._record_discovered_script = self._client.register_script(
-            """
+            """)
+        self._record_discovered_script = self._client.register_script("""
             local key = KEYS[1]
             local now_iso = ARGV[1]
             local source_path = ARGV[2]
@@ -171,8 +170,7 @@ class RedisIngestFileRegistry:
             )
             redis.call("EXPIRE", key, ttl_seconds)
             return 1
-            """
-        )
+            """)
 
     def _key(self, file_id: str) -> str:
         return f"{self._prefix}{file_id}"
@@ -198,8 +196,7 @@ class RedisIngestFileRegistry:
         return None
 
     def get(self, file_id: str) -> Optional[FileRecord]:
-        payload = cast(dict[object, object],
-                       self._client.hgetall(self._key(file_id)))
+        payload = cast(dict[object, object], self._client.hgetall(self._key(file_id)))
         if not payload:
             return None
         decoded: dict[str, str] = {}
@@ -218,11 +215,13 @@ class RedisIngestFileRegistry:
         error = decoded.get("error") or None
         processing_token = decoded.get("processing_token") or None
         processing_expires_at = decoded.get("processing_expires_at") or None
-        processing_expires_at_epoch = decoded.get(
-            "processing_expires_at_epoch")
+        processing_expires_at_epoch = decoded.get("processing_expires_at_epoch")
         try:
-            processing_expires_at_epoch_int = int(
-                processing_expires_at_epoch) if processing_expires_at_epoch else None
+            processing_expires_at_epoch_int = (
+                int(processing_expires_at_epoch)
+                if processing_expires_at_epoch
+                else None
+            )
         except (TypeError, ValueError):
             processing_expires_at_epoch_int = None
         return FileRecord(
@@ -243,7 +242,13 @@ class RedisIngestFileRegistry:
         record = self.get(file_id)
         if not record:
             return False
-        return record.status in ("discovered", "processing", "failed", "partial", "success")
+        return record.status in (
+            "discovered",
+            "processing",
+            "failed",
+            "partial",
+            "success",
+        )
 
     def is_success(self, file_id: str) -> bool:
         record = self.get(file_id)
@@ -273,7 +278,9 @@ class RedisIngestFileRegistry:
             "error": record.error or "",
             "processing_token": record.processing_token or "",
             "processing_expires_at": record.processing_expires_at or "",
-            "processing_expires_at_epoch": str(record.processing_expires_at_epoch or ""),
+            "processing_expires_at_epoch": str(
+                record.processing_expires_at_epoch or ""
+            ),
         }
         ttl_seconds = self._ttl_for_status(record.status)
         self._client.hset(self._key(record.file_id), mapping=payload)
@@ -366,7 +373,10 @@ class RedisIngestFileRegistry:
         if existing and existing.status == "processing":
             expiry_epoch = int(existing.processing_expires_at_epoch or 0)
             if expiry_epoch > now_epoch:
-                if not processing_token or processing_token != existing.processing_token:
+                if (
+                    not processing_token
+                    or processing_token != existing.processing_token
+                ):
                     raise ValueError(
                         f"Rejecting state update for {file_id}: token mismatch"
                     )
@@ -374,23 +384,29 @@ class RedisIngestFileRegistry:
         self.upsert(
             FileRecord(
                 file_id=file_id,
-                source_path=source_path or (
-                    existing.source_path if existing else ""),
-                source_key=source_key or (
-                    existing.source_key if existing else ""),
-                content_hash=content_hash or (
-                    existing.content_hash if existing else None),
+                source_path=source_path or (existing.source_path if existing else ""),
+                source_key=source_key or (existing.source_key if existing else ""),
+                content_hash=content_hash
+                or (existing.content_hash if existing else None),
                 ingested_at_iso=now_iso,
-                namespaces=namespaces or (
-                    existing.namespaces if existing else ()),
+                namespaces=namespaces or (existing.namespaces if existing else ()),
                 status=status,
                 error=error,
-                processing_token=None if status in ("success", "failed") else (
-                    existing.processing_token if existing else None),
-                processing_expires_at=None if status in ("success", "failed") else (
-                    existing.processing_expires_at if existing else None),
-                processing_expires_at_epoch=None if status in ("success", "failed") else (
-                    existing.processing_expires_at_epoch if existing else None),
+                processing_token=(
+                    None
+                    if status in ("success", "failed")
+                    else (existing.processing_token if existing else None)
+                ),
+                processing_expires_at=(
+                    None
+                    if status in ("success", "failed")
+                    else (existing.processing_expires_at if existing else None)
+                ),
+                processing_expires_at_epoch=(
+                    None
+                    if status in ("success", "failed")
+                    else (existing.processing_expires_at_epoch if existing else None)
+                ),
             )
         )
 

@@ -11,11 +11,13 @@ Supports:
 """
 
 from __future__ import annotations
+
 import logging
 import time
-from typing import Optional, Any
 from abc import ABC, abstractmethod
 from functools import wraps
+from typing import Any, Optional
+
 from alfred_exceptions import RateLimitError
 
 logger = logging.getLogger(__name__)
@@ -143,7 +145,9 @@ class InMemoryRateLimiter(RateLimiterBackend):
         if len(self._query_timestamps[key]) >= max_calls:
             logger.warning(
                 "Rate limit exceeded for key %s: %d calls in %d seconds",
-                key, len(self._query_timestamps[key]), window_seconds
+                key,
+                len(self._query_timestamps[key]),
+                window_seconds,
             )
             return True
 
@@ -160,9 +164,7 @@ class InMemoryRateLimiter(RateLimiterBackend):
             return max_calls
 
         # Count valid timestamps
-        valid_calls = sum(
-            1 for ts in self._query_timestamps[key] if ts > window_start
-        )
+        valid_calls = sum(1 for ts in self._query_timestamps[key] if ts > window_start)
         return max(0, max_calls - valid_calls)
 
     def get_reset_time(self, key: str, window_seconds: int) -> float:
@@ -250,20 +252,21 @@ class RedisRateLimiter(RateLimiterBackend):
 
             result = script(
                 keys=[f"rate_limit:{key}"],
-                args=[window_seconds, max_calls, current_time]
+                args=[window_seconds, max_calls, current_time],
             )
 
             is_limited = result[1]
             if is_limited:
                 logger.warning(
                     "Rate limit exceeded for key %s: %d calls in %d seconds",
-                    key, result[0], window_seconds
+                    key,
+                    result[0],
+                    window_seconds,
                 )
             return bool(is_limited)
 
         except Exception as e:
-            logger.error(
-                "Redis rate limit check failed: %s - falling back to allow", e)
+            logger.error("Redis rate limit check failed: %s - falling back to allow", e)
             # Fail open (allow the operation) rather than blocking
             return False
 
@@ -274,8 +277,7 @@ class RedisRateLimiter(RateLimiterBackend):
             window_start = current_time - window_seconds
 
             # Count valid entries in window
-            self.redis.zremrangebyscore(
-                f"rate_limit:{key}", '-inf', window_start)
+            self.redis.zremrangebyscore(f"rate_limit:{key}", "-inf", window_start)
             current_count = self.redis.zcard(f"rate_limit:{key}")
 
             return max(0, max_calls - current_count)
@@ -288,9 +290,7 @@ class RedisRateLimiter(RateLimiterBackend):
         """Get when rate limit resets."""
         try:
             # Get the earliest timestamp in the sorted set
-            scores = self.redis.zrange(
-                f"rate_limit:{key}", 0, 0, withscores=True
-            )
+            scores = self.redis.zrange(f"rate_limit:{key}", 0, 0, withscores=True)
             if scores:
                 oldest_time = scores[0][1]
                 return oldest_time + window_seconds
@@ -310,7 +310,7 @@ class RedisRateLimiter(RateLimiterBackend):
                 lease_key,
                 str(time.time()),
                 ex=duration_seconds,
-                nx=True  # Only set if not exists
+                nx=True,  # Only set if not exists
             )
             return bool(result)
 
@@ -357,7 +357,8 @@ class RateLimiterManager:
                 logger.info("Using Redis-backed rate limiting")
             except Exception as e:
                 logger.warning(
-                    "Redis unavailable for rate limiting: %s - using in-memory", e)
+                    "Redis unavailable for rate limiting: %s - using in-memory", e
+                )
                 self._backend = InMemoryRateLimiter()
         else:
             self._backend = InMemoryRateLimiter()
@@ -431,12 +432,13 @@ def rate_limit(max_calls: Optional[int] = None, window_seconds: int = 60):
         def process_query(user_id, query):
             pass
     """
+
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
             # Try to extract user_id from arguments
-            user_id = kwargs.get('user_id') or (
-                args[0] if args and isinstance(args[0], str) else 'anonymous'
+            user_id = kwargs.get("user_id") or (
+                args[0] if args and isinstance(args[0], str) else "anonymous"
             )
 
             actual_max_calls = max_calls or QUERY_RATE_LIMIT_PER_MINUTE
@@ -456,6 +458,7 @@ def rate_limit(max_calls: Optional[int] = None, window_seconds: int = 60):
             return func(*args, **kwargs)
 
         return wrapper
+
     return decorator
 
 
@@ -504,9 +507,7 @@ def check_query_rate_limit(user_id: str) -> bool:
         True if NOT rate limited (query allowed), False if rate limited
     """
     return not _rate_limiter_manager.is_rate_limited(
-        f"query:{user_id}",
-        QUERY_RATE_LIMIT_PER_MINUTE,
-        QUERY_RATE_LIMIT_WINDOW
+        f"query:{user_id}", QUERY_RATE_LIMIT_PER_MINUTE, QUERY_RATE_LIMIT_WINDOW
     )
 
 
@@ -523,7 +524,7 @@ def check_api_call_rate_limit(user_id: str) -> bool:
     return not _rate_limiter_manager.is_rate_limited(
         f"api_call:{user_id}",
         API_CALL_RATE_LIMIT_PER_MINUTE,
-        API_CALL_RATE_LIMIT_WINDOW
+        API_CALL_RATE_LIMIT_WINDOW,
     )
 
 
@@ -537,22 +538,19 @@ def check_file_processing_limit() -> bool:
     return not _rate_limiter_manager.is_rate_limited(
         "file_processing",
         FILE_PROCESSING_CONCURRENT_LIMIT,
-        1  # Check per second for concurrent limit
+        1,  # Check per second for concurrent limit
     )
 
 
 def get_query_remaining_calls(user_id: str) -> int:
     """Get remaining queries allowed for user."""
     return _rate_limiter_manager.get_remaining_calls(
-        f"query:{user_id}",
-        QUERY_RATE_LIMIT_PER_MINUTE,
-        QUERY_RATE_LIMIT_WINDOW
+        f"query:{user_id}", QUERY_RATE_LIMIT_PER_MINUTE, QUERY_RATE_LIMIT_WINDOW
     )
 
 
 def get_query_reset_time(user_id: str) -> float:
     """Get Unix timestamp when query limit resets for user."""
     return _rate_limiter_manager.get_reset_time(
-        f"query:{user_id}",
-        QUERY_RATE_LIMIT_WINDOW
+        f"query:{user_id}", QUERY_RATE_LIMIT_WINDOW
     )

@@ -1,13 +1,12 @@
-
 """
-Tests for the Query Manager, 
+Tests for the Query Manager,
 ensuring correct routing of queries to handlers and backward compatibility of results.
 """
 
 import pytest
-from query_types import QueryType
-from query_manager import QueryManager, process_query_unified
 
+from query_manager import QueryManager, process_query_unified
+from query_types import QueryType
 
 # Test queries with expected routing
 TEST_CASES = [
@@ -16,22 +15,17 @@ TEST_CASES = [
     ("Who are you?", QueryType.CONVERSATIONAL),
     ("Thank you", QueryType.CONVERSATIONAL),
     ("Goodbye", QueryType.CONVERSATIONAL),
-
     ("How many buildings have FRAs?", QueryType.COUNTING),
     ("Count the buildings", QueryType.COUNTING),
     ("Number of buildings with BMS", QueryType.COUNTING),
-
     ("Show maintenance requests for Senate House", QueryType.MAINTENANCE),
     ("List all maintenance jobs", QueryType.MAINTENANCE),
     ("Electrical maintenance requests", QueryType.MAINTENANCE),
-
     ("Rank buildings by area", QueryType.RANKING),
     ("Top 10 largest buildings", QueryType.RANKING),
     ("Sort buildings by gross area", QueryType.RANKING),
-
     ("Which buildings are Condition A?", QueryType.PROPERTY_CONDITION),
     ("Show derelict buildings", QueryType.PROPERTY_CONDITION),
-
     ("What is the BMS configuration?", QueryType.SEMANTIC_SEARCH),
     ("Tell me about HVAC systems", QueryType.SEMANTIC_SEARCH),
 ]
@@ -54,8 +48,9 @@ class TestQueryManager:
             f"expected {expected_type.value}"
         )
         assert result.success, f"Query failed: {result.metadata.get('error')}"
-        assert result.answer is not None and len(
-            result.answer) > 0, "Empty answer returned"
+        assert (
+            result.answer is not None and len(result.answer) > 0
+        ), "Empty answer returned"
 
     def test_conversational_responses(self):
         """Test conversational handler returns appropriate responses."""
@@ -77,20 +72,16 @@ class TestQueryManager:
     def test_statistics(self):
         """Test statistics tracking."""
         # Process some queries
-        queries = [
-            "hello",
-            "how many buildings?",
-            "rank buildings by area"
-        ]
+        queries = ["hello", "how many buildings?", "rank buildings by area"]
 
         for query in queries:
             self.manager.process_query(query)
 
         # Check stats
         stats = self.manager.get_statistics()
-        assert stats['total_queries'] == len(queries)
-        assert len(stats['query_types']) > 0
-        assert stats['avg_time_ms'] > 0
+        assert stats["total_queries"] == len(queries)
+        assert len(stats["query_types"]) > 0
+        assert stats["avg_time_ms"] > 0
 
 
 class TestBackwardCompatibility:

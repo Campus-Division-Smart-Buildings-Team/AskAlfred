@@ -7,13 +7,20 @@ Handler for conversational queries (greetings, about, etc.).
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import re
 import random
-from query_types import QueryType
+import re
+
+from emojis import (
+    EMOJI_BUILDING,
+    EMOJI_CHEEKY,
+    EMOJI_FIRE,
+    EMOJI_GORILLA,
+    EMOJI_MAINTENANCE,
+    EMOJI_SMILE,
+)
 from query_context import QueryContext
 from query_result import QueryResult
-from emojis import (EMOJI_BUILDING, EMOJI_GORILLA, EMOJI_FIRE,
-                    EMOJI_MAINTENANCE, EMOJI_SMILE, EMOJI_CHEEKY)
+from query_types import QueryType
 
 from .base_handler import BaseQueryHandler
 
@@ -34,8 +41,7 @@ class ConversationalHandler(BaseQueryHandler):
             "greeting": [
                 re.compile(r"^hey[\s,]+alfred", re.IGNORECASE),
                 re.compile(r"^(hi|hello|hey)[!., ]*$", re.IGNORECASE),
-                re.compile(
-                    r"^(good\s+(morning|afternoon|evening))$", re.IGNORECASE),
+                re.compile(r"^(good\s+(morning|afternoon|evening))$", re.IGNORECASE),
                 re.compile(r"^(hi|hello)[\s,]+alfred", re.IGNORECASE),
             ],
             "gratitude": [
@@ -63,11 +69,12 @@ class ConversationalHandler(BaseQueryHandler):
             # ========================================================================================
             "lego_house_fixtures": [
                 re.compile(
-                    r"^how\s+many\s+light\s+fixtures\s+are\s+in\s+the\s+lego\s+house\??$", re.IGNORECASE),
+                    r"^how\s+many\s+light\s+fixtures\s+are\s+in\s+the\s+lego\s+house\??$",
+                    re.IGNORECASE,
+                ),
             ],  # Dummy question regex for Lego House demo
             "seriously": [
-                re.compile(r"^seriously,?\s*is\s+.+\s+in\s+.+\??$",
-                           re.IGNORECASE),
+                re.compile(r"^seriously,?\s*is\s+.+\s+in\s+.+\??$", re.IGNORECASE),
             ],  # Dummy question regex for Lego House demo
             "yes_no": [
                 re.compile(r"^is\s+.+\s+in\s+.+\??$", re.IGNORECASE),
@@ -79,7 +86,7 @@ class ConversationalHandler(BaseQueryHandler):
             "greeting": [
                 f"Hello! I'm Alfred {EMOJI_GORILLA}, your helpful assistant at the University of Bristol. I can help you find information about:\n\n {EMOJI_BUILDING} Building Management Systems (BMS)\n {EMOJI_FIRE} Fire Risk Assessments (FRAs)\n {EMOJI_MAINTENANCE} Maintenance Requests and Jobs\n\nWhat would you like to know today?",
                 f"Hi there! I'm Alfred {EMOJI_GORILLA}, ready to help you search through our knowledge bases. Feel free to ask me about BMS {EMOJI_BUILDING}, FRAs {EMOJI_FIRE} and maintenance requests and jobs {EMOJI_MAINTENANCE}. How can I assist you?",
-                f"Hello! Alfred here {EMOJI_GORILLA}, your University of Bristol assistant. I have access to information about Building Management Systems and Fire Risk Assessments and maintenance requests and jobs. What can I help you with?"
+                f"Hello! Alfred here {EMOJI_GORILLA}, your University of Bristol assistant. I have access to information about Building Management Systems and Fire Risk Assessments and maintenance requests and jobs. What can I help you with?",
             ],
             "gratitude": [
                 "You're welcome.",

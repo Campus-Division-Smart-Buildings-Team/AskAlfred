@@ -57,6 +57,7 @@ class RollbackError(IngestError):
 class DeadlockError(RuntimeError):
     """Raised when FRA lock acquisition times out (possible deadlock)."""
 
+
 # Retriable errors
 
 

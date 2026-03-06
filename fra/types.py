@@ -2,8 +2,7 @@
 Shared TypedDict contracts for FRA parsing and triage.
 """
 
-from typing import Optional, Literal, TypedDict
-
+from typing import Literal, Optional, TypedDict
 
 CompletionStatus = Literal["open", "overdue", "complete"]
 

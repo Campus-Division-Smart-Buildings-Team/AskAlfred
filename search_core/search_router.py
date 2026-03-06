@@ -1,13 +1,13 @@
 # search_core/search_router.py
 
-from typing import Any, Union, Optional
-from search_instructions import SearchInstructions
+from typing import Any, Optional, Union
+
 from alfred_exceptions import RoutingError
+from search_instructions import SearchInstructions
 
-from .semantic_search import semantic_search
-from .planon_search import planon_search
 from .maintenance_search import maintenance_search
-
+from .planon_search import planon_search
+from .semantic_search import semantic_search
 
 # ------------------------------------------------------------------------------------
 # Return type contracts (must match actual backend implementations)

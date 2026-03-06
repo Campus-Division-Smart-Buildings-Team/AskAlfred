@@ -8,10 +8,11 @@ Implements OWASP input validation best practices.
 """
 
 from __future__ import annotations
+
+import logging
 import re
 from functools import lru_cache
 from typing import Optional
-import logging
 
 # ===========================================================================
 # CONSTANTS
@@ -20,24 +21,24 @@ import logging
 # Prompt injection attack patterns
 INJECTION_PATTERNS = [
     # Ignore/override patterns
-    r'(?i)(ignore\s+previous|disregard|forget|override|clear\s+context)',
+    r"(?i)(ignore\s+previous|disregard|forget|override|clear\s+context)",
     # System prompt reference patterns
-    r'(?i)(system\s+prompt|instructions|you\s+are|you\s+are\s+a|role\s*[=:]|persona\s*[=:])',
+    r"(?i)(system\s+prompt|instructions|you\s+are|you\s+are\s+a|role\s*[=:]|persona\s*[=:])",
     # Jailbreak patterns
-    r'(?i)(as\s+an\s+ai|as\s+an\s+assistant|pretend|act\s+like|behave\s+as)',
+    r"(?i)(as\s+an\s+ai|as\s+an\s+assistant|pretend|act\s+like|behave\s+as)",
     # Output manipulation
-    r'(?i)(output\s+only|response\s+must|format\s+as|reply\s+with)',
+    r"(?i)(output\s+only|response\s+must|format\s+as|reply\s+with)",
     # Constraint breaking
-    r'(?i)(ignore\s+constraints|no\s+constraints|bypass|circumvent)',
+    r"(?i)(ignore\s+constraints|no\s+constraints|bypass|circumvent)",
     # Hidden instructions
-    r'(?i)(hidden\s+message|secret\s+instruction|true\s+purpose)',
+    r"(?i)(hidden\s+message|secret\s+instruction|true\s+purpose)",
 ]
 
 # Special characters that are suspicious when overrepresented
-SUSPICIOUS_SPECIAL_CHARS = set('{}[]|<>\\`$;:')
+SUSPICIOUS_SPECIAL_CHARS = set("{}[]|<>\\`$;:")
 
 # Characters allowed in normal queries
-ALLOWED_SPECIAL_CHARS = set(',.!?\'"()-&@#%+=/~*')
+ALLOWED_SPECIAL_CHARS = set(",.!?'\"()-&@#%+=/~*")
 
 # Query complexity limits
 QUERY_COMPLEXITY_LIMIT = 500  # tokens (rough estimation)
@@ -50,9 +51,8 @@ RATE_LIMIT_PER_MINUTE = 30  # Default: 30 queries per minute per user
 RATE_LIMIT_WINDOW_SECONDS = 60
 
 # Pinecone filter operators - allowed for safe filtering
-ALLOWED_FILTER_OPERATORS = {'$eq', '$ne',
-                            '$gt', '$gte', '$lt', '$lte', '$in', '$nin'}
-DANGEROUS_FILTER_KEYWORDS = {'$where', '$regex', '$text', 'javascript', 'eval'}
+ALLOWED_FILTER_OPERATORS = {"$eq", "$ne", "$gt", "$gte", "$lt", "$lte", "$in", "$nin"}
+DANGEROUS_FILTER_KEYWORDS = {"$where", "$regex", "$text", "javascript", "eval"}
 
 # ===========================================================================
 # LOGGING
@@ -63,6 +63,7 @@ logger = logging.getLogger(__name__)
 # ===========================================================================
 # INJECTION DETECTION
 # ===========================================================================
+
 
 @lru_cache(maxsize=1000)
 def is_injection_attempt(query: str) -> bool:
@@ -82,7 +83,8 @@ def is_injection_attempt(query: str) -> bool:
     for pattern in INJECTION_PATTERNS:
         if re.search(pattern, query):
             logger.warning(
-                "Potential injection pattern detected: query length=%d", len(query))
+                "Potential injection pattern detected: query length=%d", len(query)
+            )
             return True
 
     return False
@@ -91,6 +93,7 @@ def is_injection_attempt(query: str) -> bool:
 # ===========================================================================
 # SPECIAL CHARACTER VALIDATION
 # ===========================================================================
+
 
 def count_special_characters(query: str) -> tuple[int, int, int]:
     """
@@ -103,7 +106,7 @@ def count_special_characters(query: str) -> tuple[int, int, int]:
     suspicious_count = 0
     max_repeated = 1
     current_repeated = 1
-    last_char = ''
+    last_char = ""
 
     for char in query:
         if not char.isalnum() and not char.isspace():
@@ -117,7 +120,7 @@ def count_special_characters(query: str) -> tuple[int, int, int]:
                 current_repeated = 1
             last_char = char
         else:
-            last_char = ''
+            last_char = ""
 
     return special_count, suspicious_count, max_repeated
 
@@ -130,20 +133,23 @@ def has_excessive_special_chars(query: str) -> tuple[bool, Optional[str]]:
         Tuple of (is_invalid, error_message)
     """
     query_len = len(query)
-    special_count, suspicious_count, max_repeated = count_special_characters(
-        query)
+    special_count, suspicious_count, max_repeated = count_special_characters(query)
 
     # Check special character ratio
     if special_count > query_len * SPECIAL_CHAR_RATIO_LIMIT:
-        error = (f"Query contains too many special characters "
-                 f"({special_count}/{query_len} = {100*special_count/query_len:.1f}%)")
+        error = (
+            f"Query contains too many special characters "
+            f"({special_count}/{query_len} = {100*special_count/query_len:.1f}%)"
+        )
         logger.warning("Query rejected: %s", error)
         return True, error
 
     # Check suspicious character ratio
     if suspicious_count > query_len * SUSPICIOUS_CHAR_RATIO_LIMIT:
-        error = (f"Query contains suspicious character patterns "
-                 f"({suspicious_count} dangerous chars)")
+        error = (
+            f"Query contains suspicious character patterns "
+            f"({suspicious_count} dangerous chars)"
+        )
         logger.warning("Query rejected: %s", error)
         return True, error
 
@@ -159,6 +165,7 @@ def has_excessive_special_chars(query: str) -> tuple[bool, Optional[str]]:
 # ===========================================================================
 # QUERY VALIDATION
 # ===========================================================================
+
 
 def validate_query_security(
     query: str,
@@ -213,6 +220,7 @@ def validate_query_security(
 # PINECONE FILTER VALIDATION
 # ===========================================================================
 
+
 def sanitise_filter_value(value: str) -> str:
     """
     Sanitise filter value to prevent NoSQL injection in Pinecone filters.
@@ -229,8 +237,7 @@ def sanitise_filter_value(value: str) -> str:
     # Remove any dangerous characters/operators
     sanitised = value
     for keyword in DANGEROUS_FILTER_KEYWORDS:
-        sanitised = re.sub(rf'\b{keyword}\b', '',
-                           sanitised, flags=re.IGNORECASE)
+        sanitised = re.sub(rf"\b{keyword}\b", "", sanitised, flags=re.IGNORECASE)
 
     # Escape special regex characters
     sanitised = re.escape(sanitised)
@@ -268,7 +275,7 @@ def sanitise_pinecone_filter(filter_dict: dict) -> dict:
 
     for key, value in filter_dict.items():
         # Check for dangerous key patterns
-        if any(kw in key.lower() for kw in ('javascript', 'eval', 'exec')):
+        if any(kw in key.lower() for kw in ("javascript", "eval", "exec")):
             logger.warning("Dangerous filter key detected: %s", key)
             continue
 
@@ -281,8 +288,7 @@ def sanitise_pinecone_filter(filter_dict: dict) -> dict:
                 if not validate_filter_operator(op):
                     logger.warning("Invalid filter operator: %s", op)
                     continue
-                sanitised.setdefault(key, {})[
-                    op] = sanitise_filter_value(str(val))
+                sanitised.setdefault(key, {})[op] = sanitise_filter_value(str(val))
         elif isinstance(value, (int, float, bool)):
             sanitised[key] = value
         elif isinstance(value, list):
@@ -294,6 +300,7 @@ def sanitise_pinecone_filter(filter_dict: dict) -> dict:
 # ===========================================================================
 # BUILDING NAME VALIDATION
 # ===========================================================================
+
 
 def validate_building_name(building_name: str) -> tuple[bool, Optional[str]]:
     """
@@ -330,6 +337,7 @@ def validate_building_name(building_name: str) -> tuple[bool, Optional[str]]:
 # CONTENT ESCAPING
 # ===========================================================================
 
+
 def escape_markdown_special_chars(text: str) -> str:
     """
     Escape special markdown characters to prevent injection.
@@ -341,10 +349,10 @@ def escape_markdown_special_chars(text: str) -> str:
         Escaped text safe for markdown rendering
     """
     # Escape markdown special characters
-    escape_chars = r'\`*_{}[]()#+-.!'
+    escape_chars = r"\`*_{}[]()#+-.!"
     result = text
     for char in escape_chars:
-        result = result.replace(char, f'\\{char}')
+        result = result.replace(char, f"\\{char}")
     return result
 
 
@@ -359,15 +367,15 @@ def is_safe_for_markdown(text: str) -> bool:
         True if text is safe, False if it should be escaped
     """
     # Check for markdown link syntax [text](url)
-    if re.search(r'\[.+\]\(.+\)', text):
+    if re.search(r"\[.+\]\(.+\)", text):
         return False
 
     # Check for HTML
-    if re.search(r'<[^>]+>', text):
+    if re.search(r"<[^>]+>", text):
         return False
 
     # Check for script tags
-    if re.search(r'<script|javascript:', text, re.IGNORECASE):
+    if re.search(r"<script|javascript:", text, re.IGNORECASE):
         return False
 
     return True
@@ -376,6 +384,7 @@ def is_safe_for_markdown(text: str) -> bool:
 # ===========================================================================
 # RATE LIMITING SUPPORT
 # ===========================================================================
+
 
 class RateLimitChecker:
     """
@@ -388,7 +397,9 @@ class RateLimitChecker:
         self._query_counts = {}  # user_id -> [(timestamp, count)]
         self._lock = {}
 
-    def is_rate_limited(self, user_id: str, max_calls: int = RATE_LIMIT_PER_MINUTE) -> bool:
+    def is_rate_limited(
+        self, user_id: str, max_calls: int = RATE_LIMIT_PER_MINUTE
+    ) -> bool:
         """
         Check if user has exceeded rate limit.
 
@@ -409,8 +420,7 @@ class RateLimitChecker:
 
         # Remove old entries
         self._query_counts[user_id] = [
-            ts for ts in self._query_counts[user_id]
-            if ts > window_start
+            ts for ts in self._query_counts[user_id] if ts > window_start
         ]
 
         # Check if exceeded
@@ -419,7 +429,7 @@ class RateLimitChecker:
                 "Rate limit exceeded for user %s: %d calls in %d seconds",
                 user_id,
                 len(self._query_counts[user_id]),
-                RATE_LIMIT_WINDOW_SECONDS
+                RATE_LIMIT_WINDOW_SECONDS,
             )
             return True
 
@@ -449,6 +459,7 @@ def check_user_rate_limit(user_id: str) -> bool:
 # QUERY SUMMARY (for analytics/logging)
 # ===========================================================================
 
+
 def get_validation_summary(query: str) -> dict:
     """
     Get detailed validation information about a query (for logging/analytics).
@@ -459,15 +470,14 @@ def get_validation_summary(query: str) -> dict:
     Returns:
         Dictionary with validation details
     """
-    special_count, suspicious_count, max_repeated = count_special_characters(
-        query)
+    special_count, suspicious_count, max_repeated = count_special_characters(query)
 
     return {
-        'query_length': len(query),
-        'word_count': len(query.split()),
-        'special_char_count': special_count,
-        'suspicious_char_count': suspicious_count,
-        'max_repeated_chars': max_repeated,
-        'has_injection_patterns': is_injection_attempt(query),
-        'has_excessive_special_chars': has_excessive_special_chars(query)[0],
+        "query_length": len(query),
+        "word_count": len(query.split()),
+        "special_char_count": special_count,
+        "suspicious_char_count": suspicious_count,
+        "max_repeated_chars": max_repeated,
+        "has_injection_patterns": is_injection_attempt(query),
+        "has_excessive_special_chars": has_excessive_special_chars(query)[0],
     }

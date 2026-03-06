@@ -8,18 +8,21 @@ Delegates ranking logic to counting_queries.generate_ranking_answer.
 """
 
 import re
-# First party import
-from query_types import QueryType
+
+from log_sanitiser import sanitise_error
 from query_context import QueryContext
 from query_result import QueryResult
+
+# First party import
+from query_types import QueryType
 from structured_queries import (
-    is_ranking_query,
+    generate_ranking_answer,
+    is_counting_query,
     is_maintenance_query,
     is_property_condition_query,
-    is_counting_query,
-    generate_ranking_answer
+    is_ranking_query,
 )
-from log_sanitiser import sanitise_error
+
 # Local import
 from .base_handler import BaseQueryHandler
 
@@ -39,14 +42,21 @@ class RankingHandler(BaseQueryHandler):
             re.compile(r"\brank(?:ing)?\s+buildings?\b", re.IGNORECASE),
             re.compile(r"\btop\s+\d+\s+buildings?\b", re.IGNORECASE),
             re.compile(
-                r"\b(top|largest|biggest|smallest)\s+buildings?\b", re.IGNORECASE),
+                r"\b(top|largest|biggest|smallest)\s+buildings?\b", re.IGNORECASE
+            ),
             re.compile(r"\bsort\s+buildings?\s+by\b", re.IGNORECASE),
         ]
 
         # Area context words — ensures the query is actually about area ranking,
         # not “largest maintenance backlog” or “biggest problem”.
         self.area_indicators = [
-            "area", "size", "gross", "net", "sqm", "square metre", "square meter"
+            "area",
+            "size",
+            "gross",
+            "net",
+            "sqm",
+            "square metre",
+            "square meter",
         ]
 
     def _mentions_area(self, text: str) -> bool:
@@ -77,7 +87,19 @@ class RankingHandler(BaseQueryHandler):
         if any(p.search(q) for p in self.patterns):
             return True
 
-        if any(word in q for word in ["largest", "biggest", "smallest", "tallest", "highest", "widest", "longest", "most spacious"]):
+        if any(
+            word in q
+            for word in [
+                "largest",
+                "biggest",
+                "smallest",
+                "tallest",
+                "highest",
+                "widest",
+                "longest",
+                "most spacious",
+            ]
+        ):
             return True
 
         # 2. Basic ranking signals
@@ -116,8 +138,9 @@ class RankingHandler(BaseQueryHandler):
             )
 
         except Exception as e:
-            self.logger.error("Ranking handler error: %s",
-                              sanitise_error(e), exc_info=False)
+            self.logger.error(
+                "Ranking handler error: %s", sanitise_error(e), exc_info=False
+            )
 
             return QueryResult(
                 query=query_text,

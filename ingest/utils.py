@@ -17,22 +17,19 @@ These utilities are designed to support the main ingestion workflow while keepin
 
 import json
 import logging
-import uuid
+import mimetypes
 import time
-from typing import Any, Optional, TYPE_CHECKING
+import uuid
 from math import ceil
 from pathlib import Path
-import mimetypes
+from typing import TYPE_CHECKING, Any, Optional
+
 from tqdm import tqdm
+
+from alfred_exceptions import ExternalServiceError, RoutingError, ValidationError
 from config import (
     _route_namespace,
 )
-from file_operations_validator import (
-    validate_directory_safety,
-    list_files_safe,
-    FileOperationSecurityError
-)
-from alfred_exceptions import RoutingError, ValidationError, ExternalServiceError
 from pinecone_utils import sanitise_metadata_for_pinecone
 
 # ============================================================================
@@ -44,6 +41,7 @@ if TYPE_CHECKING:
 
 def _get_logger(logger: logging.Logger | None) -> logging.Logger:
     return logger or logging.getLogger(__name__)
+
 
 # ============================================================================
 # PATH HANDLING
@@ -80,7 +78,16 @@ def validate_safe_path(
         ValueError: If the file extension is not allowed
     """
     allowed_extensions = {
-        'pdf', 'txt', 'docx', 'doc', 'xlsx', 'xls', 'pptx', 'ppt', 'json', 'csv'
+        "pdf",
+        "txt",
+        "docx",
+        "doc",
+        "xlsx",
+        "xls",
+        "pptx",
+        "ppt",
+        "json",
+        "csv",
     }
     base = Path(base_path).resolve()
     if not base.exists():
@@ -98,7 +105,7 @@ def validate_safe_path(
             f"Path traversal detected: '{key}' resolves outside base directory"
         ) from exc
     # Validate extension
-    ext = target.suffix.lower().lstrip('.')
+    ext = target.suffix.lower().lstrip(".")
     if ext not in allowed_extensions:
         raise ValueError(f"File extension not allowed: {ext}")
     # Reject symlinks explicitly
@@ -112,16 +119,14 @@ def validate_safe_path(
         raise ValidationError(f"Not a regular file: {key}")
 
     # Check for suspicious patterns
-    suspicious_patterns = ['..', '~', '$']
+    suspicious_patterns = ["..", "~", "$"]
     log = _get_logger(logger)
     for pattern in suspicious_patterns:
         if pattern in str(key):
-            log.warning(
-                "Suspicious pattern '%s' found in path: %s",
-                pattern, key
-            )
+            log.warning("Suspicious pattern '%s' found in path: %s", pattern, key)
 
     return target
+
 
 # ============================================================================
 # METADATA VALIDATOR
@@ -204,8 +209,7 @@ class MetadataValidator:
         logger: logging.Logger | None = None,
     ) -> tuple[bool, Optional[str]]:
         log = _get_logger(logger)
-        metadata.setdefault("_schema_version",
-                            MetadataValidator.SCHEMA_VERSION)
+        metadata.setdefault("_schema_version", MetadataValidator.SCHEMA_VERSION)
         missing = MetadataValidator.REQUIRED_FIELDS - metadata.keys()
         if missing:
             return False, f"Missing required fields: {missing}"
@@ -219,7 +223,8 @@ class MetadataValidator:
         if found_deprecated:
             log.warning(
                 "Deprecated fields found: %s. Please update your extraction logic.",
-                found_deprecated)
+                found_deprecated,
+            )
         try:
             size = len(json.dumps(metadata, ensure_ascii=False).encode("utf-8"))
             if size > max_metadata_size:
@@ -228,6 +233,7 @@ class MetadataValidator:
             return False, f"Serialisation error: {e}"
 
         return True, None
+
 
 # ============================================================================
 # VALIDATE NAMESPACE ROUTING
@@ -244,9 +250,13 @@ def validate_namespace_routing(
         return False, str(e)
 
     if resolved_namespace != expected:
-        return False, f"Namespace mismatch: expected '{expected}' for doc_type '{doc_type}', got '{resolved_namespace}'"
+        return (
+            False,
+            f"Namespace mismatch: expected '{expected}' for doc_type '{doc_type}', got '{resolved_namespace}'",
+        )
 
     return True, "ok"
+
 
 # ============================================================================
 # PROGRESS BAR IMPLEMENTATION
@@ -293,7 +303,7 @@ class IngestionProgressTracker:
                     total=total_files,
                     desc="Processing files",
                     unit="file",
-                    bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]"
+                    bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]",
                 )
             except ImportError:
                 self.logger.warning(
@@ -321,12 +331,14 @@ class IngestionProgressTracker:
 
         if self.pbar:
             # Update tqdm with rich postfix information
-            self.pbar.set_postfix({
-                'OK': self.processed,
-                'Skip': self.skipped,
-                'Fail': self.failed,
-                'Vectors': self.vectors_created
-            })
+            self.pbar.set_postfix(
+                {
+                    "OK": self.processed,
+                    "Skip": self.skipped,
+                    "Fail": self.failed,
+                    "Vectors": self.vectors_created,
+                }
+            )
             self.pbar.update(1)
         else:
             # Fallback: simple logging every 10 files
@@ -340,7 +352,7 @@ class IngestionProgressTracker:
                     self.processed,
                     self.skipped,
                     self.failed,
-                    self.vectors_created
+                    self.vectors_created,
                 )
 
     def write_message(self, message: str):
@@ -362,6 +374,7 @@ class IngestionProgressTracker:
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Context manager exit."""
         self.close()
+
 
 # ============================================================================
 # ENHANCED FILE LISTING WITH SECURITY
@@ -440,16 +453,18 @@ def list_local_files_secure(
             }
             files.append(obj)
         except ValueError as e:
-            log.warning(
-                "Could not get relative path for %s: %s", filepath, e)
+            log.warning("Could not get relative path for %s: %s", filepath, e)
             continue
 
     log.info(
         "Found %d files (skipped %d by extension, %d by size)",
-        len(files), skipped_ext, skipped_large
+        len(files),
+        skipped_ext,
+        skipped_large,
     )
 
     return files
+
 
 # ============================================================================
 # MAX BATCH HELPER
@@ -503,12 +518,12 @@ def upsert_vectors(ctx, vectors: list[dict[str, Any]]) -> None:
         for ns, vecs in grouped.items():
             clean_vecs = []
             for v in vecs:
-                clean_v = {k: v for k, v in v.items() if k in (
-                    "id", "values", "metadata")}
+                clean_v = {
+                    k: v for k, v in v.items() if k in ("id", "values", "metadata")
+                }
                 metadata = clean_v.get("metadata")
                 if isinstance(metadata, dict):
-                    clean_v["metadata"] = sanitise_metadata_for_pinecone(
-                        metadata)
+                    clean_v["metadata"] = sanitise_metadata_for_pinecone(metadata)
                 elif metadata is None:
                     clean_v["metadata"] = {}
                 clean_vecs.append(clean_v)
@@ -526,7 +541,10 @@ def upsert_vectors(ctx, vectors: list[dict[str, Any]]) -> None:
                     upsert_elapsed = time.perf_counter() - upsert_start
                     ctx.logger.info(
                         "Upserted %d/%d vectors into namespace '%s' in %.3fs",
-                        len(batch), total, ns or "__default__", upsert_elapsed
+                        len(batch),
+                        total,
+                        ns or "__default__",
+                        upsert_elapsed,
                     )
                 except Exception as e:  # pylint: disable=broad-except
                     namespace_label = ns or "__default__"
@@ -591,9 +609,9 @@ def _merge_aliases(existing, incoming) -> list[str]:
         seen.add(k)
         out.append(x)
 
-    for a in (existing or []):
+    for a in existing or []:
         add(a)
-    for a in (incoming or []):
+    for a in incoming or []:
         add(a)
 
     return out[:MAX_ALIASES]
@@ -631,7 +649,8 @@ def enrich_with_building_metadata(
     if not cached:
         if chunk_idx == 0:
             ctx.logger.debug(
-                "No cached building metadata for '%s' (%s)", canonical_key, doc_type)
+                "No cached building metadata for '%s' (%s)", canonical_key, doc_type
+            )
         return metadata
 
     # Merge cached aliases
@@ -681,8 +700,7 @@ class MetricsExporter:
         # Prometheus label escaping
         def esc_label(value: object) -> str:
             s = str(value)
-            s = s.replace("\\", "\\\\").replace(
-                "\n", "\\n").replace('"', '\\"')
+            s = s.replace("\\", "\\\\").replace("\n", "\\n").replace('"', '\\"')
             return s
 
         run_id = str(stats.get("run_id") or uuid.uuid4().hex)
@@ -695,9 +713,7 @@ class MetricsExporter:
         }
         if upsert_workers is not None:
             labels["upsert_workers"] = str(upsert_workers)
-        label_text = ",".join(
-            f'{k}="{esc_label(v)}"' for k, v in labels.items()
-        )
+        label_text = ",".join(f'{k}="{esc_label(v)}"' for k, v in labels.items())
         run_info_labels = {
             **labels,
             "source_path": source_path,
@@ -716,51 +732,58 @@ class MetricsExporter:
             f.write("# --- Run Info ---\n")
             f.write("# HELP askalfred_ingest_run_info Ingestion run metadata.\n")
             f.write("# TYPE askalfred_ingest_run_info gauge\n")
-            f.write(
-                f"askalfred_ingest_run_info{{{run_info_text}}} 1\n")
+            f.write(f"askalfred_ingest_run_info{{{run_info_text}}} 1\n")
 
             # Counters (monotonic within a run)
             f.write("\n# --- File Counters ---\n")
-            f.write(
-                "# HELP askalfred_ingest_files_processed Total files processed.\n")
+            f.write("# HELP askalfred_ingest_files_processed Total files processed.\n")
             f.write("# TYPE askalfred_ingest_files_processed counter\n")
             f.write(
-                f"askalfred_ingest_files_processed{{{label_text}}} {int(stats.get('files_processed', 0))}\n")
+                f"askalfred_ingest_files_processed{{{label_text}}} {int(stats.get('files_processed', 0))}\n"
+            )
             f.write("# HELP askalfred_ingest_files_skipped Total files skipped.\n")
             f.write("# TYPE askalfred_ingest_files_skipped counter\n")
             f.write(
-                f"askalfred_ingest_files_skipped{{{label_text}}} {int(stats.get('files_skipped', 0))}\n")
+                f"askalfred_ingest_files_skipped{{{label_text}}} {int(stats.get('files_skipped', 0))}\n"
+            )
             failed_files = stats.get("failed_files") or []
             failed_files_count = int(len(failed_files))
             f.write("# HELP askalfred_ingest_files_failed Total files failed.\n")
             f.write("# TYPE askalfred_ingest_files_failed counter\n")
             f.write(
-                f"askalfred_ingest_files_failed{{{label_text}}} {failed_files_count}\n")
+                f"askalfred_ingest_files_failed{{{label_text}}} {failed_files_count}\n"
+            )
 
             f.write("\n# --- Vector Counters ---\n")
             f.write(
-                "# HELP askalfred_ingest_total_vectors Total vectors upserted/created.\n")
+                "# HELP askalfred_ingest_total_vectors Total vectors upserted/created.\n"
+            )
             f.write("# TYPE askalfred_ingest_total_vectors counter\n")
             f.write(
-                f"askalfred_ingest_total_vectors{{{label_text}}} {int(stats.get('total_vectors', 0))}\n")
-            f.write(
-                "# HELP askalfred_ingest_vectors_skipped Total vectors skipped.\n")
+                f"askalfred_ingest_total_vectors{{{label_text}}} {int(stats.get('total_vectors', 0))}\n"
+            )
+            f.write("# HELP askalfred_ingest_vectors_skipped Total vectors skipped.\n")
             f.write("# TYPE askalfred_ingest_vectors_skipped counter\n")
             f.write(
-                f"askalfred_ingest_vectors_skipped{{{label_text}}} {int(stats.get('vectors_skipped', 0))}\n")
+                f"askalfred_ingest_vectors_skipped{{{label_text}}} {int(stats.get('vectors_skipped', 0))}\n"
+            )
 
             # Gauges (point-in-time measurements)
             f.write("\n# --- Throughput ---\n")
             f.write(
-                "# HELP askalfred_ingest_duration_seconds Ingestion duration in seconds.\n")
+                "# HELP askalfred_ingest_duration_seconds Ingestion duration in seconds.\n"
+            )
             f.write("# TYPE askalfred_ingest_duration_seconds gauge\n")
             f.write(
-                f"askalfred_ingest_duration_seconds{{{label_text}}} {float(duration_seconds)}\n")
+                f"askalfred_ingest_duration_seconds{{{label_text}}} {float(duration_seconds)}\n"
+            )
             f.write(
-                "# HELP askalfred_ingest_vectors_per_second Average vectors per second.\n")
+                "# HELP askalfred_ingest_vectors_per_second Average vectors per second.\n"
+            )
             f.write("# TYPE askalfred_ingest_vectors_per_second gauge\n")
             f.write(
-                f"askalfred_ingest_vectors_per_second{{{label_text}}} {float(vectors_per_second)}\n")
+                f"askalfred_ingest_vectors_per_second{{{label_text}}} {float(vectors_per_second)}\n"
+            )
 
             # Additional counters
             f.write("\n# --- Additional Counters ---\n")
@@ -783,12 +806,11 @@ class MetricsExporter:
             ]
             for key in counters:
                 if key in stats:
+                    f.write(f"# HELP askalfred_ingest_{key} {key.replace('_', ' ')}.\n")
+                    f.write(f"# TYPE askalfred_ingest_{key} counter\n")
                     f.write(
-                        f"# HELP askalfred_ingest_{key} {key.replace('_', ' ')}.\n")
-                    f.write(
-                        f"# TYPE askalfred_ingest_{key} counter\n")
-                    f.write(
-                        f"askalfred_ingest_{key}{{{label_text}}} {int(stats.get(key, 0))}\n")
+                        f"askalfred_ingest_{key}{{{label_text}}} {int(stats.get(key, 0))}\n"
+                    )
 
             # Timing summaries (sum/count/max)
             f.write("\n# --- Timing Summaries ---\n")
@@ -810,34 +832,33 @@ class MetricsExporter:
                 sum_key = f"{base}_sum"
                 max_key = f"{base}_max"
                 if count_key in stats:
+                    f.write(f"# HELP askalfred_ingest_{count_key} {base} count.\n")
+                    f.write(f"# TYPE askalfred_ingest_{count_key} counter\n")
                     f.write(
-                        f"# HELP askalfred_ingest_{count_key} {base} count.\n")
-                    f.write(
-                        f"# TYPE askalfred_ingest_{count_key} counter\n")
-                    f.write(
-                        f"askalfred_ingest_{count_key}{{{label_text}}} {int(stats.get(count_key, 0))}\n")
+                        f"askalfred_ingest_{count_key}{{{label_text}}} {int(stats.get(count_key, 0))}\n"
+                    )
                 if sum_key in stats:
+                    f.write(f"# HELP askalfred_ingest_{sum_key} {base} sum seconds.\n")
+                    f.write(f"# TYPE askalfred_ingest_{sum_key} counter\n")
                     f.write(
-                        f"# HELP askalfred_ingest_{sum_key} {base} sum seconds.\n")
-                    f.write(
-                        f"# TYPE askalfred_ingest_{sum_key} counter\n")
-                    f.write(
-                        f"askalfred_ingest_{sum_key}{{{label_text}}} {float(stats.get(sum_key, 0.0))}\n")
+                        f"askalfred_ingest_{sum_key}{{{label_text}}} {float(stats.get(sum_key, 0.0))}\n"
+                    )
                 if max_key in stats:
+                    f.write(f"# HELP askalfred_ingest_{max_key} {base} max seconds.\n")
+                    f.write(f"# TYPE askalfred_ingest_{max_key} gauge\n")
                     f.write(
-                        f"# HELP askalfred_ingest_{max_key} {base} max seconds.\n")
-                    f.write(
-                        f"# TYPE askalfred_ingest_{max_key} gauge\n")
-                    f.write(
-                        f"askalfred_ingest_{max_key}{{{label_text}}} {float(stats.get(max_key, 0.0))}\n")
+                        f"askalfred_ingest_{max_key}{{{label_text}}} {float(stats.get(max_key, 0.0))}\n"
+                    )
 
             # Optional: expose failed file count as gauge (easy alerting)
             f.write("\n# --- Run Health ---\n")
             f.write(
-                "# HELP askalfred_ingest_failed_files_count Number of failed files in this run.\n")
+                "# HELP askalfred_ingest_failed_files_count Number of failed files in this run.\n"
+            )
             f.write("# TYPE askalfred_ingest_failed_files_count gauge\n")
             f.write(
-                f"askalfred_ingest_failed_files_count{{{label_text}}} {failed_files_count}\n")
+                f"askalfred_ingest_failed_files_count{{{label_text}}} {failed_files_count}\n"
+            )
 
         tmp_path.replace(out)
 
@@ -850,7 +871,8 @@ class DryRunIndex:
 
     def upsert(self, vectors, namespace=None):
         self.logger.info(
-            f"[DRY-RUN] Would upsert {len(vectors)} vectors to {namespace}")
+            f"[DRY-RUN] Would upsert {len(vectors)} vectors to {namespace}"
+        )
         return {"upserted_count": len(vectors)}
 
     def query(self, **kwargs):
@@ -866,6 +888,7 @@ class DryRunIndex:
 
         class _Result:
             vectors = {}
+
         return _Result()
 
     def update(self, **kwargs):

@@ -3,30 +3,30 @@ from __future__ import annotations
 
 import random
 import time
-from typing import Protocol, Optional
 from dataclasses import dataclass
+from typing import Optional, Protocol
 
 from openai import (
-    APIError,
     APIConnectionError,
+    APIError,
     APITimeoutError,
-    RateLimitError,
     AuthenticationError,
-    PermissionDeniedError,
     BadRequestError,
-    NotFoundError,
     ConflictError,
-    UnprocessableEntityError,
+    NotFoundError,
     OpenAI,
+    PermissionDeniedError,
+    RateLimitError,
+    UnprocessableEntityError,
 )
 
 from clients import get_oai
 from config import (
-    INGEST_EMBED_MAX_RETRIES,
-    INGEST_RETRY_EXP_MULTIPLIER,
-    INGEST_RETRY_EXP_MIN,
-    INGEST_RETRY_EXP_MAX,
     INGEST_EMBED_BATCH_SIZE,
+    INGEST_EMBED_MAX_RETRIES,
+    INGEST_RETRY_EXP_MAX,
+    INGEST_RETRY_EXP_MIN,
+    INGEST_RETRY_EXP_MULTIPLIER,
 )
 
 
@@ -59,8 +59,10 @@ class OpenAIEmbedder:
 
     def _sleep_backoff(self, attempt: int) -> None:
         # Exponential backoff with jitter.
-        exp = min(INGEST_RETRY_EXP_MAX, INGEST_RETRY_EXP_MIN *
-                  (INGEST_RETRY_EXP_MULTIPLIER ** attempt))
+        exp = min(
+            INGEST_RETRY_EXP_MAX,
+            INGEST_RETRY_EXP_MIN * (INGEST_RETRY_EXP_MULTIPLIER**attempt),
+        )
         base = min(INGEST_RETRY_EXP_MAX, exp)
         jitter = random.random()
         time.sleep(min(INGEST_RETRY_EXP_MAX, base + jitter))
@@ -123,7 +125,13 @@ class OpenAIEmbedder:
                 retry_attempts += 1
                 self._sleep_backoff(attempt)
             except Exception:
-                return None, retry_attempts, rate_limit_errors, "unexpected_error", False
+                return (
+                    None,
+                    retry_attempts,
+                    rate_limit_errors,
+                    "unexpected_error",
+                    False,
+                )
         return None, retry_attempts, rate_limit_errors, "failed_after_retries", False
 
     def embed_texts(
@@ -153,9 +161,9 @@ class OpenAIEmbedder:
         i = 0
         batch_size = initial_batch_size
         while i < len(texts):
-            batch = texts[i:i + batch_size]
-            result, retries_used, rate_limit_used, error_reason, fatal_error = self._embed_batch(
-                batch, model=model, timeout=timeout
+            batch = texts[i : i + batch_size]
+            result, retries_used, rate_limit_used, error_reason, fatal_error = (
+                self._embed_batch(batch, model=model, timeout=timeout)
             )
             retry_attempts += retries_used
             rate_limit_errors += rate_limit_used

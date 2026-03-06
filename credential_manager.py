@@ -10,13 +10,11 @@ Handles loading and caching credentials from environment variables with:
 - Validation without storing credentials in process env
 """
 
-import os
 import logging
-from typing import Optional
-from abc import ABC, abstractmethod
+import os
 import threading
-
-from log_sanitiser import sanitise_message
+from abc import ABC, abstractmethod
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -75,8 +73,7 @@ class EnvironmentCredentialProvider(CredentialProvider):
 
         if not isinstance(value, str) or not value.strip():
             raise ValueError(
-                f"Credential '{name}' is empty. "
-                "Please provide a valid value."
+                f"Credential '{name}' is empty. " "Please provide a valid value."
             )
 
         return value
@@ -99,7 +96,7 @@ class EnvironmentCredentialProvider(CredentialProvider):
                 logger.warning(
                     "Missing credentials: %s. "
                     "Application may not function correctly.",
-                    ", ".join(missing)
+                    ", ".join(missing),
                 )
                 return False
 
@@ -138,20 +135,24 @@ class SecureCredentialManager:
                 return  # Already initialised
 
             # Azure AD provider
-            cls._azure_provider = EnvironmentCredentialProvider({
-                'AZURE_TENANT_ID': 'Azure Tenant ID',
-                'AZURE_CLIENT_ID': 'Azure Client ID',
-                'AZURE_CLIENT_SECRET': 'Azure Client Secret',
-            })
+            cls._azure_provider = EnvironmentCredentialProvider(
+                {
+                    "AZURE_TENANT_ID": "Azure Tenant ID",
+                    "AZURE_CLIENT_ID": "Azure Client ID",
+                    "AZURE_CLIENT_SECRET": "Azure Client Secret",
+                }
+            )
 
             # Service providers
-            cls._service_provider = EnvironmentCredentialProvider({
-                'PINECONE_API_KEY': 'Pinecone API Key',
-                'OPENAI_API_KEY': 'OpenAI API Key',
-            })
+            cls._service_provider = EnvironmentCredentialProvider(
+                {
+                    "PINECONE_API_KEY": "Pinecone API Key",
+                    "OPENAI_API_KEY": "OpenAI API Key",
+                }
+            )
 
-            cls._providers['azure'] = cls._azure_provider
-            cls._providers['service'] = cls._service_provider
+            cls._providers["azure"] = cls._azure_provider
+            cls._providers["service"] = cls._service_provider
 
             # Validate at startup
             logger.info("Validating credentials...")
@@ -174,7 +175,7 @@ class SecureCredentialManager:
         if not cls._azure_provider:
             cls.initialise()
         assert cls._azure_provider is not None
-        return cls._azure_provider.get_credential('AZURE_TENANT_ID')
+        return cls._azure_provider.get_credential("AZURE_TENANT_ID")
 
     @classmethod
     def get_azure_client_id(cls) -> str:
@@ -182,7 +183,7 @@ class SecureCredentialManager:
         if not cls._azure_provider:
             cls.initialise()
         assert cls._azure_provider is not None
-        return cls._azure_provider.get_credential('AZURE_CLIENT_ID')
+        return cls._azure_provider.get_credential("AZURE_CLIENT_ID")
 
     @classmethod
     def get_azure_client_secret(cls) -> str:
@@ -190,7 +191,7 @@ class SecureCredentialManager:
         if not cls._azure_provider:
             cls.initialise()
         assert cls._azure_provider is not None
-        return cls._azure_provider.get_credential('AZURE_CLIENT_SECRET')
+        return cls._azure_provider.get_credential("AZURE_CLIENT_SECRET")
 
     @classmethod
     def get_pinecone_api_key(cls) -> str:
@@ -198,7 +199,7 @@ class SecureCredentialManager:
         if not cls._service_provider:
             cls.initialise()
         assert cls._service_provider is not None
-        return cls._service_provider.get_credential('PINECONE_API_KEY')
+        return cls._service_provider.get_credential("PINECONE_API_KEY")
 
     @classmethod
     def get_openai_api_key(cls) -> str:
@@ -206,7 +207,7 @@ class SecureCredentialManager:
         if not cls._service_provider:
             cls.initialise()
         assert cls._service_provider is not None
-        return cls._service_provider.get_credential('OPENAI_API_KEY')
+        return cls._service_provider.get_credential("OPENAI_API_KEY")
 
     @classmethod
     def get_azure_config(cls) -> dict[str, str]:
@@ -224,9 +225,15 @@ class SecureCredentialManager:
 
         try:
             return {
-                'AZURE_TENANT_ID': cls._azure_provider.get_credential('AZURE_TENANT_ID'),
-                'AZURE_CLIENT_ID': cls._azure_provider.get_credential('AZURE_CLIENT_ID'),
-                'AZURE_CLIENT_SECRET': cls._azure_provider.get_credential('AZURE_CLIENT_SECRET'),
+                "AZURE_TENANT_ID": cls._azure_provider.get_credential(
+                    "AZURE_TENANT_ID"
+                ),
+                "AZURE_CLIENT_ID": cls._azure_provider.get_credential(
+                    "AZURE_CLIENT_ID"
+                ),
+                "AZURE_CLIENT_SECRET": cls._azure_provider.get_credential(
+                    "AZURE_CLIENT_SECRET"
+                ),
             }
         except KeyError as e:
             raise KeyError(f"Azure configuration incomplete: {e}") from e

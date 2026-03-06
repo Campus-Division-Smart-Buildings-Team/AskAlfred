@@ -13,7 +13,7 @@ Returned by QueryManager.process_query(), it carries:
 Handlers may enrich metadata as needed.
 """
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from typing import Any, Optional
 
 

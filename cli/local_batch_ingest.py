@@ -4,15 +4,25 @@ CLI entrypoint for AskAlfred local batch ingestion.
 """
 
 from __future__ import annotations
-import logging
+
 import argparse
-from dotenv import load_dotenv
-from ingest import validate_namespace_routing, ingest_local_directory_with_progress, IngestContext
-from file_operations_validator import validate_directory_safety, FileOperationSecurityError
-from config import BatchIngestConfig, NAMESPACE_MAPPINGS
-from alfred_exceptions import ConfigError, UnexpectedError
+import logging
 import sys
 from pathlib import Path
+
+from dotenv import load_dotenv
+
+from alfred_exceptions import ConfigError, UnexpectedError
+from config import NAMESPACE_MAPPINGS, BatchIngestConfig
+from file_operations_validator import (
+    FileOperationSecurityError,
+    validate_directory_safety,
+)
+from ingest import (
+    IngestContext,
+    ingest_local_directory_with_progress,
+    validate_namespace_routing,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -135,8 +145,7 @@ def main() -> int:
 
     if args.validate_routing:
         for doc_type, expected_namespace in NAMESPACE_MAPPINGS.items():
-            valid, reason = validate_namespace_routing(
-                doc_type, expected_namespace)
+            valid, reason = validate_namespace_routing(doc_type, expected_namespace)
             if not valid:
                 raise ValueError(
                     f"Routing validation failed for doc_type='{doc_type}': {reason}"
@@ -147,8 +156,7 @@ def main() -> int:
     ctx = IngestContext(config)
 
     try:
-        ingest_local_directory_with_progress(
-            ctx, use_progress_bar=not args.no_progress)
+        ingest_local_directory_with_progress(ctx, use_progress_bar=not args.no_progress)
         return 0
     except KeyboardInterrupt:
         ctx.logger.warning("Ingestion interrupted by user. Cleaning up...")

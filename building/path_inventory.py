@@ -9,18 +9,18 @@ structured output describing subfolders, files, and LastWriteTime.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Optional
 import argparse
 import json
 import sys
-
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional
 
 # =============================================================================
 # DATA MODEL
 # =============================================================================
+
 
 @dataclass
 class PathEntry:
@@ -40,6 +40,7 @@ class PathEntry:
 # =============================================================================
 # CORE SCAN LOGIC
 # =============================================================================
+
 
 def scan_path(
     root_path: str,
@@ -173,7 +174,9 @@ def _scan_dir(
     return entry
 
 
-def _build_entry(*, root: Path, target: Path, entry_type: str, use_utc: bool) -> PathEntry:
+def _build_entry(
+    *, root: Path, target: Path, entry_type: str, use_utc: bool
+) -> PathEntry:
     stat = target.stat()
     last_write_time = _to_iso(stat.st_mtime, use_utc=use_utc)
     relative_path = str(target.relative_to(root))
@@ -201,6 +204,7 @@ def _to_iso(timestamp: float, *, use_utc: bool) -> str:
 # =============================================================================
 # USAGE EXAMPLE
 # =============================================================================
+
 
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(

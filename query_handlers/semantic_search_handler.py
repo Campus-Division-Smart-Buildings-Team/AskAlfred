@@ -5,18 +5,18 @@ Default semantic search handler.
 Handles all remaining queries not claimed by other handlers.
 """
 
-import time
 import logging
-from typing import Optional, cast, Any
-from query_types import QueryType
+import time
+from typing import Any, Optional, cast
+
+import search_core
+from alfred_exceptions import RoutingError
+from log_sanitiser import sanitise_error
 from query_context import QueryContext
 from query_result import QueryResult
-from search_instructions import SearchInstructions
-
-from alfred_exceptions import RoutingError
-import search_core
+from query_types import QueryType
 from search_core.search_router import execute
-from log_sanitiser import sanitise_error
+from search_instructions import SearchInstructions
 
 from .base_handler import BaseQueryHandler
 
@@ -28,9 +28,9 @@ class SemanticSearchHandler(BaseQueryHandler):
         super().__init__()
         self.query_type = QueryType.SEMANTIC_SEARCH
         self.priority = 99
-        self.min_query_length = 2          # min words required
-        self.min_char_length = 4           # min characters to avoid noise
-        self.timeout_seconds = 12          # guardrail for heavy searches
+        self.min_query_length = 2  # min words required
+        self.min_char_length = 4  # min characters to avoid noise
+        self.timeout_seconds = 12  # guardrail for heavy searches
 
     def can_handle(self, context: QueryContext) -> bool:
         """
@@ -51,7 +51,8 @@ class SemanticSearchHandler(BaseQueryHandler):
     def handle(self, context: QueryContext) -> QueryResult:
         """Run federated semantic search with safety guards."""
         instructions: Optional[SearchInstructions] = context.get_from_cache(
-            "search_instructions")
+            "search_instructions"
+        )
 
         # If a handler provided explicit search instructions, run them
         if instructions:
@@ -61,8 +62,17 @@ class SemanticSearchHandler(BaseQueryHandler):
         ml_conf = getattr(context, "ml_intent_confidence", 0.0)
         if ml_intent:
             # light-touch hint; you could thread this into your search router or boosts
-            context.add_to_cache("ml_intent_hint", {"intent": ml_intent.value if hasattr(ml_intent, "value") else str(ml_intent),
-                                                    "confidence": ml_conf})
+            context.add_to_cache(
+                "ml_intent_hint",
+                {
+                    "intent": (
+                        ml_intent.value
+                        if hasattr(ml_intent, "value")
+                        else str(ml_intent)
+                    ),
+                    "confidence": ml_conf,
+                },
+            )
 
         self._log_handling(context)
         query_text = context.query.strip()
@@ -75,7 +85,7 @@ class SemanticSearchHandler(BaseQueryHandler):
                 results=[],
                 handler_used="SemanticSearchHandler",
                 query_type=self.query_type.value,
-                metadata={"short_query": True}
+                metadata={"short_query": True},
             )
 
         if len(query_text.split()) < self.min_query_length:
@@ -85,7 +95,7 @@ class SemanticSearchHandler(BaseQueryHandler):
                 results=[],
                 handler_used="SemanticSearchHandler",
                 query_type=self.query_type.value,
-                metadata={"short_query": True}
+                metadata={"short_query": True},
             )
 
         # Run federated search with timeout
@@ -93,9 +103,7 @@ class SemanticSearchHandler(BaseQueryHandler):
 
         try:
             results, answer, pub_date_info, score_too_low = search_core.semantic_search(
-                query_text,
-                context.top_k,
-                building_filter=context.building_filter
+                query_text, context.top_k, building_filter=context.building_filter
             )
 
             elapsed = round(time.time() - start, 3)
@@ -127,13 +135,14 @@ class SemanticSearchHandler(BaseQueryHandler):
                     "num_results": len(results),
                     "elapsed_seconds": elapsed,
                     "score_too_low": score_too_low,
-                    "building_filter": context.building_filter
-                }
+                    "building_filter": context.building_filter,
+                },
             )
 
         except Exception as e:
-            logging.error("Semantic search failure: %s",
-                          sanitise_error(e), exc_info=False)
+            logging.error(
+                "Semantic search failure: %s", sanitise_error(e), exc_info=False
+            )
             elapsed = round(time.time() - start, 3)
 
             return QueryResult(
@@ -146,11 +155,13 @@ class SemanticSearchHandler(BaseQueryHandler):
                 metadata={
                     "error": str(e),
                     "elapsed_seconds": elapsed,
-                    "fallback": True
-                }
+                    "fallback": True,
+                },
             )
 
-    def _execute_instructions(self, context: QueryContext, instr: SearchInstructions) -> QueryResult:
+    def _execute_instructions(
+        self, context: QueryContext, instr: SearchInstructions
+    ) -> QueryResult:
         """Execute a structured search instruction coming from another handler and handles semantic instructions from QueryManager."""
         start = time.time()
 
@@ -160,28 +171,24 @@ class SemanticSearchHandler(BaseQueryHandler):
 
             if instr.type == "semantic":
                 results, answer, pub_info, score_flag = cast(
-                    tuple[list[dict[str, Any]], str, str, bool],
-                    result
+                    tuple[list[dict[str, Any]], str, str, bool], result
                 )
 
             elif instr.type == "planon":
                 results, answer, pub_info = cast(
-                    tuple[list[dict[str, Any]], Optional[str], str],
-                    result
+                    tuple[list[dict[str, Any]], Optional[str], str], result
                 )
                 score_flag = None
 
             elif instr.type == "maintenance":
                 results, answer = cast(
-                    tuple[list[dict[str, Any]], Optional[str]],
-                    result
+                    tuple[list[dict[str, Any]], Optional[str]], result
                 )
                 pub_info = None
                 score_flag = None
 
             else:
-                raise RoutingError(
-                    f"Unknown search instruction type: {instr.type}")
+                raise RoutingError(f"Unknown search instruction type: {instr.type}")
 
             elapsed = round(time.time() - start, 3)
 
@@ -198,12 +205,13 @@ class SemanticSearchHandler(BaseQueryHandler):
                     "elapsed_seconds": elapsed,
                     "building_filter": instr.building,
                     "num_results": len(results),
-                }
+                },
             )
 
         except Exception as e:
-            logging.error("Search instruction failed: %s",
-                          sanitise_error(e), exc_info=False)
+            logging.error(
+                "Search instruction failed: %s", sanitise_error(e), exc_info=False
+            )
             elapsed = round(time.time() - start, 3)
 
             return QueryResult(
@@ -217,6 +225,6 @@ class SemanticSearchHandler(BaseQueryHandler):
                     "instruction_type": instr.type if instr else None,
                     "error": str(e),
                     "elapsed_seconds": elapsed,
-                    "fallback": True
-                }
+                    "fallback": True,
+                },
             )

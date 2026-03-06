@@ -1,7 +1,7 @@
 # business_term_extractor.py
 
-from query_preprocessors.base_preprocessor import CachingPreprocessor
 from business_terms import BusinessTermMapper
+from query_preprocessors.base_preprocessor import CachingPreprocessor
 
 
 class BusinessTermExtractor(CachingPreprocessor):
@@ -35,4 +35,5 @@ class BusinessTermExtractor(CachingPreprocessor):
         self.mark_done(context)
 
         self.logger.info(
-            f"Detected business terms: {', '.join(t['term'] for t in terms)}")
+            f"Detected business terms: {', '.join(t['term'] for t in terms)}"
+        )

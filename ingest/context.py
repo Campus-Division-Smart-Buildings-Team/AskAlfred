@@ -1,45 +1,48 @@
-"""""
+""" ""
 Ingestion Context module.
 This module defines the IngestContext class, which serves as a container
 for all ingestion dependencies. It provides dependency injection for
 cleaner, testable code.
 """
+
 import logging
 import threading
-import tiktoken
+
 import httpx
-from pinecone import Pinecone, ServerlessSpec
+import tiktoken
 from openai import OpenAI
-from redis import Redis, ConnectionPool
-from redis_lock_manager import RedisLockManager, DryRunRedisLockManager
+from pinecone import Pinecone, ServerlessSpec
+from redis import ConnectionPool, Redis
+
+from alfred_exceptions import ConfigError, IngestError
+from config import (
+    REDIS_POOL_HEALTH_CHECK_INTERVAL_S,
+    REDIS_POOL_MAX_CONNECTIONS,
+    REDIS_POOL_SOCKET_CONNECT_TIMEOUT_S,
+    REDIS_POOL_SOCKET_TIMEOUT_S,
+    BatchIngestConfig,
+)
 from interfaces import (
     Embedder,
     EventSink,
+    IngestFileRegistry,
+    JobRegistry,
+    JsonlPrometheusEventSink,
+    NoOpIngestFileRegistry,
+    NoOpJobRegistry,
     OpenAIEmbedder,
     PineconeVectorStore,
     RedisIngestFileRegistry,
-    NoOpIngestFileRegistry,
-    JobRegistry,
     RedisJobRegistry,
-    NoOpJobRegistry,
-    JsonlPrometheusEventSink,
     VectorStore,
-    IngestFileRegistry,
 )
-from alfred_exceptions import ConfigError, IngestError
-from config import (
-    BatchIngestConfig,
-    REDIS_POOL_MAX_CONNECTIONS,
-    REDIS_POOL_SOCKET_TIMEOUT_S,
-    REDIS_POOL_SOCKET_CONNECT_TIMEOUT_S,
-    REDIS_POOL_HEALTH_CHECK_INTERVAL_S,
-)
+from redis_lock_manager import DryRunRedisLockManager, RedisLockManager
+
 from .transaction import (
-    ThreadSafeStats,
     ThreadSafeCache,
+    ThreadSafeStats,
 )
 from .utils import DryRunIndex
-
 
 # ============================================================================
 # INGESTION CONTEXT
@@ -90,8 +93,7 @@ class IngestContext:
     def pinecone(self) -> Pinecone:
         """Get Pinecone client (lazy init)."""
         if getattr(self.config, "dry_run", False):
-            raise IngestError(
-                "Dry-run enabled: Pinecone client must not be used")
+            raise IngestError("Dry-run enabled: Pinecone client must not be used")
         if self._pinecone is None:
             self._pinecone = Pinecone(api_key=self.config.pinecone_api_key)
         return self._pinecone
@@ -100,8 +102,7 @@ class IngestContext:
     def openai(self) -> OpenAI:
         """Get OpenAI client (lazy init)."""
         if getattr(self.config, "dry_run", False):
-            raise IngestError(
-                "Dry-run enabled: OpenAI client must not be used")
+            raise IngestError("Dry-run enabled: OpenAI client must not be used")
         if self._openai is None:
             timeout = httpx.Timeout(
                 timeout=self.config.openai_timeout,
@@ -120,8 +121,7 @@ class IngestContext:
     def redis(self) -> Redis:
         """Get Redis client (lazy init)."""
         if getattr(self.config, "dry_run", False):
-            raise IngestError(
-                "Dry-run enabled: Redis client must not be used")
+            raise IngestError("Dry-run enabled: Redis client must not be used")
         if self._redis is None:
             pool = ConnectionPool(
                 host=self.config.redis_host,
@@ -174,8 +174,7 @@ class IngestContext:
     def embedder(self) -> Embedder:
         """Get embeddings wrapper (lazy init)."""
         if getattr(self.config, "dry_run", False):
-            raise IngestError(
-                "Dry-run enabled: Embedder must not be used")
+            raise IngestError("Dry-run enabled: Embedder must not be used")
         if self._embedder is None:
             self._embedder = OpenAIEmbedder(client=self.openai)
         return self._embedder
@@ -187,7 +186,8 @@ class IngestContext:
                 self._file_registry = NoOpIngestFileRegistry()
             else:
                 self._file_registry = RedisIngestFileRegistry(
-                    self.redis, prefix="ingest:file:")
+                    self.redis, prefix="ingest:file:"
+                )
         return self._file_registry
 
     @property
@@ -196,8 +196,7 @@ class IngestContext:
             if getattr(self.config, "dry_run", False):
                 self._job_registry = NoOpJobRegistry()
             else:
-                self._job_registry = RedisJobRegistry(
-                    self.redis, prefix="ingest:job:")
+                self._job_registry = RedisJobRegistry(self.redis, prefix="ingest:job:")
         return self._job_registry
 
     @property
@@ -227,9 +226,7 @@ class IngestContext:
         """Get tiktoken encoder (lazy init)."""
         if self._encoder is None:
             try:
-                self._encoder = tiktoken.encoding_for_model(
-                    self.config.embed_model
-                )
+                self._encoder = tiktoken.encoding_for_model(self.config.embed_model)
             except KeyError:
                 self._encoder = tiktoken.get_encoding("cl100k_base")
         return self._encoder
@@ -242,7 +239,7 @@ class IngestContext:
             self.logger.info(
                 "Creating Pinecone index '%s' (dim=%d)...",
                 self.config.index_name,
-                self.config.dimension
+                self.config.dimension,
             )
             self.pinecone.create_index(
                 name=self.config.index_name,
@@ -260,5 +257,5 @@ class IngestContext:
             self.logger.info(
                 "Using existing index '%s' (dim=%d)",
                 self.config.index_name,
-                self.config.dimension
+                self.config.dimension,
             )

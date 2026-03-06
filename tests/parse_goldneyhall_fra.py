@@ -96,9 +96,9 @@ def main() -> int:
         lines.append(f"person_responsible: {item.get('person_responsible')}")
         lines.append(f"job_reference: {item.get('job_reference')}")
         lines.append(
-            f"expected_completion_date: {item.get('expected_completion_date')}")
-        lines.append(
-            f"actual_completion_date: {item.get('actual_completion_date')}")
+            f"expected_completion_date: {item.get('expected_completion_date')}"
+        )
+        lines.append(f"actual_completion_date: {item.get('actual_completion_date')}")
         lines.append("")
 
     out_path.write_text("\n".join(lines), encoding="utf-8")

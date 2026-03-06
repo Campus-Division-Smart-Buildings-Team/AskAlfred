@@ -3,9 +3,11 @@
 """
 Base handler interface for query processing.
 """
+
 import logging
 from abc import ABC, abstractmethod
 from typing import Any
+
 from query_context import QueryContext
 from query_result import QueryResult
 
@@ -29,7 +31,7 @@ class BaseQueryHandler(ABC):
         self.logger.info(
             "Handling query: '%s...' (type: %s)",
             context.query[:50],
-            self.query_type.value if self.query_type else 'unknown'
+            self.query_type.value if self.query_type else "unknown",
         )
 
     @abstractmethod
@@ -94,14 +96,14 @@ class PatternBasedHandler(BaseQueryHandler):
         for pattern in self.patterns:
             if pattern.search(query):
                 # Cache matched pattern for use in handle()
-                context.add_to_cache('matched_pattern', pattern)
+                context.add_to_cache("matched_pattern", pattern)
                 return True
 
         return False
 
     def get_metadata(self, context) -> dict[str, Any]:
         """Return matched pattern info."""
-        matched = context.get_from_cache('matched_pattern')
+        matched = context.get_from_cache("matched_pattern")
         if matched:
-            return {'matched_pattern': matched.pattern}
+            return {"matched_pattern": matched.pattern}
         return {}

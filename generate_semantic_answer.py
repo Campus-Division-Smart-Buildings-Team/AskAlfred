@@ -10,26 +10,27 @@ Key improvements:
 - Better handling of building-specific results
 - Enhanced metadata field checking
 """
+
 import logging
 from typing import Any, Optional
+
 from clients import get_oai
 from config import (
     ANSWER_MODEL,
-    DEFAULT_NAMESPACE,
-    ANSWER_TEMPERATURE_DEFAULT,
     ANSWER_TEMPERATURE_COMPARE,
+    ANSWER_TEMPERATURE_DEFAULT,
     BUILDING_NAME_FIELDS,
+    DEFAULT_NAMESPACE,
     DocumentTypes,
 )
 from date_utils import (
-    search_source_for_latest_date,
-    parse_date_string,
-    format_display_date,
     PLANON_DATE_PATTERNS,
+    format_display_date,
+    parse_date_string,
+    search_source_for_latest_date,
 )
-from emojis import EMOJI_DOCUMENT, EMOJI_BUILDING, EMOJI_CHART
+from emojis import EMOJI_BUILDING, EMOJI_CHART, EMOJI_DOCUMENT
 from pinecone_utils import open_index
-
 
 # ============================================================================
 # CONSTANTS
@@ -51,7 +52,7 @@ def get_metadata_field(result: dict[str, Any], field: str, default: Any = None) 
     Get field from metadata first, then fall back to top level.
     Centralised accessor to avoid repeated pattern.
     """
-    metadata = result.get('metadata', {})
+    metadata = result.get("metadata", {})
     return metadata.get(field) or result.get(field, default)
 
 
@@ -66,7 +67,7 @@ def get_building_name_from_result(result: dict[str, Any]) -> str:
     Returns:
         Building name or 'Unknown' if not found
     """
-    metadata = result.get('metadata', {})
+    metadata = result.get("metadata", {})
 
     # Check each field in priority order
     for field in BUILDING_NAME_FIELDS:
@@ -83,16 +84,16 @@ def get_building_name_from_result(result: dict[str, Any]) -> str:
                 return value.strip()
 
     # Fallback: check top-level building_name (backward compatibility)
-    building_name = result.get('building_name', '')
-    if building_name and building_name != 'Unknown':
+    building_name = result.get("building_name", "")
+    if building_name and building_name != "Unknown":
         return building_name
 
-    return 'Unknown'
+    return "Unknown"
 
 
 def get_text_from_result(result: dict[str, Any]) -> str:
     """Extract text content from result, checking multiple locations."""
-    return result.get('text', '') or get_metadata_field(result, 'text', '')
+    return result.get("text", "") or get_metadata_field(result, "text", "")
 
 
 def extract_planon_date_from_text(text: str) -> Optional[str]:
@@ -107,8 +108,9 @@ def extract_planon_date_from_text(text: str) -> Optional[str]:
     return None
 
 
-def separate_results_by_type(results: list[dict[str, Any]]
-                             ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def separate_results_by_type(
+    results: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """
     Separate results into planon and operational/FRA documents.
     Returns sorted operational results (by score descending).
@@ -117,7 +119,7 @@ def separate_results_by_type(results: list[dict[str, Any]]
     operational_results = []
 
     for r in results:
-        doc_type = get_metadata_field(r, 'document_type')
+        doc_type = get_metadata_field(r, "document_type")
 
         if doc_type == DOC_TYPE_PLANON:
             planon_results.append(r)
@@ -125,11 +127,12 @@ def separate_results_by_type(results: list[dict[str, Any]]
             operational_results.append(r)
 
     # Sort operational by score (descending)
-    operational_results.sort(key=lambda x: x.get('score', 0), reverse=True)
+    operational_results.sort(key=lambda x: x.get("score", 0), reverse=True)
 
     logging.info(
         "Separated %d operational/FRA docs and %d planon records",
-        len(operational_results), len(planon_results)
+        len(operational_results),
+        len(planon_results),
     )
 
     return planon_results, operational_results
@@ -147,8 +150,7 @@ def find_planon_date(planon_results: list[dict[str, Any]]) -> Optional[str]:
 
 
 def find_operational_date(
-    operational_results: list[dict[str, Any]],
-    target_building: Optional[str] = None
+    operational_results: list[dict[str, Any]], target_building: Optional[str] = None
 ) -> tuple[Optional[str], Optional[str]]:
     """
     Find date from operational docs, prioritising target building.
@@ -164,14 +166,18 @@ def find_operational_date(
     if not operational_results:
         return None, None
     # Import here to avoid circular dependency
-    from building.utils import result_matches_building  # pylint: disable=import-outside-toplevel
+    from building.utils import (
+        result_matches_building,
+    )  # pylint: disable=import-outside-toplevel
 
     # Filter by building if specified
     if target_building:
         # STRATEGY 1: Try EXACT building name match first (no fuzzy)
         exact_matches = [
-            r for r in operational_results
-            if get_building_name_from_result(r).lower().strip() == target_building.lower().strip()
+            r
+            for r in operational_results
+            if get_building_name_from_result(r).lower().strip()
+            == target_building.lower().strip()
         ]
 
         if exact_matches:
@@ -179,17 +185,17 @@ def find_operational_date(
             building_name = get_building_name_from_result(top_operational)
             logging.info(
                 "🏢 Using building-specific operational doc: %s (building: %s)",
-                top_operational.get('key', ''),
-                building_name
+                top_operational.get("key", ""),
+                building_name,
             )
         else:
             # STRATEGY 2: Fallback to fuzzy matching
             logging.info(
-                "No exact matches for '%s', trying fuzzy matching...",
-                target_building
+                "No exact matches for '%s', trying fuzzy matching...", target_building
             )
             building_specific = [
-                r for r in operational_results
+                r
+                for r in operational_results
                 if result_matches_building(r, target_building)
             ]
 
@@ -198,22 +204,22 @@ def find_operational_date(
                 building_name = get_building_name_from_result(top_operational)
                 logging.warning(
                     "⚠️ Using FUZZY match operational doc: %s (building: %s) for target '%s'",
-                    top_operational.get('key', ''),
+                    top_operational.get("key", ""),
                     building_name,
-                    target_building
+                    target_building,
                 )
             else:
                 logging.warning(
                     "No operational docs match building '%s' (exact or fuzzy), using top result",
-                    target_building
+                    target_building,
                 )
                 top_operational = operational_results[0]
     else:
         top_operational = operational_results[0]
 
     # Get date
-    doc_key = get_metadata_field(top_operational, 'key')
-    index_name = top_operational.get('index', '')
+    doc_key = get_metadata_field(top_operational, "key")
+    index_name = top_operational.get("index", "")
 
     if not doc_key or not index_name:
         logging.warning("Missing key or index for operational doc")
@@ -222,9 +228,7 @@ def find_operational_date(
     try:
         idx = open_index(index_name)
         date, _ = search_source_for_latest_date(
-            idx,
-            doc_key,
-            top_operational.get('namespace', DEFAULT_NAMESPACE)
+            idx, doc_key, top_operational.get("namespace", DEFAULT_NAMESPACE)
         )
         return date, doc_key
     except Exception as e:  # pylint: disable=broad-except
@@ -233,8 +237,7 @@ def find_operational_date(
 
 
 def get_document_dates_by_type(
-    results: list[dict[str, Any]],
-    target_building: Optional[str] = None
+    results: list[dict[str, Any]], target_building: Optional[str] = None
 ) -> tuple[Optional[str], Optional[str], Optional[str]]:
     """
     Extract dates from different document types.
@@ -259,7 +262,7 @@ def get_document_dates_by_type(
 def format_date_information(
     planon_date: Optional[str],
     operational_date: Optional[str],
-    operational_doc_key: Optional[str]
+    operational_doc_key: Optional[str],
 ) -> tuple[str, str]:
     """
     Format date information for prompts and display.
@@ -290,17 +293,14 @@ def format_date_information(
         parsed_planon = parse_date_string(planon_date)
         display_planon = format_display_date(parsed_planon)
 
-        date_context_parts.append(
-            f"Property Condition Assessment Date: {planon_date}"
-        )
+        date_context_parts.append(f"Property Condition Assessment Date: {planon_date}")
         publication_parts.append(
             f"{EMOJI_BUILDING} Property condition assessed: **{display_planon}**"
         )
 
     if not date_context_parts:
         date_context_parts.append("Date Information: Not available")
-        publication_parts.append(
-            "**Publication date unknown**")
+        publication_parts.append("**Publication date unknown**")
 
     date_context = "\n".join(date_context_parts)
     publication_info = "\n".join(publication_parts)
@@ -324,8 +324,8 @@ def build_context_string(results: list[dict[str, Any]], max_chars: int = 8000) -
 
     for i, result in enumerate(results, 1):
         text = get_text_from_result(result)
-        doc_key = get_metadata_field(result, 'key', 'Unknown')
-        doc_type = get_metadata_field(result, 'document_type', 'unknown')
+        doc_key = get_metadata_field(result, "key", "Unknown")
+        doc_type = get_metadata_field(result, "document_type", "unknown")
         building = get_building_name_from_result(result)
 
         # Format result
@@ -346,7 +346,9 @@ def build_context_string(results: list[dict[str, Any]], max_chars: int = 8000) -
     return "\n".join(context_parts)
 
 
-def build_building_grouped_context(results: list[dict[str, Any]], max_chars: int = 8000) -> str:
+def build_building_grouped_context(
+    results: list[dict[str, Any]], max_chars: int = 8000
+) -> str:
     """
     Build context grouped by building with character limit.
 
@@ -373,8 +375,8 @@ def build_building_grouped_context(results: list[dict[str, Any]], max_chars: int
 
         for i, result in enumerate(building_results, 1):
             text = get_text_from_result(result)
-            doc_key = get_metadata_field(result, 'key', 'Unknown')
-            doc_type = get_metadata_field(result, 'document_type', 'unknown')
+            doc_key = get_metadata_field(result, "key", "Unknown")
+            doc_type = get_metadata_field(result, "document_type", "unknown")
 
             result_text = f"\n[{building} - Result {i}]\n"
             result_text += f"Source: {doc_key}\n"
@@ -430,7 +432,7 @@ def enhanced_answer_with_source_date(
     top_result: dict[str, Any],
     all_results: list[dict[str, Any]],
     term_context: Optional[dict] = None,
-    target_building: Optional[str] = None
+    target_building: Optional[str] = None,
 ) -> tuple[str, str]:
     """
     Generate an enhanced answer with proper date handling and building awareness.
@@ -447,8 +449,7 @@ def enhanced_answer_with_source_date(
     """
     # Get dates by document type
     planon_date, operational_date, operational_doc_key = get_document_dates_by_type(
-        all_results,
-        target_building=target_building
+        all_results, target_building=target_building
     )
 
     # Format date information
@@ -463,7 +464,9 @@ def enhanced_answer_with_source_date(
     term_explanation = build_term_explanation(term_context)
 
     # Build prompt
-    building_context = f"\nBuilding Context: {target_building}" if target_building else ""
+    building_context = (
+        f"\nBuilding Context: {target_building}" if target_building else ""
+    )
 
     prompt = f"""Your name is Alfred, a helpful assistant at the University of Bristol working in the Smart Technology team.
     Answer the user's question using ONLY the context below. 
@@ -502,11 +505,11 @@ def enhanced_answer_with_source_date(
             messages=[
                 {
                     "role": "system",
-                    "content": "You are Alfred, a helpful assistant at the University of Bristol. When answering technical questions (BMS, fire safety, systems), ALWAYS use and reference the technical document's 'last updated' date as the primary date. The property condition assessment date is ONLY for building condition information, not for technical information. Clearly distinguish between these two date types in your responses, with technical doc date taking priority for technical questions."
+                    "content": "You are Alfred, a helpful assistant at the University of Bristol. When answering technical questions (BMS, fire safety, systems), ALWAYS use and reference the technical document's 'last updated' date as the primary date. The property condition assessment date is ONLY for building condition information, not for technical information. Clearly distinguish between these two date types in your responses, with technical doc date taking priority for technical questions.",
                 },
-                {"role": "user", "content": prompt}
+                {"role": "user", "content": prompt},
             ],
-            temperature=ANSWER_TEMPERATURE_DEFAULT
+            temperature=ANSWER_TEMPERATURE_DEFAULT,
         )
 
         content = chat.choices[0].message.content
@@ -515,7 +518,10 @@ def enhanced_answer_with_source_date(
 
     except Exception as e:  # pylint: disable=broad-except
         logging.error("Error generating answer: %s", e, exc_info=True)
-        return "I encountered an error generating the answer. Please try again.", publication_info
+        return (
+            "I encountered an error generating the answer. Please try again.",
+            publication_info,
+        )
 
 
 def generate_building_focused_answer(
@@ -524,7 +530,7 @@ def generate_building_focused_answer(
     all_results: list[dict[str, Any]],
     target_building: str,
     building_groups: dict[str, list[dict[str, Any]]],
-    term_context: Optional[dict] = None
+    term_context: Optional[dict] = None,
 ) -> tuple[str, str]:
     """
     Generate an answer specifically focused on a particular building.
@@ -546,20 +552,18 @@ def generate_building_focused_answer(
     if not target_results:
         logging.warning(
             "No results in building groups for '%s', using standard answer",
-            target_building
+            target_building,
         )
         return enhanced_answer_with_source_date(
             question, top_result, all_results, term_context, target_building
         )
 
     # Separate by document type
-    planon_results, operational_results = separate_results_by_type(
-        target_results)
+    planon_results, operational_results = separate_results_by_type(target_results)
 
     # Get dates with building context
     planon_date, operational_date, operational_doc_key = get_document_dates_by_type(
-        target_results,
-        target_building=target_building
+        target_results, target_building=target_building
     )
     date_context, publication_info = format_date_information(
         planon_date, operational_date, operational_doc_key
@@ -573,8 +577,7 @@ def generate_building_focused_answer(
     if planon_results:
         doc_summary.append(f"{len(planon_results)} property/Planon record(s)")
     if operational_results:
-        doc_summary.append(
-            f"{len(operational_results)} technical document(s)")
+        doc_summary.append(f"{len(operational_results)} technical document(s)")
 
     doc_summary_str = " and ".join(doc_summary) if doc_summary else "documents"
 
@@ -614,11 +617,11 @@ Context: {context}
             messages=[
                 {
                     "role": "system",
-                    "content": f"You are Alfred, a helpful assistant. You are answering specifically about {target_building}. When answering technical questions (BMS, fire safety, systems), ALWAYS use the technical document's 'last updated' date. The property condition assessment date is ONLY for building condition information. Always distinguish between property/Planon data (building information, conditions, facilities) and technical documentation (BMS systems, controls, fire safety). Include appropriate date information based on the question type, prioritising technical doc dates for technical questions."
+                    "content": f"You are Alfred, a helpful assistant. You are answering specifically about {target_building}. When answering technical questions (BMS, fire safety, systems), ALWAYS use the technical document's 'last updated' date. The property condition assessment date is ONLY for building condition information. Always distinguish between property/Planon data (building information, conditions, facilities) and technical documentation (BMS systems, controls, fire safety). Include appropriate date information based on the question type, prioritising technical doc dates for technical questions.",
                 },
-                {"role": "user", "content": prompt}
+                {"role": "user", "content": prompt},
             ],
-            temperature=ANSWER_TEMPERATURE_DEFAULT
+            temperature=ANSWER_TEMPERATURE_DEFAULT,
         )
 
         content = chat.choices[0].message.content
@@ -634,16 +637,14 @@ Context: {context}
         return answer, publication_info
 
     except Exception as e:  # pylint: disable=broad-except
-        logging.error(
-            "Error generating building-focused answer: %s", e, exc_info=True)
+        logging.error("Error generating building-focused answer: %s", e, exc_info=True)
         return enhanced_answer_with_source_date(
             question, top_result, all_results, term_context, target_building
         )
 
 
 def compare_buildings_answer(
-    question: str,
-    building_groups: dict[str, list[dict[str, Any]]]
+    question: str, building_groups: dict[str, list[dict[str, Any]]]
 ) -> tuple[str, str]:
     """
     Generate an answer that compares information across multiple buildings.
@@ -654,8 +655,7 @@ def compare_buildings_answer(
     # Top 5 buildings
     for building, building_results in list(building_groups.items())[:5]:
         building_context = f"\n=== {building} ===\n"
-        snippets = [get_text_from_result(r)[:300]
-                    for r in building_results[:2]]
+        snippets = [get_text_from_result(r)[:300] for r in building_results[:2]]
         building_context += "\n".join(snippets)
         context_parts.append(building_context)
 
@@ -685,20 +685,21 @@ Context: {context}
             messages=[
                 {
                     "role": "system",
-                    "content": "You are Alfred, a helpful assistant. You are comparing information across multiple buildings. Organise by building and be clear about differences. Distinguish between technical document dates and property assessment dates."
+                    "content": "You are Alfred, a helpful assistant. You are comparing information across multiple buildings. Organise by building and be clear about differences. Distinguish between technical document dates and property assessment dates.",
                 },
-                {"role": "user", "content": prompt}
+                {"role": "user", "content": prompt},
             ],
-            temperature=ANSWER_TEMPERATURE_COMPARE
+            temperature=ANSWER_TEMPERATURE_COMPARE,
         )
 
         content = chat.choices[0].message.content
         answer = content.strip() if content else "No answer generated."
-        publication_info = f"{EMOJI_CHART} Comparison across {len(building_groups)} building(s)"
+        publication_info = (
+            f"{EMOJI_CHART} Comparison across {len(building_groups)} building(s)"
+        )
 
         return answer, publication_info
 
     except Exception as e:  # pylint: disable=broad-except
-        logging.error("Error generating comparison answer: %s",
-                      e, exc_info=True)
+        logging.error("Error generating comparison answer: %s", e, exc_info=True)
         return "I encountered an error comparing buildings. Please try again.", ""

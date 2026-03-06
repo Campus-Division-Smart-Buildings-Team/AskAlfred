@@ -2,16 +2,16 @@
 Interfaces package exports.
 """
 
-from .vector_store import VectorStore, PineconeVectorStore
-from .embedder import Embedder, OpenAIEmbedder, EmbeddingsResult
-from .ingest_file_registry import (
-    IngestFileRegistry,
-    FileRecord,
-    RedisIngestFileRegistry,
-    NoOpIngestFileRegistry,
-)
-from .job_registry import JobRegistry, JobRecord, RedisJobRegistry, NoOpJobRegistry
+from .embedder import Embedder, EmbeddingsResult, OpenAIEmbedder
 from .event_sink import EventSink, JsonlPrometheusEventSink, MetricsReader
+from .ingest_file_registry import (
+    FileRecord,
+    IngestFileRegistry,
+    NoOpIngestFileRegistry,
+    RedisIngestFileRegistry,
+)
+from .job_registry import JobRecord, JobRegistry, NoOpJobRegistry, RedisJobRegistry
+from .vector_store import PineconeVectorStore, VectorStore
 
 __all__ = [
     "VectorStore",

@@ -8,15 +8,18 @@ This module provides various helper functions used during the ingestion process,
 - Detection of rate limit errors from exceptions.
 These helpers are designed to support the main ingestion workflow while keeping the code modular and maintainable.
 """
+
+import json
 import random
 import subprocess
 import tempfile
-import json
 from pathlib import Path
-from typing import Any, TypeAlias, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, TypeAlias
+
 from alfred_exceptions import (
     ValidationError,
 )
+
 if TYPE_CHECKING:
     from .context import IngestContext
 from .utils import (
@@ -29,6 +32,7 @@ UpsertQueueItem: TypeAlias = tuple[list[dict[str, Any]], int, int]
 # ---------------------------------------------------------------------------
 # HELPERS
 # ---------------------------------------------------------------------------
+
 
 def _summarise_batch_namespaces(batch: list[dict[str, Any]]) -> str:
     if not batch:
@@ -127,9 +131,7 @@ def _extract_fra_layout_text(
             return None
         return text
     except FileNotFoundError:
-        ctx.logger.info(
-            "pdftotext not available; using standard PDF text for %s", key
-        )
+        ctx.logger.info("pdftotext not available; using standard PDF text for %s", key)
     except subprocess.CalledProcessError as exc:
         stderr = exc.stderr or ""
         ctx.logger.warning("pdftotext failed for %s: %s", key, stderr)

@@ -1,40 +1,42 @@
 from __future__ import annotations
-from typing import Optional
+
 import re
+from typing import Optional
 
 # INVALID_BUILDING_NAMES = frozenset({"maintenance","request", "requests","job", "jobs","ticket", "tickets",})
 
-INVALID_BUILDING_NAMES: frozenset[str] = frozenset({
-    "maintenance",
-    "request",
-    "requests",
-    "job",
-    "jobs",
-    "building",
-    "property",
-    "data",
-    "planon",
-    "bms",
-    "fra",
-    "fire",
-    "risk",
-    "assessment",
-    "system",
-    "management",
-    "what",
-    "when",
-    "where",
-    "which",
-    "who",
-    "how",
-    "why",
-    "does",
-    "have",
-    "has",
-    "the",
-    "this",
-    "that",
-}
+INVALID_BUILDING_NAMES: frozenset[str] = frozenset(
+    {
+        "maintenance",
+        "request",
+        "requests",
+        "job",
+        "jobs",
+        "building",
+        "property",
+        "data",
+        "planon",
+        "bms",
+        "fra",
+        "fire",
+        "risk",
+        "assessment",
+        "system",
+        "management",
+        "what",
+        "when",
+        "where",
+        "which",
+        "who",
+        "how",
+        "why",
+        "does",
+        "have",
+        "has",
+        "the",
+        "this",
+        "that",
+    }
 )
 
 

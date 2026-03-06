@@ -2,16 +2,17 @@
 import logging
 import re
 from typing import Optional
+
 from textblob import TextBlob
 
-from query_preprocessors.base_preprocessor import BasePreprocessor
 from building import (
-    BuildingCacheManager,
     BUILDING_ALIASES_CACHE,
     BUILDING_NAMES_CACHE,
+    BuildingCacheManager,
     normalise_building_name,
 )
 from log_sanitiser import sanitise_error
+from query_preprocessors.base_preprocessor import BasePreprocessor
 
 
 class SpellCheckPreprocessor(BasePreprocessor):
@@ -36,14 +37,39 @@ class SpellCheckPreprocessor(BasePreprocessor):
 
         # Tokens we never want TextBlob to "correct"
         self.protected_tokens = {
-            "fra", "fras", "bms", "ahu", "hvac", "iq4", "o&m",
-            "planon", "ppm", "ppm’s", "ppm's"
-            "goodbye",
+            "fra",
+            "fras",
+            "bms",
+            "ahu",
+            "hvac",
+            "iq4",
+            "o&m",
+            "planon",
+            "ppm",
+            "ppm’s",
+            "ppm's" "goodbye",
         }
         self.protected_short_tokens = {
-            "how", "what", "when", "where", "which", "who", "why",
-            "do", "does", "did", "is", "are", "was", "were",
-            "can", "could", "would", "should", "will", "shall",
+            "how",
+            "what",
+            "when",
+            "where",
+            "which",
+            "who",
+            "why",
+            "do",
+            "does",
+            "did",
+            "is",
+            "are",
+            "was",
+            "were",
+            "can",
+            "could",
+            "would",
+            "should",
+            "will",
+            "shall",
             "bye",
         }
         self.min_protected_token_len = 4
@@ -96,7 +122,9 @@ class SpellCheckPreprocessor(BasePreprocessor):
             reverse=True,
         )
 
-    def _protect_text(self, text: str, tokens: list[str]) -> tuple[str, list[tuple[str, str]]]:
+    def _protect_text(
+        self, text: str, tokens: list[str]
+    ) -> tuple[str, list[tuple[str, str]]]:
         """Replace protected tokens with placeholders; return new text + mapping."""
         replacements: list[tuple[str, str]] = []
         protected = text
@@ -167,7 +195,8 @@ class SpellCheckPreprocessor(BasePreprocessor):
             # Compute a candidate correction while protecting tokens
             protected_tokens = self._build_protected_tokens(context)
             protected_text, replacements = self._protect_text(
-                context.query, protected_tokens)
+                context.query, protected_tokens
+            )
             corrected = str(textblob_cls(protected_text).correct())
             corrected = self._restore_text(corrected, replacements)
 
@@ -181,14 +210,13 @@ class SpellCheckPreprocessor(BasePreprocessor):
                 old_query = context.query
                 context.update_query(corrected)
 
-                self.logger.info(
-                    "Corrected query: '%s' -> '%s'", old_query, corrected
-                )
+                self.logger.info("Corrected query: '%s' -> '%s'", old_query, corrected)
             else:
                 context.add_to_cache("spell_corrected", False)
 
         except Exception as e:
             # Never fail the pipeline because of spell check
             self.logger.error(
-                "SpellCheckPreprocessor failed: %s", sanitise_error(e), exc_info=False)
+                "SpellCheckPreprocessor failed: %s", sanitise_error(e), exc_info=False
+            )
             context.add_to_cache("spell_corrected", False)

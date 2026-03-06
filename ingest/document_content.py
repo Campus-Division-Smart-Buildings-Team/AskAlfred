@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Document content extraction and processing for Alfred Local Ingestion.
-This module provides functions to securely fetch files, extract text from various document formats, 
-chunk text for embedding, and handle specific cases like property and maintenance CSVs 
+This module provides functions to securely fetch files, extract text from various document formats,
+chunk text for embedding, and handle specific cases like property and maintenance CSVs
 with building name normalisation and metadata extraction.
 """
 
@@ -24,6 +24,7 @@ import pandas as pd
 import tiktoken
 from docx import Document as DocxDocument
 from pypdf import PdfReader
+
 try:
     from pdfminer.high_level import extract_text as pdfminer_extract_text
 except Exception:  # pylint: disable=broad-except
@@ -32,26 +33,24 @@ try:
     import textract  # type: ignore[import-untyped]
 except Exception:  # pylint: disable=broad-except
     textract = None
-from building import normalise_building_name
 from alfred_exceptions import ParseError, ValidationError
-from interfaces import EmbeddingsResult
-from maintenance_utils import normalise_priority
-from file_operations_validator import (
-    validate_file_safety,
-    FileSizeError,
-    FileTypeError,
-    ALLOWED_INGEST_EXTENSIONS
-)
+from building import normalise_building_name
 from config import (
     INGEST_BACKOFF_BASE,
     INGEST_BACKOFF_CAP,
     INGEST_BACKOFF_JITTER_MIN,
     INGEST_BACKOFF_JITTER_SPAN,
-    INGEST_FETCH_MAX_SIZE_MB,
     INGEST_EMBED_BATCH_SIZE,
+    INGEST_FETCH_MAX_SIZE_MB,
 )
-
-from .utils import validate_safe_path
+from file_operations_validator import (
+    ALLOWED_INGEST_EXTENSIONS,
+    FileSizeError,
+    FileTypeError,
+    validate_file_safety,
+)
+from interfaces import EmbeddingsResult
+from maintenance_utils import normalise_priority
 
 if TYPE_CHECKING:
     from .context import IngestContext
@@ -142,7 +141,7 @@ def fetch_bytes_secure(
             base_path,
             key,
             allowed_extensions=ALLOWED_INGEST_EXTENSIONS,
-            max_size_mb=max_size_mb
+            max_size_mb=max_size_mb,
         )
 
         with open(filepath, "rb") as file_handle:
@@ -385,8 +384,7 @@ def embed_texts_batch(
     if result.retry_attempts:
         ctx.stats.increment("embed_retries_total", result.retry_attempts)
     if result.batch_reductions:
-        ctx.stats.increment("embed_batch_reductions_total",
-                            result.batch_reductions)
+        ctx.stats.increment("embed_batch_reductions_total", result.batch_reductions)
     if result.rate_limit_errors:
         ctx.stats.increment("embed_rate_limit_total", result.rate_limit_errors)
     return result
@@ -482,8 +480,7 @@ def load_building_names_with_aliases(
 
             metadata_cache[canonical] = building_metadata
 
-        ctx.cache.update_from_csv(
-            name_to_canonical, alias_to_canonical, metadata_cache)
+        ctx.cache.update_from_csv(name_to_canonical, alias_to_canonical, metadata_cache)
 
         ctx.logger.info(
             "Loaded %d canonical building names with %d total name variations",
@@ -522,8 +519,7 @@ def is_fire_risk_assessment(key: str, text: str = "") -> bool:
             "means of escape",
             "emergency lighting",
         ]
-        count = sum(
-            1 for indicator in content_indicators if indicator in text_lower)
+        count = sum(1 for indicator in content_indicators if indicator in text_lower)
         if count >= 2:
             return True
 
@@ -583,7 +579,8 @@ def extract_text_csv_by_building_enhanced(
 
             raw_prop = str(prop_name).strip()
             canonical_name = alias_to_canonical.get(
-                normalise_building_name(raw_prop), raw_prop)
+                normalise_building_name(raw_prop), raw_prop
+            )
 
             building_text = f"Property: {canonical_name}\n\n"
 
@@ -595,13 +592,16 @@ def extract_text_csv_by_building_enhanced(
             aliases = [raw_prop, canonical_name]
 
             if pd.notna(row.get("Property names")):
-                aliases.extend([n.strip()
-                               for n in str(row["Property names"]).split(";")])
+                aliases.extend(
+                    [n.strip() for n in str(row["Property names"]).split(";")]
+                )
 
             if pd.notna(row.get("Property alternative names")):
                 aliases.extend(
-                    [n.strip()
-                     for n in str(row["Property alternative names"]).split(";")]
+                    [
+                        n.strip()
+                        for n in str(row["Property alternative names"]).split(";")
+                    ]
                 )
 
             if pd.notna(row.get("UsrFRACondensedPropertyName")):
@@ -628,11 +628,11 @@ def extract_text_csv_by_building_enhanced(
 
             building_key = f"Planon Data - {canonical_name}"
             building_docs.append(
-                (building_key, canonical_name, building_text, extra_metadata))
+                (building_key, canonical_name, building_text, extra_metadata)
+            )
 
         if not building_docs:
-            log.warning(
-                "No buildings found in CSV, indexing as single doc")
+            log.warning("No buildings found in CSV, indexing as single doc")
             return [(key, "All Properties", df.to_string(), {})]
 
         log.info(
@@ -643,7 +643,14 @@ def extract_text_csv_by_building_enhanced(
 
     except Exception as ex:  # pylint: disable=broad-except
         log.warning("CSV extraction failed: %s", ex)
-        return [(key, "", data.decode("utf-8", errors="ignore"), {"document_type": "unknown"})]
+        return [
+            (
+                key,
+                "",
+                data.decode("utf-8", errors="ignore"),
+                {"document_type": "unknown"},
+            )
+        ]
 
 
 def extract_maintenance_csv(
@@ -661,8 +668,7 @@ def extract_maintenance_csv(
     """
 
     def _pick_building_col(df: pd.DataFrame) -> str | None:
-        candidates = ["Property name", "Buildings",
-                      "Building", "Property", "Site"]
+        candidates = ["Property name", "Buildings", "Building", "Property", "Site"]
         lower_map = {column.lower().strip(): column for column in df.columns}
         for candidate in candidates:
             lower = candidate.lower().strip()
@@ -689,7 +695,9 @@ def extract_maintenance_csv(
             is_requests = True
         else:
             has_requests = any(
-                "requests" in str(col).lower() for col in df.columns if col != building_col
+                "requests" in str(col).lower()
+                for col in df.columns
+                if col != building_col
             )
             has_jobs = any(
                 "jobs" in str(col).lower() for col in df.columns if col != building_col
@@ -707,8 +715,7 @@ def extract_maintenance_csv(
                 continue
 
             raw = str(building_name).strip()
-            canonical_name = alias_to_canonical.get(
-                normalise_building_name(raw), raw)
+            canonical_name = alias_to_canonical.get(normalise_building_name(raw), raw)
 
             building_text = f"Building: {canonical_name}\n"
             building_text += f"Data Type: {data_type}\n\n"
@@ -739,17 +746,14 @@ def extract_maintenance_csv(
                 try:
                     parsed = parse_pivot_header(col_str, is_requests)
                     category = parsed["category"]
-                    status = (str(parsed.get("status")
-                              or "").strip()) or "unknown"
+                    status = (str(parsed.get("status") or "").strip()) or "unknown"
                     status = status[:1].upper() + status[1:].lower()
-                    priority_label = normalise_priority(
-                        parsed.get("priority") or "")
+                    priority_label = normalise_priority(parsed.get("priority") or "")
                     count = int(float(val))
 
                     if is_requests:
                         maintenance_metrics.setdefault(category, {})
-                        maintenance_metrics[category].setdefault(
-                            priority_label, {})
+                        maintenance_metrics[category].setdefault(priority_label, {})
                         leaf = maintenance_metrics[category][priority_label]
                         leaf[status] = leaf.get(status, 0) + count
                         building_text += (
@@ -758,8 +762,7 @@ def extract_maintenance_csv(
                     else:
                         maintenance_metrics.setdefault(category, {})
                         maintenance_metrics[category][status] = (
-                            maintenance_metrics[category].get(
-                                status, 0) + count
+                            maintenance_metrics[category].get(status, 0) + count
                         )
                         building_text += f"{category} - {status}: {count}\n"
 
@@ -808,7 +811,8 @@ def extract_maintenance_csv(
 
             doc_key = f"{data_type} - {canonical_name}"
             building_docs.append(
-                (doc_key, canonical_name, building_text, extra_metadata))
+                (doc_key, canonical_name, building_text, extra_metadata)
+            )
 
         log.info("Extracted %d buildings from %s", len(building_docs), key)
         return building_docs

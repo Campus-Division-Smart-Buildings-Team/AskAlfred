@@ -19,9 +19,7 @@ class _SectionParserBase(Protocol):
 class _SectionParserMixin(_SectionParserBase):
 
     def _extract_action_plan_section(
-        self,
-        text: str,
-        page_texts: Optional[list[str]] = None
+        self, text: str, page_texts: Optional[list[str]] = None
     ) -> tuple[Optional[str], int]:
         """
         Locate the action plan table section.
@@ -43,11 +41,10 @@ class _SectionParserMixin(_SectionParserBase):
             match = re.search(pattern, text, re.IGNORECASE)
             if match:
                 if self.verbose:
-                    self.logger.debug(
-                        "Found action plan with pattern: %s", pattern)
+                    self.logger.debug("Found action plan with pattern: %s", pattern)
                     self.logger.debug("Position: %s", match.start())
 
-                section_text = text[match.start():]
+                section_text = text[match.start() :]
 
                 # Find page number if we have page-level text
                 start_page = 1
@@ -70,11 +67,11 @@ class _SectionParserMixin(_SectionParserBase):
                     end_match = re.search(end_pattern, section_text)
                     if end_match:
                         if self.verbose:
+                            self.logger.debug("Found end marker: %s", end_pattern)
                             self.logger.debug(
-                                "Found end marker: %s", end_pattern)
-                            self.logger.debug(
-                                "Section length: %s chars", end_match.start())
-                        section_text = section_text[:end_match.start()]
+                                "Section length: %s chars", end_match.start()
+                            )
+                        section_text = section_text[: end_match.start()]
                         break
 
                 return section_text, start_page
@@ -169,9 +166,8 @@ class _SectionParserMixin(_SectionParserBase):
                 return False, f"Matches non-row pattern: {pattern}"
 
         # Should not be primarily just dates
-        date_matches = re.findall(
-            r'\d{1,2}[/-]\d{1,2}[/-]\d{4}', content_stripped)
-        if date_matches and len(' '.join(date_matches)) > len(content_stripped) * 0.7:
+        date_matches = re.findall(r"\d{1,2}[/-]\d{1,2}[/-]\d{4}", content_stripped)
+        if date_matches and len(" ".join(date_matches)) > len(content_stripped) * 0.7:
             return False, "Content is primarily dates"
 
         return True, None

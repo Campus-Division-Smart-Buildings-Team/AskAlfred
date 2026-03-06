@@ -4,49 +4,60 @@
 Main Streamlit application for AskAlfred chatbot.
 With dynamic building cache initialisation across all indexes.
 """
-import os
+
 import logging
-from typing import Any, Optional
-from pathlib import Path
-import zipfile
+import os
 import time
+import zipfile
+from pathlib import Path
+from typing import Any, Optional
+
 import streamlit as st
-from openai import OpenAI
 from markupsafe import escape
+from openai import OpenAI
+
+from building.utils import (
+    extract_building_from_query,
+    get_cache_status,
+    populate_building_cache_from_multiple_indexes,
+)
+from clients import ClientManager
+from config import (
+    DEFAULT_NAMESPACE,
+    QUERY_MAX_LENGTH,
+    QUERY_MIN_LENGTH,
+    TARGET_INDEXES,
+    UI_RECENT_TURNS_FOR_SUMMARY,
+    UI_SNIPPET_MAX_CHARS,
+    UI_SUMMARY_MAX_TOKENS,
+    USE_QUERY_MANAGER,
+)
+from config.constant import IS_PRODUCTION
+from emojis import EMOJI_BOOKS, EMOJI_CAUTION, EMOJI_GORILLA, EMOJI_TIME
+from input_validator import get_validation_summary, validate_query_security
 from log_sanitiser import sanitise_error
-from sanitise_context import (
-    safe_markdown, display_safe_publication_date_info, display_safe_low_score_warning)
-from input_validator import (
-    validate_query_security, get_validation_summary)
+from query_manager import QueryManager
 from rate_limiter import (
-    initialise_rate_limiter, check_query_rate_limit,
-    get_query_reset_time)
-from ui_components import (
-    setup_page_config, render_custom_css, render_header, render_tabs,
-    render_sidebar, initialise_chat_history, display_chat_history
+    check_query_rate_limit,
+    get_query_reset_time,
+    initialise_rate_limiter,
+)
+from sanitise_context import (
+    display_safe_low_score_warning,
+    display_safe_publication_date_info,
+    safe_markdown,
 )
 from search_core.search_router import execute
 from search_instructions import SearchInstructions
-from building.utils import (
-    populate_building_cache_from_multiple_indexes, get_cache_status,
-    extract_building_from_query,
+from ui_components import (
+    display_chat_history,
+    initialise_chat_history,
+    render_custom_css,
+    render_header,
+    render_sidebar,
+    render_tabs,
+    setup_page_config,
 )
-from config import (
-    TARGET_INDEXES,
-    DEFAULT_NAMESPACE,
-    USE_QUERY_MANAGER,
-    QUERY_MIN_LENGTH,
-    QUERY_MAX_LENGTH,
-    UI_SNIPPET_MAX_CHARS,
-    UI_SUMMARY_MAX_TOKENS,
-    UI_RECENT_TURNS_FOR_SUMMARY,
-)
-from config.constant import IS_PRODUCTION
-from emojis import (EMOJI_GORILLA, EMOJI_CAUTION,
-                    EMOJI_BOOKS, EMOJI_TIME)
-from query_manager import QueryManager
-from clients import ClientManager
-
 
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 os.environ["HF_HUB_DISABLE_SYMLINKS"] = "1"
@@ -78,7 +89,7 @@ class ContextFilter(logging.Filter):
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s [%(category)s] [%(file_key)s]: %(message)s",
-    handlers=[logging.StreamHandler()]
+    handlers=[logging.StreamHandler()],
 )
 
 root_logger = logging.getLogger()
@@ -145,44 +156,42 @@ def initialise_building_cache():
     try:
         # Check if already populated
         cache_status = get_cache_status()
-        if cache_status['populated']:
-            logging.info(
-                "Building cache already populated, skipping initialisation")
+        if cache_status["populated"]:
+            logging.info("Building cache already populated, skipping initialisation")
             return cache_status
 
         # Try to populate from ALL indexes
         logging.info(
-            "Initialising building cache from %d indexes...", len(TARGET_INDEXES))
+            "Initialising building cache from %d indexes...", len(TARGET_INDEXES)
+        )
 
         results = populate_building_cache_from_multiple_indexes(
-            TARGET_INDEXES,
-            DEFAULT_NAMESPACE
+            TARGET_INDEXES, DEFAULT_NAMESPACE
         )
 
         # Check final cache status
         cache_status = get_cache_status()
         elapsed = time.time() - t0
 
-        if cache_status['populated']:
-            indexes_with_data = cache_status.get('indexes_with_buildings', [])
+        if cache_status["populated"]:
+            indexes_with_data = cache_status.get("indexes_with_buildings", [])
             logging.info(
                 "✅ Building cache initialised: %d canonical names, %d aliases from %d index(es) in %.2f sec",
-                cache_status['canonical_names'],
-                cache_status['aliases'],
+                cache_status["canonical_names"],
+                cache_status["aliases"],
                 len(indexes_with_data),
-                elapsed
+                elapsed,
             )
 
             # Log which indexes have building data
             for idx_name, count in results.items():
                 if count > 0:
-                    logging.info(
-                        "Index name - '%s': %d buildings", idx_name, count)
+                    logging.info("Index name - '%s': %d buildings", idx_name, count)
 
             return cache_status
         logging.warning(
             "⚠️  Could not initialise building cache from any of %d indexes",
-            len(TARGET_INDEXES)
+            len(TARGET_INDEXES),
         )
         return cache_status
 
@@ -190,13 +199,13 @@ def initialise_building_cache():
         logging.error(
             "❌ Error initialising building cache after %.2f sec: %s",
             elapsed,
-            sanitise_error(e)
+            sanitise_error(e),
         )
         return {
-            'populated': False,
-            'canonical_names': 0,
-            'aliases': 0,
-            'indexes_with_buildings': []
+            "populated": False,
+            "canonical_names": 0,
+            "aliases": 0,
+            "indexes_with_buildings": [],
         }
 
 
@@ -205,17 +214,14 @@ def initialise_building_cache():
 # ============================================================================
 def should_process_query():
     """Check if we should process a new query."""
-    return (
-        "last_processed_query" not in st.session_state or
-        st.session_state.get("current_query") != st.session_state.get(
-            "last_processed_query")
-    )
+    return "last_processed_query" not in st.session_state or st.session_state.get(
+        "current_query"
+    ) != st.session_state.get("last_processed_query")
 
 
 def handle_chat_input(top_k: int):
     """Handle new chat input from user."""
-    query = st.chat_input(
-        "Ask me about BMS, FRAs or Maintenance Jobs and Requests...")
+    query = st.chat_input("Ask me about BMS, FRAs or Maintenance Jobs and Requests...")
 
     if not query:
         return
@@ -268,7 +274,7 @@ def handle_query_with_manager(query: str, top_k: int):
                     top_k=top_k,
                     building_filter=building,
                     history=st.session_state.messages,
-                    rolling_summary=st.session_state.summary
+                    rolling_summary=st.session_state.summary,
                 )
 
                 # Store results
@@ -280,35 +286,38 @@ def handle_query_with_manager(query: str, top_k: int):
 
                 # Optional UI elements
                 if getattr(result, "publication_date_info", None):
-                    display_safe_publication_date_info(
-                        result.publication_date_info)
+                    display_safe_publication_date_info(result.publication_date_info)
 
                 if getattr(result, "score_too_low", False):
                     display_safe_low_score_warning()
 
                 # Store in chat history
-                st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": result.answer or "No answer provided",
-                    "results": result.results,
-                    "metadata": result.metadata,
-                    "query_type": result.query_type or "Unknown",
-                    "handler_used": result.handler_used or "Unknown"
-                })
+                st.session_state.messages.append(
+                    {
+                        "role": "assistant",
+                        "content": result.answer or "No answer provided",
+                        "results": result.results,
+                        "metadata": result.metadata,
+                        "query_type": result.query_type or "Unknown",
+                        "handler_used": result.handler_used or "Unknown",
+                    }
+                )
                 # # Clear processing flag
                 # st.session_state.processing_query = False
 
                 # Debug info - Only show in development mode to prevent information disclosure
                 # Shows system architecture details that could aid attackers
-                if not IS_PRODUCTION and st.session_state.get('debug_mode', False):
+                if not IS_PRODUCTION and st.session_state.get("debug_mode", False):
                     with st.expander("🔍 Debug Info"):
-                        st.json({
-                            'query_type': result.query_type,
-                            'handler': result.handler_used,
-                            'processing_time_ms': result.processing_time_ms,
-                            'num_results': len(result.results),
-                            'success': result.success
-                        })
+                        st.json(
+                            {
+                                "query_type": result.query_type,
+                                "handler": result.handler_used,
+                                "processing_time_ms": result.processing_time_ms,
+                                "num_results": len(result.results),
+                                "success": result.success,
+                            }
+                        )
 
             except Exception as e:
                 handle_search_error(e)
@@ -330,14 +339,12 @@ def validate_query(query: str) -> tuple[bool, Optional[str]]:
     """
     # Use enhanced security validation
     is_valid, error_message = validate_query_security(
-        query,
-        min_length=MIN_QUERY_LENGTH,
-        max_length=MAX_QUERY_LENGTH
+        query, min_length=MIN_QUERY_LENGTH, max_length=MAX_QUERY_LENGTH
     )
 
     if is_valid and not error_message:
         # Enhanced rate limiting check
-        user_id = st.session_state.get('user_id', 'anonymous')
+        user_id = st.session_state.get("user_id", "anonymous")
 
         # Use Redis-backed rate limiter if available, falls back to in-memory
         if not check_query_rate_limit(user_id):
@@ -350,12 +357,13 @@ def validate_query(query: str) -> tuple[bool, Optional[str]]:
             )
             logging.warning(
                 "Rate limit exceeded for user %s. Reset in %d seconds",
-                user_id, retry_after
+                user_id,
+                retry_after,
             )
             return False, error_msg
 
         # Log validation details in development mode only (to prevent information disclosure in production)
-        if not IS_PRODUCTION and st.session_state.get('debug_mode', False):
+        if not IS_PRODUCTION and st.session_state.get("debug_mode", False):
             validation_info = get_validation_summary(query)
             logging.debug("Query validation info: %s", validation_info)
 
@@ -366,7 +374,7 @@ def render_result_item(
     result: dict[str, Any],
     index: int,
     is_top: bool = False,
-    max_snippet_length: int = UI_SNIPPET_MAX_CHARS
+    max_snippet_length: int = UI_SNIPPET_MAX_CHARS,
 ):
     """
     Render a single search result item.
@@ -376,10 +384,10 @@ def render_result_item(
         st.markdown("📍 **TOP RESULT**")
 
     # Format score and metadata
-    score = result.get('score', 0)
-    key = result.get('key', 'Unknown')
-    index_name = result.get('index', '?')
-    namespace = result.get('namespace', '__default__')
+    score = result.get("score", 0)
+    key = result.get("key", "Unknown")
+    index_name = result.get("index", "?")
+    namespace = result.get("namespace", "__default__")
 
     # Display metadata safely (escaping key value which could contain user input)
     st.markdown(
@@ -394,7 +402,7 @@ def render_result_item(
     st.write(snippet)
 
     # Display ID as caption
-    result_id = result.get('id') or '—'
+    result_id = result.get("id") or "—"
     st.caption(f"ID: {result_id}")
 
 
@@ -412,7 +420,8 @@ def main():
         logging.info("Rate limiter initialised with Redis backend")
     except Exception as e:
         logging.warning(
-            "Could not initialise Redis-backed rate limiter: %s - using in-memory", e)
+            "Could not initialise Redis-backed rate limiter: %s - using in-memory", e
+        )
         initialise_rate_limiter(None)  # Falls back to in-memory
 
     # Setup page
@@ -422,16 +431,15 @@ def main():
     # Initialise building cache
     t0 = time.time()
     cache_status = initialise_building_cache()
-    logging.info("%s Building cache init took %.1f s",
-                 EMOJI_TIME, time.time() - t0)
+    logging.info("%s Building cache init took %.1f s", EMOJI_TIME, time.time() - t0)
 
-    if not cache_status['populated']:
+    if not cache_status["populated"]:
         st.warning(
             f"{EMOJI_CAUTION} Building name cache could not be initialised. "
             "Building name detection may be limited to pattern matching."
         )
     else:
-        indexes_with_buildings = cache_status.get('indexes_with_buildings', [])
+        indexes_with_buildings = cache_status.get("indexes_with_buildings", [])
         if indexes_with_buildings:
             st.success(
                 f"✅ Building data loaded from {len(indexes_with_buildings)} index: "
@@ -460,12 +468,13 @@ def main():
     # Display last results if they exist
     display_last_results()
 
+
 # Add to main.py
 
 
 def display_system_status():
     """Show system status in sidebar."""
-    if st.session_state.get('show_system_status', False):
+    if st.session_state.get("show_system_status", False):
         with st.sidebar:
             st.markdown("---")
             st.markdown("### 🔧 System Status")
@@ -474,9 +483,8 @@ def display_system_status():
                 manager = QueryManager()
                 stats = manager.get_statistics()
 
-                st.metric("Total Queries", stats['total_queries'])
-                st.metric("Avg Time (ms)",
-                          f"{stats.get('avg_time_ms', 0):.1f}")
+                st.metric("Total Queries", stats["total_queries"])
+                st.metric("Avg Time (ms)", f"{stats.get('avg_time_ms', 0):.1f}")
 
                 st.markdown("**By Query Type:**")
                 for qtype, data in stats["query_types"].items():
@@ -491,14 +499,13 @@ def handle_direct_response(response: str):
     """Handle direct responses without search."""
     with st.chat_message("assistant", avatar=EMOJI_GORILLA):
         safe_markdown(response)
-        st.session_state.messages.append({
-            "role": "assistant",
-            "content": response
-        })
+        st.session_state.messages.append({"role": "assistant", "content": response})
         update_conversation_summary()
 
 
-def safe_execute(instr: SearchInstructions) -> tuple[list[dict[str, Any]], str, str, bool]:
+def safe_execute(
+    instr: SearchInstructions,
+) -> tuple[list[dict[str, Any]], str, str, bool]:
     """Run search_core.execute and normalise its return shape."""
     raw = execute(instr)
 
@@ -533,7 +540,8 @@ def handle_search_query(query: str, top_k: int):
                 )
 
                 results, answer, publication_date_info, score_too_low = safe_execute(
-                    instr)
+                    instr
+                )
 
                 st.session_state.last_results = results
 
@@ -542,8 +550,7 @@ def handle_search_query(query: str, top_k: int):
                 elif score_too_low:
                     handle_low_score_results(answer, results)
                 else:
-                    handle_successful_results(
-                        answer, results, publication_date_info)
+                    handle_successful_results(answer, results, publication_date_info)
 
             except Exception as e:
                 handle_search_error(e)
@@ -553,10 +560,9 @@ def handle_search_query(query: str, top_k: int):
 def handle_no_results():
     """Handle case when no results are found."""
     st.markdown(NO_RESULTS_MESSAGE)
-    st.session_state.messages.append({
-        "role": "assistant",
-        "content": NO_RESULTS_MESSAGE
-    })
+    st.session_state.messages.append(
+        {"role": "assistant", "content": NO_RESULTS_MESSAGE}
+    )
 
 
 def handle_low_score_results(answer: str, results: list[dict[str, Any]]):
@@ -564,18 +570,18 @@ def handle_low_score_results(answer: str, results: list[dict[str, Any]]):
     safe_markdown(answer)
     display_safe_low_score_warning()
 
-    st.session_state.messages.append({
-        "role": "assistant",
-        "content": answer,
-        "results": results,
-        "score_too_low": True
-    })
+    st.session_state.messages.append(
+        {
+            "role": "assistant",
+            "content": answer,
+            "results": results,
+            "score_too_low": True,
+        }
+    )
 
 
 def handle_successful_results(
-    answer: str,
-    results: list[dict[str, Any]],
-    publication_date_info: str
+    answer: str, results: list[dict[str, Any]], publication_date_info: str
 ):
     """Handle successful search results."""
     if answer:
@@ -587,12 +593,14 @@ def handle_successful_results(
             display_safe_publication_date_info(publication_date_info)
 
         # Store message with results and publication date info
-        st.session_state.messages.append({
-            "role": "assistant",
-            "content": answer,
-            "results": results,
-            "publication_date_info": publication_date_info
-        })
+        st.session_state.messages.append(
+            {
+                "role": "assistant",
+                "content": answer,
+                "results": results,
+                "publication_date_info": publication_date_info,
+            }
+        )
     else:
         # No answer generation, show results directly
         display_direct_results(results, publication_date_info)
@@ -610,19 +618,14 @@ def handle_search_error(error: Exception):  # pylint: disable=broad-except
     # Show appropriate error message based on environment
     if IS_PRODUCTION:
         # Generic message in production to prevent information disclosure
-        error_msg = ERROR_MESSAGE_TEMPLATE.format(
-            error="search service"
-        )
+        error_msg = ERROR_MESSAGE_TEMPLATE.format(error="search service")
     else:
         # Detailed message in development for debugging
         error_msg = f"Error during search: {sanitise_error(error)}"
 
     st.error(error_msg)
 
-    st.session_state.messages.append({
-        "role": "assistant",
-        "content": error_msg
-    })
+    st.session_state.messages.append({"role": "assistant", "content": error_msg})
 
 
 def display_direct_results(results: list[dict[str, Any]], publication_date_info: str):
@@ -643,12 +646,14 @@ def display_direct_results(results: list[dict[str, Any]], publication_date_info:
         display_safe_publication_date_info(publication_date_info)
 
     # Store in session
-    st.session_state.messages.append({
-        "role": "assistant",
-        "content": response,
-        "results": results,
-        "publication_date_info": publication_date_info
-    })
+    st.session_state.messages.append(
+        {
+            "role": "assistant",
+            "content": response,
+            "results": results,
+            "publication_date_info": publication_date_info,
+        }
+    )
 
 
 def display_last_results():
@@ -659,10 +664,11 @@ def display_last_results():
     results = st.session_state.last_results
     result_count = len(results)
 
-    with st.expander(f"{EMOJI_BOOKS} Last Search: {result_count} results", expanded=False):
+    with st.expander(
+        f"{EMOJI_BOOKS} Last Search: {result_count} results", expanded=False
+    ):
         for i, result in enumerate(results, 1):
-            render_result_item(result, i, is_top=(
-                i == 1), max_snippet_length=300)
+            render_result_item(result, i, is_top=(i == 1), max_snippet_length=300)
 
             # Add separator between results
             if i < result_count:
@@ -677,8 +683,7 @@ def update_conversation_summary():
 
     # last few messages
     last_turns = st.session_state.messages[-UI_RECENT_TURNS_FOR_SUMMARY:]
-    formatted = "\n".join(
-        f"{m['role']}: {m['content']}" for m in last_turns)
+    formatted = "\n".join(f"{m['role']}: {m['content']}" for m in last_turns)
 
     # Pass summary + new messages through your LLM
     combined_prompt = f"""
@@ -695,8 +700,10 @@ Please produce an updated, concise summary that preserves all facts.
     try:
         response = client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[{"role": "system", "content": "You summarise conversations."},
-                      {"role": "user", "content": combined_prompt}],
+            messages=[
+                {"role": "system", "content": "You summarise conversations."},
+                {"role": "user", "content": combined_prompt},
+            ],
             max_tokens=UI_SUMMARY_MAX_TOKENS,
         )
         content = response.choices[0].message.content

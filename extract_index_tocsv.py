@@ -4,17 +4,19 @@ Enhanced Index to CSV Exporter
 Pulls ALL metadata from Pinecone index including all namespaces and fields
 """
 
-import os
+import argparse
 import csv
 import json
 import logging
-import argparse
-from typing import Optional, Any
+import os
 from datetime import datetime
+from typing import Any, Optional
+
 from dotenv import load_dotenv
 from pinecone import Pinecone
-from pinecone_utils import desanitise_metadata_from_pinecone
+
 from alfred_exceptions import ConfigError
+from pinecone_utils import desanitise_metadata_from_pinecone
 
 # ---------------- Env & constants ----------------
 load_dotenv()
@@ -44,7 +46,7 @@ def get_all_namespaces(index) -> list[str]:
         stats = index.describe_index_stats()
         namespaces = []
 
-        if hasattr(stats, 'namespaces') and stats.namespaces:
+        if hasattr(stats, "namespaces") and stats.namespaces:
             for ns_name, ns_stats in stats.namespaces.items():
                 if ns_stats.vector_count > 0:
                     namespaces.append(ns_name if ns_name else "")
@@ -53,8 +55,11 @@ def get_all_namespaces(index) -> list[str]:
         if "" not in namespaces:
             namespaces.append("")
 
-        logging.info("Found %d namespaces: %s", len(namespaces),
-                     [ns if ns else "default" for ns in namespaces])
+        logging.info(
+            "Found %d namespaces: %s",
+            len(namespaces),
+            [ns if ns else "default" for ns in namespaces],
+        )
         return namespaces
 
     except Exception as e:
@@ -75,8 +80,7 @@ def get_all_vector_ids(index, namespace: Optional[str] = None) -> list[str]:
                 break  # No more IDs to fetch
 
         ns_display = namespace if namespace else "default"
-        logging.info("Found %d vector IDs in namespace '%s'",
-                     len(all_ids), ns_display)
+        logging.info("Found %d vector IDs in namespace '%s'", len(all_ids), ns_display)
         return all_ids
 
     except Exception as e:
@@ -88,7 +92,7 @@ def discover_all_metadata_fields(
     index: Any,
     all_ids: list[str],
     namespace: Optional[str] = None,
-    sample_size: int = 500
+    sample_size: int = 500,
 ) -> set[str]:
     """
     Discover ALL metadata fields by sampling vectors.
@@ -114,21 +118,20 @@ def discover_all_metadata_fields(
         # Sample from middle
         mid_start = len(all_ids) // 2 - sample_size // 6
         mid_end = len(all_ids) // 2 + sample_size // 6
-        sample_indices.extend(
-            range(max(0, mid_start), min(len(all_ids), mid_end)))
+        sample_indices.extend(range(max(0, mid_start), min(len(all_ids), mid_end)))
         # Sample from end
         sample_indices.extend(
-            range(max(0, len(all_ids) - sample_size // 3), len(all_ids)))
+            range(max(0, len(all_ids) - sample_size // 3), len(all_ids))
+        )
 
     sample_ids = [all_ids[i] for i in sample_indices]
 
-    logging.info(
-        "Sampling %d vectors to discover metadata fields...", len(sample_ids))
+    logging.info("Sampling %d vectors to discover metadata fields...", len(sample_ids))
 
     # Fetch in batches
     batch_size = 100
     for i in range(0, len(sample_ids), batch_size):
-        batch = sample_ids[i:i + batch_size]
+        batch = sample_ids[i : i + batch_size]
         try:
             response = index.fetch(ids=batch, namespace=namespace)
             if response and response.vectors:
@@ -188,7 +191,7 @@ def export_namespace_to_csv(
     all_ids: list[str],
     metadata_fields: set[str],
     output_path: str,
-    append_mode: bool = False
+    append_mode: bool = False,
 ) -> int:
     """
     Export a single namespace to CSV.
@@ -219,7 +222,7 @@ def export_namespace_to_csv(
         "building_aliases",
         "key",
         "source",
-        "text"
+        "text",
     ]
 
     # Start with priority fields that exist, then add rest alphabetically
@@ -232,13 +235,16 @@ def export_namespace_to_csv(
     remaining_fields = sorted(metadata_fields - set(priority_fields))
     header_fields.extend(remaining_fields)
 
-    logging.info("Exporting namespace '%s' with %d metadata fields",
-                 ns_display, len(metadata_fields))
+    logging.info(
+        "Exporting namespace '%s' with %d metadata fields",
+        ns_display,
+        len(metadata_fields),
+    )
 
     # Open file in appropriate mode
-    mode = 'a' if append_mode else 'w'
+    mode = "a" if append_mode else "w"
 
-    with open(output_path, mode=mode, newline='', encoding='utf-8') as csvfile:
+    with open(output_path, mode=mode, newline="", encoding="utf-8") as csvfile:
         csv_writer = csv.writer(csvfile, quoting=csv.QUOTE_MINIMAL)
 
         # Write header (only if not appending or file is empty)
@@ -251,7 +257,7 @@ def export_namespace_to_csv(
         total_batches = (len(all_ids) + batch_size - 1) // batch_size
 
         for i in range(0, len(all_ids), batch_size):
-            batch_ids = all_ids[i:i + batch_size]
+            batch_ids = all_ids[i : i + batch_size]
             batch_num = i // batch_size + 1
             start_id = i + 1
             end_id = min(i + batch_size, len(all_ids))
@@ -259,16 +265,20 @@ def export_namespace_to_csv(
             try:
                 logging.info(
                     "[%s] Batch %d/%d: Fetching vectors %d-%d (%d/%d completed)",
-                    ns_display, batch_num, total_batches,
-                    start_id, end_id, total_processed, len(all_ids)
+                    ns_display,
+                    batch_num,
+                    total_batches,
+                    start_id,
+                    end_id,
+                    total_processed,
+                    len(all_ids),
                 )
 
                 response = index.fetch(ids=batch_ids, namespace=namespace)
 
                 if not response or not response.vectors:
                     logging.warning(
-                        "[%s] No vectors returned for batch %d",
-                        ns_display, batch_num
+                        "[%s] No vectors returned for batch %d", ns_display, batch_num
                     )
                     continue
 
@@ -296,13 +306,15 @@ def export_namespace_to_csv(
 
                 logging.info(
                     "[%s] Batch %d/%d completed: Wrote %d vectors",
-                    ns_display, batch_num, total_batches, batch_count
+                    ns_display,
+                    batch_num,
+                    total_batches,
+                    batch_count,
                 )
 
             except Exception as e:
                 logging.error(
-                    "[%s] Error processing batch %d: %s",
-                    ns_display, batch_num, e
+                    "[%s] Error processing batch %d: %s", ns_display, batch_num, e
                 )
                 continue
 
@@ -314,7 +326,7 @@ def export_index_to_csv(
     output_path: str,
     namespace: Optional[str] = None,
     all_namespaces: bool = False,
-    sample_size: int = 500
+    sample_size: int = 500,
 ) -> None:
     """
     Export Pinecone index to CSV with ALL metadata fields.
@@ -344,8 +356,10 @@ def export_index_to_csv(
         # Determine which namespaces to export
         if all_namespaces:
             namespaces_to_export = get_all_namespaces(index)
-            logging.info("Exporting ALL namespaces: %s",
-                         [ns if ns else "default" for ns in namespaces_to_export])
+            logging.info(
+                "Exporting ALL namespaces: %s",
+                [ns if ns else "default" for ns in namespaces_to_export],
+            )
         else:
             namespaces_to_export = [namespace]
             ns_display = namespace if namespace else "default"
@@ -366,19 +380,22 @@ def export_index_to_csv(
 
             if not vector_ids:
                 logging.warning(
-                    "No vectors found in namespace '%s', skipping", ns_display)
+                    "No vectors found in namespace '%s', skipping", ns_display
+                )
                 continue
 
             namespace_data[ns] = vector_ids
 
             # Discover metadata fields from this namespace
-            ns_fields = discover_all_metadata_fields(
-                index, vector_ids, ns, sample_size
-            )
+            ns_fields = discover_all_metadata_fields(index, vector_ids, ns, sample_size)
             all_metadata_fields.update(ns_fields)
 
-            logging.info("Namespace '%s': %d vectors, %d metadata fields",
-                         ns_display, len(vector_ids), len(ns_fields))
+            logging.info(
+                "Namespace '%s': %d vectors, %d metadata fields",
+                ns_display,
+                len(vector_ids),
+                len(ns_fields),
+            )
 
         if not namespace_data:
             logging.error("No data to export!")
@@ -387,8 +404,10 @@ def export_index_to_csv(
         logging.info("%s", "\n" + "=" * 70)
         logging.info("METADATA FIELD SUMMARY")
         logging.info("=" * 70)
-        logging.info("Total unique metadata fields across all namespaces: %d",
-                     len(all_metadata_fields))
+        logging.info(
+            "Total unique metadata fields across all namespaces: %d",
+            len(all_metadata_fields),
+        )
         logging.info("\nAll fields:")
         for field in sorted(all_metadata_fields):
             logging.info("  - %s", field)
@@ -410,14 +429,15 @@ def export_index_to_csv(
                 all_ids=vector_ids,
                 metadata_fields=all_metadata_fields,
                 output_path=output_path,
-                append_mode=append_mode
+                append_mode=append_mode,
             )
 
             total_exported += count
             append_mode = True  # Subsequent namespaces append to file
 
-            logging.info("Namespace '%s' complete: %d vectors exported",
-                         ns_display, count)
+            logging.info(
+                "Namespace '%s' complete: %d vectors exported", ns_display, count
+            )
 
         # Final summary
         logging.info("%s", "\n" + "=" * 70)
@@ -427,8 +447,7 @@ def export_index_to_csv(
         logging.info("Total namespaces: %d", len(namespace_data))
         logging.info("Total metadata fields: %d", len(all_metadata_fields))
         logging.info("Output file: %s", output_path)
-        logging.info("File size: %.2f MB", os.path.getsize(
-            output_path) / (1024 * 1024))
+        logging.info("File size: %.2f MB", os.path.getsize(output_path) / (1024 * 1024))
         logging.info("=" * 70)
 
     except Exception as e:
@@ -442,30 +461,28 @@ def parse_args():
         description="Export Pinecone index to CSV with all metadata fields"
     )
     parser.add_argument(
-        "--index",
-        default="test",
-        help="Pinecone index name (default: test)"
+        "--index", default="test", help="Pinecone index name (default: test)"
     )
     parser.add_argument(
         "--output",
         default="pinecone_export.csv",
-        help="Output CSV file path (default: pinecone_export.csv)"
+        help="Output CSV file path (default: pinecone_export.csv)",
     )
     parser.add_argument(
         "--namespace",
         default=None,
-        help="Specific namespace to export (default: all namespaces)"
+        help="Specific namespace to export (default: all namespaces)",
     )
     parser.add_argument(
         "--all-namespaces",
         action="store_true",
-        help="Export all namespaces to a single CSV file"
+        help="Export all namespaces to a single CSV file",
     )
     parser.add_argument(
         "--sample-size",
         type=int,
         default=500,
-        help="Number of vectors to sample for field discovery (default: 500)"
+        help="Number of vectors to sample for field discovery (default: 500)",
     )
 
     return parser.parse_args()
@@ -477,8 +494,8 @@ if __name__ == "__main__":
     try:
         # Add timestamp to output filename
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        base_name = args.output.rsplit('.', 1)[0]
-        ext = args.output.rsplit('.', 1)[1] if '.' in args.output else 'csv'
+        base_name = args.output.rsplit(".", 1)[0]
+        ext = args.output.rsplit(".", 1)[1] if "." in args.output else "csv"
         output_file = f"{base_name}_{timestamp}.{ext}"
 
         export_index_to_csv(
@@ -486,7 +503,7 @@ if __name__ == "__main__":
             output_path=output_file,
             namespace=args.namespace,
             all_namespaces=args.all_namespaces or args.namespace is None,
-            sample_size=args.sample_size
+            sample_size=args.sample_size,
         )
 
         print("\n✅ Export completed successfully!")

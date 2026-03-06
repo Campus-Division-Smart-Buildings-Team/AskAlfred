@@ -3,6 +3,13 @@ Building utilities package exports.
 """
 
 from .alias_override import get_alias_override
+from .cache import (
+    BUILDING_ALIASES_CACHE,
+    BUILDING_NAMES_CACHE,
+    INDEXES_WITH_BUILDINGS,
+    METADATA_FIELDS_CACHE,
+    clear_all_building_cache,
+)
 from .normaliser import normalise_building_name
 from .resolver import BuildingResolution, BuildingResolver
 from .text_fallback import extract_building_from_text
@@ -18,13 +25,6 @@ from .validation import (
     INVALID_BUILDING_NAMES,
     is_valid_building_name,
     sanitise_building_candidate,
-)
-from .cache import (
-    BUILDING_ALIASES_CACHE,
-    BUILDING_NAMES_CACHE,
-    INDEXES_WITH_BUILDINGS,
-    METADATA_FIELDS_CACHE,
-    clear_all_building_cache,
 )
 
 __all__ = [

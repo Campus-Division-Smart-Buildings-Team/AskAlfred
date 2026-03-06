@@ -7,17 +7,20 @@ and avoids overlap with maintenance, ranking, or property-condition routing.
 """
 
 import re
-# First party import
-from query_types import QueryType
+
 from query_context import QueryContext
 from query_result import QueryResult
+
+# First party import
+from query_types import QueryType
 from structured_queries import (
+    generate_counting_answer,
     is_counting_query,
     is_maintenance_query,
-    is_ranking_query,
     is_property_condition_query,
-    generate_counting_answer,
+    is_ranking_query,
 )
+
 # Local import
 from .base_handler import BaseQueryHandler
 

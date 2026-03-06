@@ -2,8 +2,7 @@
 Config package exports.
 """
 
-from . import constant
-from . import settings
+from . import constant, settings
 
 # Explicit re-export of commonly used items to avoid wildcard imports
 # This maintains compatibility while improving code clarity

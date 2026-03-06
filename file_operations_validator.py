@@ -15,12 +15,11 @@ Implements OWASP secure file upload/download best practices.
 """
 
 from __future__ import annotations
-import os
+
 import logging
+import time
 from pathlib import Path
 from typing import Optional
-from functools import lru_cache
-import time
 
 # ===========================================================================
 # CONSTANTS
@@ -28,17 +27,55 @@ import time
 
 # Allowed file extensions for different operation types
 ALLOWED_DOCUMENT_EXTENSIONS = {
-    'pdf', 'txt', 'md', 'docx', 'doc', 'xlsx', 'xls', 'pptx', 'ppt', 'json', 'csv'
+    "pdf",
+    "txt",
+    "md",
+    "docx",
+    "doc",
+    "xlsx",
+    "xls",
+    "pptx",
+    "ppt",
+    "json",
+    "csv",
 }
 
 ALLOWED_INGEST_EXTENSIONS = {
-    'pdf', 'txt', 'docx', 'doc', 'xlsx', 'xls', 'pptx', 'ppt', 'json', 'csv'
+    "pdf",
+    "txt",
+    "docx",
+    "doc",
+    "xlsx",
+    "xls",
+    "pptx",
+    "ppt",
+    "json",
+    "csv",
 }
 
 DANGEROUS_EXTENSIONS = {
-    'exe', 'bat', 'cmd', 'com', 'pif', 'scr', 'vbs', 'js',
-    'jar', 'zip', 'rar', '7z', 'sh', 'bash', 'py', 'pyc',
-    'so', 'dll', 'sys', 'ini', 'cfg', 'conf'
+    "exe",
+    "bat",
+    "cmd",
+    "com",
+    "pif",
+    "scr",
+    "vbs",
+    "js",
+    "jar",
+    "zip",
+    "rar",
+    "7z",
+    "sh",
+    "bash",
+    "py",
+    "pyc",
+    "so",
+    "dll",
+    "sys",
+    "ini",
+    "cfg",
+    "conf",
 }
 
 # File size limits (in MB)
@@ -46,7 +83,7 @@ MAX_FILE_SIZE_MB = 100.0
 MAX_BATCH_TOTAL_SIZE_MB = 5000.0
 
 # Directory traversal patterns
-SUSPICIOUS_PATTERNS = ['..', '~', '$', ';', '|', '&', '`', '$(', '${']
+SUSPICIOUS_PATTERNS = ["..", "~", "$", ";", "|", "&", "`", "$(", "${"]
 
 # Rate limiting
 FILE_OPERATION_RATE_LIMIT = 1000  # operations per minute per directory
@@ -62,39 +99,47 @@ logger = logging.getLogger(__name__)
 # EXCEPTIONS
 # ===========================================================================
 
+
 class FileOperationSecurityError(Exception):
     """Base exception for file operation security violations."""
+
     pass
 
 
 class PathTraversalError(FileOperationSecurityError):
     """Raised when path traversal attack is detected."""
+
     pass
 
 
 class SymlinkError(FileOperationSecurityError):
     """Raised when symlink is encountered."""
+
     pass
 
 
 class FileSizeError(FileOperationSecurityError):
     """Raised when file exceeds size limits."""
+
     pass
 
 
 class FileTypeError(FileOperationSecurityError):
     """Raised when file type is not allowed."""
+
     pass
 
 
 class DirectoryAccessError(FileOperationSecurityError):
     """Raised when directory access is denied."""
+
     pass
 
 
 # ===========================================================================
 # CORE VALIDATION FUNCTIONS
 # ===========================================================================
+
 
 def is_safe_extension(
     filename: str,
@@ -113,10 +158,10 @@ def is_safe_extension(
     if allowed_extensions is None:
         allowed_extensions = ALLOWED_DOCUMENT_EXTENSIONS
 
-    if '.' not in filename:
+    if "." not in filename:
         return False
 
-    ext = filename.rsplit('.', 1)[1].lower()
+    ext = filename.rsplit(".", 1)[1].lower()
 
     # Check if dangerous
     if ext in DANGEROUS_EXTENSIONS:
@@ -179,13 +224,11 @@ def validate_path_safety(
         raise DirectoryAccessError(f"Base directory not found: {base_path}")
 
     if not base.is_dir():
-        raise DirectoryAccessError(
-            f"Base path is not a directory: {base_path}")
+        raise DirectoryAccessError(f"Base path is not a directory: {base_path}")
 
     # Check for suspicious patterns in relative path
     if has_suspicious_patterns(relative_path):
-        raise PathTraversalError(
-            f"Suspicious patterns in path: {relative_path}")
+        raise PathTraversalError(f"Suspicious patterns in path: {relative_path}")
 
     # Resolve the target path
     target = (base / relative_path).resolve()
@@ -194,11 +237,8 @@ def validate_path_safety(
     try:
         target.relative_to(base)
     except ValueError as e:
-        logger.warning("Path traversal detected: %s -> %s",
-                       relative_path, target)
-        raise PathTraversalError(
-            f"Path escapes base directory: {relative_path}"
-        ) from e
+        logger.warning("Path traversal detected: %s -> %s", relative_path, target)
+        raise PathTraversalError(f"Path escapes base directory: {relative_path}") from e
 
     # Check for symlinks
     if target.is_symlink():
@@ -206,13 +246,13 @@ def validate_path_safety(
 
     # Check if path exists
     if not target.exists():
-        raise FileOperationSecurityError(
-            f"Path does not exist: {relative_path}")
+        raise FileOperationSecurityError(f"Path does not exist: {relative_path}")
 
     # Check type: directory or file
     if target.is_dir() and not allow_directories:
         raise FileOperationSecurityError(
-            f"Expected file, got directory: {relative_path}")
+            f"Expected file, got directory: {relative_path}"
+        )
 
     if target.is_file() and allow_directories:
         # This is OK - we allow files when directories are allowed
@@ -246,8 +286,7 @@ def validate_file_safety(
         allowed_extensions = ALLOWED_DOCUMENT_EXTENSIONS
 
     # Validate path safety first
-    filepath = validate_path_safety(
-        base_path, relative_path, allow_directories=False)
+    filepath = validate_path_safety(base_path, relative_path, allow_directories=False)
 
     # Validate file extension
     filename = filepath.name
@@ -283,8 +322,7 @@ def validate_directory_safety(
         Various security exceptions
     """
     if relative_path:
-        dirpath = validate_path_safety(
-            base_path, relative_path, allow_directories=True)
+        dirpath = validate_path_safety(base_path, relative_path, allow_directories=True)
     else:
         base = Path(base_path).resolve()
         if not base.exists() or not base.is_dir():
@@ -297,6 +335,7 @@ def validate_directory_safety(
 # ===========================================================================
 # BATCH FILE OPERATIONS
 # ===========================================================================
+
 
 def validate_file_batch(
     base_path: str,
@@ -327,10 +366,7 @@ def validate_file_batch(
     for file_path in file_paths:
         try:
             filepath = validate_file_safety(
-                base_path,
-                file_path,
-                allowed_extensions,
-                max_file_size_mb
+                base_path, file_path, allowed_extensions, max_file_size_mb
             )
 
             size_mb = filepath.stat().st_size / (1024 * 1024)
@@ -353,6 +389,7 @@ def validate_file_batch(
 # ===========================================================================
 # DIRECTORY LISTING WITH SECURITY
 # ===========================================================================
+
 
 def list_files_safe(
     base_path: str,
@@ -411,19 +448,24 @@ def list_files_safe(
         # Get relative path
         try:
             rel_path = filepath.relative_to(base)
-            files.append({
-                'key': str(rel_path),
-                'path': filepath,
-                'size': filepath.stat().st_size,
-                'size_mb': size_mb,
-            })
+            files.append(
+                {
+                    "key": str(rel_path),
+                    "path": filepath,
+                    "size": filepath.stat().st_size,
+                    "size_mb": size_mb,
+                }
+            )
         except ValueError:
             logger.warning("Could not get relative path for %s", filepath)
             continue
 
     logger.info(
         "Found %d files (skipped %d symlinks, %d extensions, %d large)",
-        len(files), skipped_symlinks, skipped_extension, skipped_large
+        len(files),
+        skipped_symlinks,
+        skipped_extension,
+        skipped_large,
     )
 
     return files
@@ -432,6 +474,7 @@ def list_files_safe(
 # ===========================================================================
 # RATE LIMITING FOR FILE OPERATIONS
 # ===========================================================================
+
 
 class FileOperationRateLimiter:
     """Rate limiter for file operations per directory."""
@@ -465,8 +508,7 @@ class FileOperationRateLimiter:
 
         # Remove old entries outside the window
         self._operation_counts[directory] = [
-            ts for ts in self._operation_counts[directory]
-            if ts > window_start
+            ts for ts in self._operation_counts[directory] if ts > window_start
         ]
 
         # Check if exceeded limit
@@ -475,7 +517,7 @@ class FileOperationRateLimiter:
                 "Rate limit exceeded for directory %s: %d ops in %d seconds",
                 directory,
                 len(self._operation_counts[directory]),
-                window_seconds
+                window_seconds,
             )
             return True
 
@@ -503,9 +545,7 @@ def check_file_operation_rate_limit(
         True if NOT rate limited (operation allowed), False if rate limited
     """
     is_limited = _rate_limiter.is_rate_limited(
-        directory,
-        max_ops,
-        FILE_OPERATION_WINDOW_SECONDS
+        directory, max_ops, FILE_OPERATION_WINDOW_SECONDS
     )
     return not is_limited
 
@@ -513,6 +553,7 @@ def check_file_operation_rate_limit(
 # ===========================================================================
 # SECURE FILE READING
 # ===========================================================================
+
 
 def read_file_safe(
     base_path: str,
@@ -536,10 +577,7 @@ def read_file_safe(
         Various security exceptions
     """
     filepath = validate_file_safety(
-        base_path,
-        relative_path,
-        allowed_extensions,
-        max_size_mb
+        base_path, relative_path, allowed_extensions, max_size_mb
     )
 
     # Check rate limit
@@ -548,18 +586,17 @@ def read_file_safe(
         raise FileOperationSecurityError("File operation rate limit exceeded")
 
     try:
-        with open(filepath, 'rb') as f:
+        with open(filepath, "rb") as f:
             return f.read()
     except (IOError, OSError) as e:
         logger.error("Failed to read file %s: %s", filepath, e)
-        raise FileOperationSecurityError(
-            f"Cannot read file: {relative_path}") from e
+        raise FileOperationSecurityError(f"Cannot read file: {relative_path}") from e
 
 
 def read_file_text_safe(
     base_path: str,
     relative_path: str,
-    encoding: str = 'utf-8',
+    encoding: str = "utf-8",
     allowed_extensions: Optional[set[str]] = None,
     max_size_mb: float = MAX_FILE_SIZE_MB,
 ) -> str:
@@ -579,25 +616,20 @@ def read_file_text_safe(
     Raises:
         Various security exceptions
     """
-    content = read_file_safe(
-        base_path,
-        relative_path,
-        allowed_extensions,
-        max_size_mb
-    )
+    content = read_file_safe(base_path, relative_path, allowed_extensions, max_size_mb)
 
     try:
         return content.decode(encoding)
     except UnicodeDecodeError:
         # Fallback to latin-1 which accepts all bytes
-        logger.warning(
-            "UTF-8 decode failed for %s, using latin-1", relative_path)
-        return content.decode('latin-1', errors='ignore')
+        logger.warning("UTF-8 decode failed for %s, using latin-1", relative_path)
+        return content.decode("latin-1", errors="ignore")
 
 
 # ===========================================================================
 # VALIDATION SUMMARY
 # ===========================================================================
+
 
 def get_validation_summary(base_path: str, relative_path: str) -> dict:
     """
@@ -612,26 +644,27 @@ def get_validation_summary(base_path: str, relative_path: str) -> dict:
     """
     try:
         filepath = validate_path_safety(
-            base_path, relative_path, allow_directories=False)
+            base_path, relative_path, allow_directories=False
+        )
 
         filename = filepath.name
-        ext = filename.rsplit('.', 1)[1].lower() if '.' in filename else ''
+        ext = filename.rsplit(".", 1)[1].lower() if "." in filename else ""
         size_mb = filepath.stat().st_size / (1024 * 1024)
 
         return {
-            'path': relative_path,
-            'exists': True,
-            'is_symlink': filepath.is_symlink(),
-            'filename': filename,
-            'extension': ext,
-            'size_bytes': filepath.stat().st_size,
-            'size_mb': size_mb,
-            'extension_safe': is_safe_extension(filename),
-            'is_within_base': True,
+            "path": relative_path,
+            "exists": True,
+            "is_symlink": filepath.is_symlink(),
+            "filename": filename,
+            "extension": ext,
+            "size_bytes": filepath.stat().st_size,
+            "size_mb": size_mb,
+            "extension_safe": is_safe_extension(filename),
+            "is_within_base": True,
         }
     except FileOperationSecurityError as e:
         return {
-            'path': relative_path,
-            'exists': False,
-            'error': str(e),
+            "path": relative_path,
+            "exists": False,
+            "error": str(e),
         }

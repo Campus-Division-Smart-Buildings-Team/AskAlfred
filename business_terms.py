@@ -6,9 +6,9 @@ Optimised version with pre-compiled patterns and better type safety.
 """
 
 import os
-from typing import Optional, Any
 import re
 from dataclasses import dataclass, field
+from typing import Any, Optional
 
 # ============================================================================
 # DATA MODELS
@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 @dataclass
 class TermInfo:
     """Information about a business term."""
+
     term_key: str
     full_name: str
     document_type: str
@@ -28,12 +29,12 @@ class TermInfo:
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for backward compatibility."""
         return {
-            'term': self.term_key,
-            'full_name': self.full_name,
-            'document_type': self.document_type,
-            'search_terms': self.search_terms,
-            'description': self.description,
-            'variations': self.variations
+            "term": self.term_key,
+            "full_name": self.full_name,
+            "document_type": self.document_type,
+            "search_terms": self.search_terms,
+            "description": self.description,
+            "variations": self.variations,
         }
 
 
@@ -43,71 +44,69 @@ class TermInfo:
 
 # Core terminology mappings with structured data
 TERM_DEFINITIONS = {
-    'fra': TermInfo(
-        term_key='fra',
-        full_name='Fire Risk Assessment',
-        document_type='fire_risk_assessment',
-        search_terms=['fire risk assessment',
-                      'fire safety', 'FRA', 'fire assessment'],
-        description='Fire safety evaluation documents',
-        variations=['fras', 'f.r.a.', 'fra', 'fire-risk-assessment']
+    "fra": TermInfo(
+        term_key="fra",
+        full_name="Fire Risk Assessment",
+        document_type="fire_risk_assessment",
+        search_terms=["fire risk assessment", "fire safety", "FRA", "fire assessment"],
+        description="Fire safety evaluation documents",
+        variations=["fras", "f.r.a.", "fra", "fire-risk-assessment"],
     ),
-    'ahu': TermInfo(
-        term_key='ahu',
-        full_name='Air Handling Unit',
-        document_type='operational_doc',
-        search_terms=['air handling unit', 'AHU', 'air handler'],
-        description='HVAC air distribution equipment',
-        variations=['ahus']
+    "ahu": TermInfo(
+        term_key="ahu",
+        full_name="Air Handling Unit",
+        document_type="operational_doc",
+        search_terms=["air handling unit", "AHU", "air handler"],
+        description="HVAC air distribution equipment",
+        variations=["ahus"],
     ),
-    'bms': TermInfo(
-        term_key='bms',
-        full_name='Building Management System',
-        document_type='operational_doc',
-        search_terms=['building management system', 'BMS', 'controls'],
-        description='Building control and automation systems',
-        variations=['building management', 'bms system']
+    "bms": TermInfo(
+        term_key="bms",
+        full_name="Building Management System",
+        document_type="operational_doc",
+        search_terms=["building management system", "BMS", "controls"],
+        description="Building control and automation systems",
+        variations=["building management", "bms system"],
     ),
-    'hvac': TermInfo(
-        term_key='hvac',
-        full_name='Heating, Ventilation, and Air Conditioning',
-        document_type='operational_doc',
-        search_terms=['HVAC', 'heating ventilation', 'climate control'],
-        description='Building climate control systems',
-        variations=['heating ventilation air conditioning']
+    "hvac": TermInfo(
+        term_key="hvac",
+        full_name="Heating, Ventilation, and Air Conditioning",
+        document_type="operational_doc",
+        search_terms=["HVAC", "heating ventilation", "climate control"],
+        description="Building climate control systems",
+        variations=["heating ventilation air conditioning"],
     ),
-    'planon': TermInfo(
-        term_key='planon',
-        full_name='Planon Property Management',
-        document_type='planon_data',
-        search_terms=['planon', 'property management', 'property condition'],
-        description='Property management and condition assessment data',
-        variations=['property data', 'building data']
+    "planon": TermInfo(
+        term_key="planon",
+        full_name="Planon Property Management",
+        document_type="planon_data",
+        search_terms=["planon", "property management", "property condition"],
+        description="Property management and condition assessment data",
+        variations=["property data", "building data"],
     ),
-    'iq4': TermInfo(
-        term_key='iq4',
-        full_name='IQ4 Controller',
-        document_type='operational_doc',
-        search_terms=['IQ4', 'iq4 controller', 'trend controller'],
-        description='Building management system controller',
-        variations=['iq-4', 'iq 4']
+    "iq4": TermInfo(
+        term_key="iq4",
+        full_name="IQ4 Controller",
+        document_type="operational_doc",
+        search_terms=["IQ4", "iq4 controller", "trend controller"],
+        description="Building management system controller",
+        variations=["iq-4", "iq 4"],
     ),
-    'o&m': TermInfo(
-        term_key='o&m',
-        full_name='Operations & Maintenance',
-        document_type='operational_doc',
-        search_terms=['operations maintenance', 'O&M', 'operating manual'],
-        description='Operations and maintenance documentation',
-        variations=['o and m', 'operations and maintenance', 'om']
+    "o&m": TermInfo(
+        term_key="o&m",
+        full_name="Operations & Maintenance",
+        document_type="operational_doc",
+        search_terms=["operations maintenance", "O&M", "operating manual"],
+        description="Operations and maintenance documentation",
+        variations=["o and m", "operations and maintenance", "om"],
     ),
-    'desops': TermInfo(
-        term_key='desops',
-        full_name='Description of Operations',
-        document_type='operational_doc',
-        search_terms=['description of operations',
-                      'DesOps', 'system operations'],
-        description='System operation descriptions',
-        variations=['des ops', 'des-ops']
+    "desops": TermInfo(
+        term_key="desops",
+        full_name="Description of Operations",
+        document_type="operational_doc",
+        search_terms=["description of operations", "DesOps", "system operations"],
+        description="System operation descriptions",
+        variations=["des ops", "des-ops"],
     ),
 }
 
@@ -115,6 +114,7 @@ TERM_DEFINITIONS = {
 # ============================================================================
 # PRE-COMPILED PATTERNS
 # ============================================================================
+
 
 def _compile_patterns_for_term(term_info: TermInfo) -> list[re.Pattern]:
     """
@@ -129,15 +129,11 @@ def _compile_patterns_for_term(term_info: TermInfo) -> list[re.Pattern]:
     patterns = []
 
     # Main term pattern
-    patterns.append(
-        re.compile(rf'\b{re.escape(term_info.term_key)}\b', re.IGNORECASE)
-    )
+    patterns.append(re.compile(rf"\b{re.escape(term_info.term_key)}\b", re.IGNORECASE))
 
     # Variation patterns
     for variation in term_info.variations:
-        patterns.append(
-            re.compile(rf'\b{re.escape(variation)}\b', re.IGNORECASE)
-        )
+        patterns.append(re.compile(rf"\b{re.escape(variation)}\b", re.IGNORECASE))
 
     return patterns
 
@@ -158,10 +154,7 @@ class BusinessTermMapper:
     """Maps business terms/acronyms to their technical equivalents for search."""
 
     # Expose term definitions for external access
-    TERM_MAPPINGS = {
-        key: info.to_dict()
-        for key, info in TERM_DEFINITIONS.items()
-    }
+    TERM_MAPPINGS = {key: info.to_dict() for key, info in TERM_DEFINITIONS.items()}
 
     @classmethod
     def detect_business_terms(cls, query: str) -> list[dict[str, Any]]:
@@ -222,13 +215,13 @@ class BusinessTermMapper:
 
         for term_dict in detected:
             # Add search terms that aren't already in the query
-            for search_term in term_dict['search_terms']:
+            for search_term in term_dict["search_terms"]:
                 if search_term.lower() not in query.lower():
                     enhanced_parts.append(search_term)
 
-            term_context[term_dict['term']] = term_dict
+            term_context[term_dict["term"]] = term_dict
 
-        enhanced_query = ' '.join(enhanced_parts)
+        enhanced_query = " ".join(enhanced_parts)
         return enhanced_query, term_context
 
     @classmethod
@@ -298,7 +291,7 @@ def add_custom_term(
     document_type: str,
     search_terms: list[str],
     description: str,
-    variations: Optional[list[str]] = None
+    variations: Optional[list[str]] = None,
 ) -> bool:
     """
     Add a custom business term at runtime.
@@ -326,7 +319,7 @@ def add_custom_term(
         document_type=document_type,
         search_terms=search_terms,
         description=description,
-        variations=variations or []
+        variations=variations or [],
     )
 
     # Add to definitions
@@ -354,20 +347,25 @@ def get_term_statistics() -> dict[str, Any]:
 
     for term_info in TERM_DEFINITIONS.values():
         # Count by document type
-        doc_type_counts[term_info.document_type] = \
+        doc_type_counts[term_info.document_type] = (
             doc_type_counts.get(term_info.document_type, 0) + 1
+        )
 
         # Count variations and search terms
         total_variations += len(term_info.variations)
         total_search_terms += len(term_info.search_terms)
 
     return {
-        'total_terms': len(TERM_DEFINITIONS),
-        'by_document_type': doc_type_counts,
-        'total_variations': total_variations,
-        'total_search_terms': total_search_terms,
-        'avg_variations_per_term': total_variations / len(TERM_DEFINITIONS) if TERM_DEFINITIONS else 0,
-        'avg_search_terms_per_term': total_search_terms / len(TERM_DEFINITIONS) if TERM_DEFINITIONS else 0
+        "total_terms": len(TERM_DEFINITIONS),
+        "by_document_type": doc_type_counts,
+        "total_variations": total_variations,
+        "total_search_terms": total_search_terms,
+        "avg_variations_per_term": (
+            total_variations / len(TERM_DEFINITIONS) if TERM_DEFINITIONS else 0
+        ),
+        "avg_search_terms_per_term": (
+            total_search_terms / len(TERM_DEFINITIONS) if TERM_DEFINITIONS else 0
+        ),
     }
 
 
@@ -399,9 +397,10 @@ def validate_term_definitions() -> list[str]:
 
 
 # Run validation at module load (in development)
-if os.getenv('VALIDATE_BUSINESS_TERMS', '').lower() == 'true':
+if os.getenv("VALIDATE_BUSINESS_TERMS", "").lower() == "true":
     validation_warnings = validate_term_definitions()
     if validation_warnings:
         import logging
+
         for warning in validation_warnings:
             logging.warning("Business term validation: %s", warning)

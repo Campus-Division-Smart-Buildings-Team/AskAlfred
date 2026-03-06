@@ -4,9 +4,9 @@ Table parsing helpers for FRA action plan extraction.
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
-import logging
 from typing import Optional, Protocol, cast
 
 from config.constant import RISK_LEVEL_MAP
@@ -28,21 +28,19 @@ class _TableParserBase(Protocol):
     verbose: bool
     logger: logging.Logger
 
-    def _find_risk_level(self, content: str) -> Optional[str]:
-        ...
+    def _find_risk_level(self, content: str) -> Optional[str]: ...
 
-    def _normalise_table_text(self, text: str) -> str:
-        ...
+    def _normalise_table_text(self, text: str) -> str: ...
 
-    def _is_valid_row(self, issue_num: str, content: str) -> tuple[bool, Optional[str]]:
-        ...
+    def _is_valid_row(
+        self, issue_num: str, content: str
+    ) -> tuple[bool, Optional[str]]: ...
 
     def _parse_table_rows_layout(
         self,
         section_text: str,
         item_key: str,
-    ) -> tuple[list[dict], list[str]]:
-        ...
+    ) -> tuple[list[dict], list[str]]: ...
 
 
 class _TableParserMixin(_TableParserBase):
@@ -97,8 +95,11 @@ class _TableParserMixin(_TableParserBase):
         if inline_match:
             return inline_match.group(1)
 
-        inline = re.search(r"\b(trivial|tolerable|moderate|substantial|intolerable)\b",
-                           content, re.IGNORECASE)
+        inline = re.search(
+            r"\b(trivial|tolerable|moderate|substantial|intolerable)\b",
+            content,
+            re.IGNORECASE,
+        )
         if inline:
             return str(risk_label_map.get(inline.group(1).lower()))
 
@@ -117,13 +118,15 @@ class _TableParserMixin(_TableParserBase):
             item_key,
         )
         if layout_rows:
+
             def _filter_invalid_layout_rows(rows: list[dict]) -> list[dict]:
                 valid_rows: list[dict] = []
                 for row in rows:
                     issue_num = row.get("issue_num")
                     row_data = row.get("row_data") or {}
                     content = " ".join(
-                        part for part in (
+                        part
+                        for part in (
                             row_data.get("issue_description"),
                             row_data.get("proposed_solution"),
                         )
@@ -146,10 +149,8 @@ class _TableParserMixin(_TableParserBase):
                     risk_level = row.get("risk_level")
                     if risk_level is None:
                         missing_risk += 1
-                    issue_desc = (row_data.get(
-                        "issue_description") or "").strip()
-                    solution = (row_data.get(
-                        "proposed_solution") or "").strip()
+                    issue_desc = (row_data.get("issue_description") or "").strip()
+                    solution = (row_data.get("proposed_solution") or "").strip()
                     if not issue_desc and not solution:
                         empty_desc += 1
                 total = max(len(rows), 1)
@@ -187,13 +188,11 @@ class _TableParserMixin(_TableParserBase):
             boundaries.append((m.start(), num, m.group("rest")))
 
         if not boundaries:
-            warnings.append(
-                "No row boundaries found (no standalone issue numbers)")
+            warnings.append("No row boundaries found (no standalone issue numbers)")
             return [], warnings
 
         for i, (start, issue_num, first_rest) in enumerate(boundaries):
-            end = boundaries[i + 1][0] if i + \
-                1 < len(boundaries) else len(section_text)
+            end = boundaries[i + 1][0] if i + 1 < len(boundaries) else len(section_text)
             row_text = section_text[start:end].strip()
             lines = row_text.splitlines()
             # If the issue number shares a line with content, keep that content.
@@ -227,8 +226,7 @@ class _TableParserMixin(_TableParserBase):
                 risk_level = leading_match.group("num")
                 if not risk_level and leading_match.group("label"):
                     label = leading_match.group("label").lower()
-                    risk_label_map = {
-                        v.lower(): k for k, v in RISK_LEVEL_MAP.items()}
+                    risk_label_map = {v.lower(): k for k, v in RISK_LEVEL_MAP.items()}
                     risk_level = risk_label_map.get(label)
                 content = leading_match.group("rest").strip()
 
@@ -281,7 +279,7 @@ class _TableParserMixin(_TableParserBase):
 
         def _collect_header_lines() -> list[str]:
             header_lines = [header_line]
-            for next_line in lines[header_idx + 1: header_idx + 5]:
+            for next_line in lines[header_idx + 1 : header_idx + 5]:
                 if _is_data_row(next_line):
                     break
                 stripped = next_line.strip()
@@ -313,7 +311,9 @@ class _TableParserMixin(_TableParserBase):
         header_lines = _collect_header_lines()
         merged_header_line = _merge_header_lines(header_lines)
 
-        def _derive_ranges_from_sample(sample_lines: list[str]) -> Optional[dict[str, tuple[int, Optional[int]]]]:
+        def _derive_ranges_from_sample(
+            sample_lines: list[str],
+        ) -> Optional[dict[str, tuple[int, Optional[int]]]]:
             for line in sample_lines:
                 if not _is_data_row(line):
                     continue
@@ -348,10 +348,12 @@ class _TableParserMixin(_TableParserBase):
             return None
 
         sample_ranges = _derive_ranges_from_sample(
-            lines[header_idx + 1: header_idx + 12])
+            lines[header_idx + 1 : header_idx + 12]
+        )
         if sample_ranges:
             col_ranges = sample_ranges
         else:
+
             def _find_header_pos(pattern: str, line: str, start: int = 0) -> int:
                 match = re.search(pattern, line[start:], re.IGNORECASE)
                 if not match:
@@ -360,18 +362,18 @@ class _TableParserMixin(_TableParserBase):
 
             issue_start = _find_header_pos(r"\bIssue\b", merged_header_line, 0)
             risk_start = _find_header_pos(
-                r"\bRis\b|\bRisk\b", merged_header_line, issue_start + 1)
-            desc_start = _find_header_pos(
-                r"Issue\s+description", merged_header_line, 0)
+                r"\bRis\b|\bRisk\b", merged_header_line, issue_start + 1
+            )
+            desc_start = _find_header_pos(r"Issue\s+description", merged_header_line, 0)
             solution_start = _find_header_pos(
-                r"Proposed\s+solution", merged_header_line, 0)
-            person_start = _find_header_pos(
-                r"\bPerson\b", merged_header_line, 0)
+                r"Proposed\s+solution", merged_header_line, 0
+            )
+            person_start = _find_header_pos(r"\bPerson\b", merged_header_line, 0)
             job_start = _find_header_pos(r"\bJob\b", merged_header_line, 0)
-            expected_start = _find_header_pos(
-                r"\bExpected\b", merged_header_line, 0)
+            expected_start = _find_header_pos(r"\bExpected\b", merged_header_line, 0)
             complete_start = _find_header_pos(
-                r"Checked\s+as\s+complete", merged_header_line, 0)
+                r"Checked\s+as\s+complete", merged_header_line, 0
+            )
 
             def _adjust_start(label_start: int, min_start: int) -> int:
                 if label_start < 0:
@@ -381,27 +383,30 @@ class _TableParserMixin(_TableParserBase):
                 if label_start <= min_start:
                     return label_start
                 last_gap_end = None
-                for match in re.finditer(r"\s{4,}", merged_header_line[min_start:label_start]):
+                for match in re.finditer(
+                    r"\s{4,}", merged_header_line[min_start:label_start]
+                ):
                     last_gap_end = min_start + match.end()
                 if last_gap_end is not None and last_gap_end < label_start:
                     return last_gap_end
                 return label_start
 
             adjusted_issue_start = issue_start
-            adjusted_risk_start = _adjust_start(
-                risk_start, adjusted_issue_start + 1)
-            adjusted_desc_start = _adjust_start(
-                desc_start, adjusted_risk_start + 1)
+            adjusted_risk_start = _adjust_start(risk_start, adjusted_issue_start + 1)
+            adjusted_desc_start = _adjust_start(desc_start, adjusted_risk_start + 1)
             adjusted_solution_start = _adjust_start(
-                solution_start, adjusted_desc_start + 1)
+                solution_start, adjusted_desc_start + 1
+            )
             adjusted_person_start = _adjust_start(
-                person_start, adjusted_solution_start + 1)
-            adjusted_job_start = _adjust_start(
-                job_start, adjusted_person_start + 1)
+                person_start, adjusted_solution_start + 1
+            )
+            adjusted_job_start = _adjust_start(job_start, adjusted_person_start + 1)
             adjusted_expected_start = _adjust_start(
-                expected_start, adjusted_job_start + 1)
+                expected_start, adjusted_job_start + 1
+            )
             adjusted_complete_start = _adjust_start(
-                complete_start, adjusted_expected_start + 1)
+                complete_start, adjusted_expected_start + 1
+            )
 
             original_starts = [
                 issue_start,
@@ -463,8 +468,11 @@ class _TableParserMixin(_TableParserBase):
                 col_ranges,
             )
 
-        max_len = max(
-            len(line) for line in lines[header_idx + 1:]) if lines[header_idx + 1:] else 0
+        max_len = (
+            max(len(line) for line in lines[header_idx + 1 :])
+            if lines[header_idx + 1 :]
+            else 0
+        )
 
         def _slice(
             line: str,
@@ -569,8 +577,9 @@ class _TableParserMixin(_TableParserBase):
             if person_responsible and re.search(r"\d", person_responsible):
                 digit_match = re.search(r"\d{5,}", person_responsible)
                 if digit_match:
-                    person_responsible = person_responsible[:digit_match.start(
-                    )].rstrip()
+                    person_responsible = person_responsible[
+                        : digit_match.start()
+                    ].rstrip()
                     if not person_responsible:
                         person_responsible = None
             job_reference_raw = _join(current_data.job)
@@ -589,8 +598,7 @@ class _TableParserMixin(_TableParserBase):
                 r"|(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4}"
                 r"|\d{1,2}[/-]\d{1,2}[/-]\d{4})"
             )
-            complete_dates = re.findall(
-                date_token, complete_raw, re.IGNORECASE)
+            complete_dates = re.findall(date_token, complete_raw, re.IGNORECASE)
             actual_completion_date = complete_dates[-1] if complete_dates else None
 
             combined_text = " ".join(
@@ -623,7 +631,7 @@ class _TableParserMixin(_TableParserBase):
             issue_num = None
             risk_level = None
 
-        for line in lines[header_idx + 1:]:
+        for line in lines[header_idx + 1 :]:
             if "\f" in line:
                 line = line.replace("\f", " ")
             if not line.strip():
@@ -645,23 +653,38 @@ class _TableParserMixin(_TableParserBase):
                 continue
 
             normalise_line = line.replace("\f", " ")
-            segments = [s.strip()
-                        for s in re.split(r"\s{4,}", normalise_line) if s.strip()]
+            segments = [
+                s.strip() for s in re.split(r"\s{4,}", normalise_line) if s.strip()
+            ]
             issue_cell = _slice(
-                normalise_line, *col_ranges["issue"], col_name="issue", min_start=0, max_len=max_len).strip()
+                normalise_line,
+                *col_ranges["issue"],
+                col_name="issue",
+                min_start=0,
+                max_len=max_len,
+            ).strip()
             risk_cell = _slice(
-                normalise_line, *col_ranges["risk"], col_name="risk", min_start=col_ranges["issue"][0], max_len=max_len).strip()
+                normalise_line,
+                *col_ranges["risk"],
+                col_name="risk",
+                min_start=col_ranges["issue"][0],
+                max_len=max_len,
+            ).strip()
 
             new_issue = False
-            row_match = re.match(
-                r"^\s*(\d{1,2})\s{2,}([1-5])\s{2,}\S", normalise_line)
+            row_match = re.match(r"^\s*(\d{1,2})\s{2,}([1-5])\s{2,}\S", normalise_line)
             if row_match:
                 issue_candidate = int(row_match.group(1))
                 if 1 <= issue_candidate <= 100:
                     new_issue = True
                     issue_cell = row_match.group(1)
                     risk_cell = row_match.group(2)
-            if not new_issue and len(segments) >= 2 and segments[0].isdigit() and segments[1].isdigit():
+            if (
+                not new_issue
+                and len(segments) >= 2
+                and segments[0].isdigit()
+                and segments[1].isdigit()
+            ):
                 try:
                     issue_candidate = int(segments[0])
                 except ValueError:
@@ -705,21 +728,51 @@ class _TableParserMixin(_TableParserBase):
                     return cleaned.strip()
 
                 desc_cell = _slice(
-                    normalise_line, *col_ranges["desc"], col_name="desc", min_start=col_ranges["risk"][0], max_len=max_len).strip()
+                    normalise_line,
+                    *col_ranges["desc"],
+                    col_name="desc",
+                    min_start=col_ranges["risk"][0],
+                    max_len=max_len,
+                ).strip()
                 solution_cell = _slice(
-                    normalise_line, *col_ranges["solution"], col_name="solution", min_start=col_ranges["desc"][0], max_len=max_len).strip()
+                    normalise_line,
+                    *col_ranges["solution"],
+                    col_name="solution",
+                    min_start=col_ranges["desc"][0],
+                    max_len=max_len,
+                ).strip()
                 if desc_cell:
                     desc_cell = _strip_fig_tokens(desc_cell)
                 if solution_cell:
                     solution_cell = _strip_fig_tokens(solution_cell)
                 person_cell = _slice(
-                    normalise_line, *col_ranges["person"], col_name="person", min_start=col_ranges["solution"][0], max_len=max_len).strip()
-                job_cell = _slice(normalise_line, *col_ranges["job"], col_name="job",
-                                  min_start=col_ranges["person"][0], max_len=max_len).strip()
+                    normalise_line,
+                    *col_ranges["person"],
+                    col_name="person",
+                    min_start=col_ranges["solution"][0],
+                    max_len=max_len,
+                ).strip()
+                job_cell = _slice(
+                    normalise_line,
+                    *col_ranges["job"],
+                    col_name="job",
+                    min_start=col_ranges["person"][0],
+                    max_len=max_len,
+                ).strip()
                 expected_cell = _slice(
-                    normalise_line, *col_ranges["expected"], col_name="expected", min_start=col_ranges["job"][0], max_len=max_len).strip()
+                    normalise_line,
+                    *col_ranges["expected"],
+                    col_name="expected",
+                    min_start=col_ranges["job"][0],
+                    max_len=max_len,
+                ).strip()
                 complete_cell = _slice(
-                    normalise_line, *col_ranges["complete"], col_name="complete", min_start=col_ranges["expected"][0], max_len=max_len).strip()
+                    normalise_line,
+                    *col_ranges["complete"],
+                    col_name="complete",
+                    min_start=col_ranges["expected"][0],
+                    max_len=max_len,
+                ).strip()
 
                 if issue_cell and not new_issue and not issue_cell.isdigit():
                     current.desc.append(issue_cell)
@@ -747,17 +800,47 @@ class _TableParserMixin(_TableParserBase):
 
             # Continuation row: append cells to current
             desc_cell = _slice(
-                normalise_line, *col_ranges["desc"], col_name="desc", min_start=col_ranges["risk"][0], max_len=max_len).strip()
+                normalise_line,
+                *col_ranges["desc"],
+                col_name="desc",
+                min_start=col_ranges["risk"][0],
+                max_len=max_len,
+            ).strip()
             solution_cell = _slice(
-                normalise_line, *col_ranges["solution"], col_name="solution", min_start=col_ranges["desc"][0], max_len=max_len).strip()
+                normalise_line,
+                *col_ranges["solution"],
+                col_name="solution",
+                min_start=col_ranges["desc"][0],
+                max_len=max_len,
+            ).strip()
             person_cell = _slice(
-                normalise_line, *col_ranges["person"], col_name="person", min_start=col_ranges["solution"][0], max_len=max_len).strip()
-            job_cell = _slice(normalise_line, *col_ranges["job"], col_name="job",
-                              min_start=col_ranges["person"][0], max_len=max_len).strip()
+                normalise_line,
+                *col_ranges["person"],
+                col_name="person",
+                min_start=col_ranges["solution"][0],
+                max_len=max_len,
+            ).strip()
+            job_cell = _slice(
+                normalise_line,
+                *col_ranges["job"],
+                col_name="job",
+                min_start=col_ranges["person"][0],
+                max_len=max_len,
+            ).strip()
             expected_cell = _slice(
-                normalise_line, *col_ranges["expected"], col_name="expected", min_start=col_ranges["job"][0], max_len=max_len).strip()
+                normalise_line,
+                *col_ranges["expected"],
+                col_name="expected",
+                min_start=col_ranges["job"][0],
+                max_len=max_len,
+            ).strip()
             complete_cell = _slice(
-                normalise_line, *col_ranges["complete"], col_name="complete", min_start=col_ranges["expected"][0], max_len=max_len).strip()
+                normalise_line,
+                *col_ranges["complete"],
+                col_name="complete",
+                min_start=col_ranges["expected"][0],
+                max_len=max_len,
+            ).strip()
 
             if desc_cell:
                 current.desc.append(desc_cell)

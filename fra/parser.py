@@ -5,22 +5,25 @@ Extracts structured risk items from Fire Risk Assessment action plan tables.
 Handles multiple table formats and provides confidence scoring.
 """
 
-import re
 import logging
-from typing import Optional, Any
+import re
 from dataclasses import dataclass
+from typing import Any, Optional
+
 from date_utils import parse_date_to_iso, parse_iso_date
 from pinecone_utils import sanitise_metadata_for_pinecone
+
 from .doc_metadata import extract_assessment_date
-from .types import ParsedRowData, RiskItem
+from .parse_helpers.parse_row import _RowParserMixin
 from .parse_helpers.parse_section import _SectionParserMixin
 from .parse_helpers.parse_table import _TableParserMixin
-from .parse_helpers.parse_row import _RowParserMixin
+from .types import ParsedRowData, RiskItem
 
 
 @dataclass
 class ParsingConfidence:
     """Track parsing confidence for quality monitoring."""
+
     overall: float  # 0.0 - 1.0
     field_scores: dict[str, float]
     warnings: list[str]
@@ -54,7 +57,7 @@ class FRAActionPlanParser(_SectionParserMixin, _TableParserMixin, _RowParserMixi
         item_text: str,
         item_key: str,
         canonical_building: str,
-        page_texts: Optional[list[str]] = None
+        page_texts: Optional[list[str]] = None,
     ) -> tuple[list[RiskItem], ParsingConfidence]:
         """
         Parse FRA action plan table and return structured records.
@@ -73,21 +76,15 @@ class FRAActionPlanParser(_SectionParserMixin, _TableParserMixin, _RowParserMixi
         # 1. Extract metadata from header
         assessment_date = self._extract_assessment_date(item_text)
         if not assessment_date:
-            self.logger.warning(
-                "Could not extract assessment date from %s", item_key)
+            self.logger.warning("Could not extract assessment date from %s", item_key)
 
         # 2. Locate action plan section
-        action_plan_text, _ = self._extract_action_plan_section(
-            item_text, page_texts
-        )
+        action_plan_text, _ = self._extract_action_plan_section(item_text, page_texts)
 
         if not action_plan_text:
-            self.logger.error(
-                "No action plan section found in %s", item_key)
+            self.logger.error("No action plan section found in %s", item_key)
             return [], ParsingConfidence(
-                overall=0.0,
-                field_scores={},
-                warnings=["No action plan section found"]
+                overall=0.0, field_scores={}, warnings=["No action plan section found"]
             )
 
         # 3. Parse table rows
@@ -101,12 +98,12 @@ class FRAActionPlanParser(_SectionParserMixin, _TableParserMixin, _RowParserMixi
         for row in parsed_rows:
             row_data = row.get("row_data")
             if row_data is None:
-                row_data = self._parse_row_content(row['content'])
+                row_data = self._parse_row_content(row["content"])
             # Ensure typed shape for downstream usage
             row["row_data"] = row_data
             risk_item = self._build_risk_item(
-                issue_num=row['issue_num'],
-                risk_level=row['risk_level'],
+                issue_num=row["issue_num"],
+                risk_level=row["risk_level"],
                 row_data=row_data,
                 canonical_building=canonical_building,
                 assessment_date=assessment_date,
@@ -120,8 +117,7 @@ class FRAActionPlanParser(_SectionParserMixin, _TableParserMixin, _RowParserMixi
                 self._link_evidence(item, figure_map, page_texts)
 
         # 5. Compute confidence score
-        confidence = self._compute_confidence(
-            risk_items, parsing_warnings)
+        confidence = self._compute_confidence(risk_items, parsing_warnings)
 
         self.logger.info(
             "Extracted %s risk items from %s (confidence: %.2f)",
@@ -150,16 +146,13 @@ class FRAActionPlanParser(_SectionParserMixin, _TableParserMixin, _RowParserMixi
     ) -> RiskItem:
         """Convert parsed row data into structured risk item record."""
 
-        risk_level_int = int(
-            risk_level) if risk_level is not None else 0
+        risk_level_int = int(risk_level) if risk_level is not None else 0
         assessment_date_int = None
         if assessment_date:
             parsed_date = parse_iso_date(assessment_date)
             if parsed_date:
                 assessment_date_int = (
-                    parsed_date.year * 10000
-                    + parsed_date.month * 100
-                    + parsed_date.day
+                    parsed_date.year * 10000 + parsed_date.month * 100 + parsed_date.day
                 )
 
         # Computed/enriched fields are set in triage to keep parser extractive.
@@ -179,30 +172,28 @@ class FRAActionPlanParser(_SectionParserMixin, _TableParserMixin, _RowParserMixi
             "fra_assessment_date": assessment_date,
             "fra_assessment_date_int": assessment_date_int,
             "issue_number": issue_num,
-
             # Risk assessment
             "issue_description": row_data["issue_description"].strip(),
             "risk_level": risk_level_int,
             "risk_level_text": risk_level_text,
-
             # Remediation
             "proposed_solution": row_data["proposed_solution"].strip(),
             "person_responsible": row_data["person_responsible"],
             "job_reference": row_data["job_reference"],
-
             # Timeline
-            "expected_completion_date": parse_date_to_iso(row_data["expected_completion_date"]),
-            "actual_completion_date": parse_date_to_iso(row_data["actual_completion_date"]),
+            "expected_completion_date": parse_date_to_iso(
+                row_data["expected_completion_date"]
+            ),
+            "actual_completion_date": parse_date_to_iso(
+                row_data["actual_completion_date"]
+            ),
             "completion_status": completion_status,
-
             # Evidence
             "figure_references": row_data["figure_references"],
             "page_references": [],  # Populated by _link_evidence
-
             # Metadata
             "document_type": document_type,
             "ingestion_timestamp": ingestion_timestamp,
-
             # Triage flags (computed later)
             "is_current": is_current,
             "superseded_by": superseded_by,
@@ -214,8 +205,7 @@ class FRAActionPlanParser(_SectionParserMixin, _TableParserMixin, _RowParserMixi
 
         for page_num, page_text in enumerate(page_texts, start=1):
             # Find all "Figure X" references
-            figures = re.findall(
-                r"Figure\s+(\d+)", page_text, re.IGNORECASE)
+            figures = re.findall(r"Figure\s+(\d+)", page_text, re.IGNORECASE)
 
             for fig_num in figures:
                 if fig_num not in figure_map:
@@ -224,10 +214,7 @@ class FRAActionPlanParser(_SectionParserMixin, _TableParserMixin, _RowParserMixi
         return figure_map
 
     def _link_evidence(
-        self,
-        risk_item: RiskItem,
-        figure_map: dict[str, int],
-        page_texts: list[str]
+        self, risk_item: RiskItem, figure_map: dict[str, int], page_texts: list[str]
     ) -> None:
         """Link risk item to evidence (figures and pages)."""
 
@@ -238,15 +225,13 @@ class FRAActionPlanParser(_SectionParserMixin, _TableParserMixin, _RowParserMixi
                 page_refs.add(figure_map[fig_num])
 
         # Also search for issue description in pages
-        issue_keywords = risk_item["issue_description"][:100].lower(
-        ).split()
+        issue_keywords = risk_item["issue_description"][:100].lower().split()
         # Only substantial words
         issue_keywords = [w for w in issue_keywords if len(w) > 4]
 
         for page_num, page_text in enumerate(page_texts, start=1):
             page_text_lower = page_text.lower()
-            keyword_matches = sum(
-                1 for kw in issue_keywords if kw in page_text_lower)
+            keyword_matches = sum(1 for kw in issue_keywords if kw in page_text_lower)
 
             # If many keywords match, this page likely discusses the issue
             if keyword_matches >= 3:
@@ -255,9 +240,7 @@ class FRAActionPlanParser(_SectionParserMixin, _TableParserMixin, _RowParserMixi
         risk_item["page_references"] = sorted(page_refs)
 
     def _compute_confidence(
-        self,
-        risk_items: list[RiskItem],
-        warnings: list[str]
+        self, risk_items: list[RiskItem], warnings: list[str]
     ) -> ParsingConfidence:
         """Compute parsing confidence score."""
 
@@ -265,7 +248,7 @@ class FRAActionPlanParser(_SectionParserMixin, _TableParserMixin, _RowParserMixi
             return ParsingConfidence(
                 overall=0.0,
                 field_scores={},
-                warnings=warnings + ["No risk items extracted"]
+                warnings=warnings + ["No risk items extracted"],
             )
 
         # Score each field across all items
@@ -276,12 +259,11 @@ class FRAActionPlanParser(_SectionParserMixin, _TableParserMixin, _RowParserMixi
             "proposed_solution",
             "person_responsible",
             "job_reference",
-            "expected_completion_date"
+            "expected_completion_date",
         ]
 
         for field in fields_to_check:
-            non_empty = sum(
-                1 for item in risk_items if item.get(field))
+            non_empty = sum(1 for item in risk_items if item.get(field))
             field_scores[field] = non_empty / len(risk_items)
 
         # Overall score is weighted average
@@ -290,22 +272,17 @@ class FRAActionPlanParser(_SectionParserMixin, _TableParserMixin, _RowParserMixi
             "proposed_solution": 0.2,
             "person_responsible": 0.2,
             "job_reference": 0.15,
-            "expected_completion_date": 0.15
+            "expected_completion_date": 0.15,
         }
 
-        overall = sum(
-            field_scores[field] * weights[field]
-            for field in fields_to_check
-        )
+        overall = sum(field_scores[field] * weights[field] for field in fields_to_check)
 
         # Penalise for warnings
         warning_penalty = min(len(warnings) * 0.05, 0.2)
         overall = max(0.0, overall - warning_penalty)
 
         return ParsingConfidence(
-            overall=overall,
-            field_scores=field_scores,
-            warnings=warnings
+            overall=overall, field_scores=field_scores, warnings=warnings
         )
 
 

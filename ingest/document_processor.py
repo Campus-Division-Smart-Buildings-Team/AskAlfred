@@ -1,57 +1,65 @@
 #!/usr/bin/env python3
 """
 Document processing pipeline.
-This module defines the DocumentProcessor class, which orchestrates the processing of a single document from raw bytes to vector creation. 
-It handles text extraction, chunking, embedding, and metadata enrichment, as well as special handling for fire risk assessments. 
-The processor interacts with the FileRegistry for tracking file processing state and uses the BuildingResolver for building name resolution. 
+This module defines the DocumentProcessor class, which orchestrates the processing of a single document from raw bytes to vector creation.
+It handles text extraction, chunking, embedding, and metadata enrichment, as well as special handling for fire risk assessments.
+The processor interacts with the FileRegistry for tracking file processing state and uses the BuildingResolver for building name resolution.
 It also includes logic for dry-run mode and event emission for building assignments.
 """
 
 from __future__ import annotations
 
 import hashlib
-import uuid
 import json
 import random
+import time
+import uuid
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from concurrent.futures import ProcessPoolExecutor
-import time
 from typing import TYPE_CHECKING, Any, Protocol
+
 from redis.exceptions import RedisError
-from config import (DocumentTypes, _route_namespace,
-                    INGEST_LOW_CONFIDENCE_WARN, INGEST_EMBED_BATCH_SIZE,
-                    INGEST_PROCESSING_LEASE_SECONDS,)
+
 from alfred_exceptions import (
     ExternalServiceError,
     IngestError,
     RoutingError,
     ValidationError,
 )
+from config import (
+    INGEST_EMBED_BATCH_SIZE,
+    INGEST_LOW_CONFIDENCE_WARN,
+    INGEST_PROCESSING_LEASE_SECONDS,
+    DocumentTypes,
+    _route_namespace,
+)
 from filename_building_parser import should_flag_for_review
 from fra import FraVectorExtractResult, extract_fra_metadata
+
 from .document_content import (
-    chunk_text_generator,
     chunk_text,
+    chunk_text_generator,
     embed_texts_batch,
     ext,
     extract_maintenance_csv,
     extract_text,
+    extract_text_and_chunk_in_process,
     extract_text_csv_by_building_enhanced,
     fetch_bytes_secure,
     is_bms_document,
     is_fire_risk_assessment,
-    extract_text_and_chunk_in_process,
 )
 from .utils import (
     enrich_with_building_metadata,
-    validate_with_truncation,
     validate_namespace_routing,
+    validate_with_truncation,
 )
 
 if TYPE_CHECKING:
-    from .context import IngestContext
     from building.resolver import BuildingResolver
+
+    from .context import IngestContext
 
 
 DocTuple = tuple[str, str | None, str, dict[str, Any]]
@@ -116,7 +124,9 @@ class FraVectorExtractor(Protocol):
     ) -> FraVectorExtractResult: ...
 
 
-def make_file_id(source_path: str, source_key: str, content_hash: str | None = None) -> str:
+def make_file_id(
+    source_path: str, source_key: str, content_hash: str | None = None
+) -> str:
     """Build a stable ID for a source file."""
     if content_hash is not None and not isinstance(content_hash, str):
         raise ValidationError("content_hash must be a hex string or None")
@@ -277,8 +287,7 @@ class DocumentProcessor:
 
     def skip_large_file(self, key: str, size_mb: float) -> bool:
         if self.ctx.config.max_file_mb > 0 and size_mb > self.ctx.config.max_file_mb:
-            self.ctx.logger.info(
-                "Skipping %s (%.2f MB > limit)", key, size_mb)
+            self.ctx.logger.info("Skipping %s (%.2f MB > limit)", key, size_mb)
             return True
         return False
 
@@ -303,17 +312,20 @@ class DocumentProcessor:
             )
         except (RedisError, OSError, ValueError, TypeError) as error:
             self.ctx.logger.warning(
-                "FileRegistry discovery failed for %s: %s", key, error)
+                "FileRegistry discovery failed for %s: %s", key, error
+            )
 
         if _should_skip_existing(self.ctx.config):
             try:
                 if self.ctx.file_registry.is_success(file_id):
                     self.ctx.logger.debug(
-                        "Skipping already indexed file (registry hit): %s", key)
+                        "Skipping already indexed file (registry hit): %s", key
+                    )
                     return None, None, None, None
             except (RedisError, OSError, ValueError, TypeError) as error:
                 self.ctx.logger.warning(
-                    "FileRegistry check failed for %s: %s", key, error)
+                    "FileRegistry check failed for %s: %s", key, error
+                )
 
         processing_token = uuid.uuid4().hex
         try:
@@ -326,11 +338,11 @@ class DocumentProcessor:
                 content_hash=content_hash,
             )
             if not started:
-                raise IngestError(
-                    f"File already processing; aborting: {key}")
+                raise IngestError(f"File already processing; aborting: {key}")
         except (RedisError, OSError, ValueError, TypeError) as error:
             self.ctx.logger.warning(
-                "FileRegistry processing start failed for %s: %s", key, error)
+                "FileRegistry processing start failed for %s: %s", key, error
+            )
 
         return data, content_hash, file_id, processing_token
 
@@ -410,14 +422,18 @@ class DocumentProcessor:
             is_fra_candidate = _is_fra_candidate_policy(key, text_sample)
             if is_fra_candidate:
                 fra_metadata = extract_fra_metadata(text_sample)
-                building_metadata.update({
-                    **fra_metadata,
-                    "document_type": DocumentTypes.FIRE_RISK_ASSESSMENT,
-                })
+                building_metadata.update(
+                    {
+                        **fra_metadata,
+                        "document_type": DocumentTypes.FIRE_RISK_ASSESSMENT,
+                    }
+                )
 
         return docs, text_sample, building, is_fra_candidate
 
-    def _handle_dry_run(self, key: str, docs: list[DocTuple], file_id: str) -> bool:  # pylint: disable=unused-argument
+    def _handle_dry_run(
+        self, key: str, docs: list[DocTuple], file_id: str
+    ) -> bool:  # pylint: disable=unused-argument
         if not _is_dry_run(self.ctx.config):
             return False
 
@@ -432,8 +448,7 @@ class DocumentProcessor:
                 text=text,
                 extra_metadata=extra_metadata,
             )
-            resolved_namespace = self._route_namespace(
-                doc_type)
+            resolved_namespace = self._route_namespace(doc_type)
             # No prefix checks: FileRegistry is the sole authority.
 
             doc_planned_vectors = 0
@@ -461,11 +476,10 @@ class DocumentProcessor:
                 )
                 if not valid:
                     self.ctx.logger.warning(
-                        "Dry-run metadata invalid for %s: %s", key, reason)
+                        "Dry-run metadata invalid for %s: %s", key, reason
+                    )
 
-        self.ctx.logger.info(
-            "Dry-run planned vectors for %s: %d", key, planned_vectors
-        )
+        self.ctx.logger.info("Dry-run planned vectors for %s: %d", key, planned_vectors)
         if planned_vectors > 0:
             self.ctx.stats.increment("total_vectors", planned_vectors)
         return True
@@ -506,11 +520,19 @@ class DocumentProcessor:
                 assessment_date = extracted_result.get("fra_assessment_date")
                 assessment_date_int = extracted_result.get("fra_assessment_date_int")
                 if assessment_date or assessment_date_int:
-                    for idx, (doc_key, canonical, text, extra_metadata) in enumerate(docs):
-                        if assessment_date and not extra_metadata.get("fra_assessment_date"):
+                    for idx, (doc_key, canonical, text, extra_metadata) in enumerate(
+                        docs
+                    ):
+                        if assessment_date and not extra_metadata.get(
+                            "fra_assessment_date"
+                        ):
                             extra_metadata["fra_assessment_date"] = assessment_date
-                        if assessment_date_int and not extra_metadata.get("fra_assessment_date_int"):
-                            extra_metadata["fra_assessment_date_int"] = assessment_date_int
+                        if assessment_date_int and not extra_metadata.get(
+                            "fra_assessment_date_int"
+                        ):
+                            extra_metadata["fra_assessment_date_int"] = (
+                                assessment_date_int
+                            )
                         docs[idx] = (doc_key, canonical, text, extra_metadata)
             except (AttributeError, IndexError, KeyError, TypeError):
                 self.ctx.logger.warning(
@@ -525,18 +547,25 @@ class DocumentProcessor:
 
                 # Always store parsing diagnostics
                 extra_metadata["fra_parsing_confidence"] = extracted_result.get(
-                    "parsing_confidence")
+                    "parsing_confidence"
+                )
                 extra_metadata["fra_parsing_warnings"] = extracted_result.get(
-                    "parsing_warnings")
+                    "parsing_warnings"
+                )
                 extra_metadata["fra_parsing_field_scores"] = extracted_result.get(
-                    "parsing_field_scores")
+                    "parsing_field_scores"
+                )
 
                 # Set extraction status
                 if extracted_result.get("missing_action_plan"):
                     extra_metadata["fra_action_plan_missing"] = True
-                    extra_metadata["fra_risk_item_extraction_status"] = "no_action_plan_found"
+                    extra_metadata["fra_risk_item_extraction_status"] = (
+                        "no_action_plan_found"
+                    )
                 else:
-                    extra_metadata["fra_risk_item_extraction_status"] = "no_risk_items_extracted"
+                    extra_metadata["fra_risk_item_extraction_status"] = (
+                        "no_risk_items_extracted"
+                    )
 
             except (IndexError, KeyError, TypeError):
                 self.ctx.logger.warning(
@@ -554,11 +583,15 @@ class DocumentProcessor:
                     "file": key,
                     "canonical_building_name": building,
                     "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
-                    "fra_parsing_confidence": extracted_result.get("parsing_confidence"),
+                    "fra_parsing_confidence": extracted_result.get(
+                        "parsing_confidence"
+                    ),
                     "fra_parsing_warnings": extracted_result.get("parsing_warnings"),
                 }
                 with self.ctx.export_events_lock:
-                    with open(self.ctx.config.export_events_file, "a", encoding="utf-8") as f:
+                    with open(
+                        self.ctx.config.export_events_file, "a", encoding="utf-8"
+                    ) as f:
                         f.write(json.dumps(event, ensure_ascii=False) + "\n")
 
             # IMPORTANT: fall back to normal document ingestion
@@ -614,7 +647,8 @@ class DocumentProcessor:
                         file_handle.write(line)
         except (OSError, ValueError, TypeError) as error:
             self.ctx.logger.warning(
-                "Could not write building event for %s: %s", key, error)
+                "Could not write building event for %s: %s", key, error
+            )
 
     def _build_vectors_from_docs(
         self,
@@ -635,11 +669,11 @@ class DocumentProcessor:
                 extension=extension,
                 key=key,
                 text=text,
-                extra_metadata=extra_metadata,)
+                extra_metadata=extra_metadata,
+            )
             resolved_namespace = self._route_namespace(doc_type)
             # Validate routing ONCE
-            valid, reason = validate_namespace_routing(
-                doc_type, resolved_namespace)
+            valid, reason = validate_namespace_routing(doc_type, resolved_namespace)
             if not valid:
                 raise RoutingError(f"Invalid namespace routing: {reason}")
 
@@ -648,11 +682,13 @@ class DocumentProcessor:
             batch_indices: list[int] = []
             chunk_idx = 0
 
-            def flush_batch(current_doc_key: str,
-                            current_resolved_namespace: str | None,
-                            current_canonical: str | None,
-                            current_doc_type: str,
-                            current_extra_metadata: dict[str, Any]) -> None:
+            def flush_batch(
+                current_doc_key: str,
+                current_resolved_namespace: str | None,
+                current_canonical: str | None,
+                current_doc_type: str,
+                current_extra_metadata: dict[str, Any],
+            ) -> None:
                 nonlocal batch_chunks, batch_indices
                 if not batch_chunks:
                     return
@@ -683,7 +719,9 @@ class DocumentProcessor:
                     # Never trust namespace from extra_metadata
                     if "namespace" in current_extra_metadata:
                         current_extra_metadata = {
-                            k: v for k, v in current_extra_metadata.items() if k != "namespace"
+                            k: v
+                            for k, v in current_extra_metadata.items()
+                            if k != "namespace"
                         }
                     metadata.update(current_extra_metadata)
                     if current_canonical:
@@ -698,8 +736,7 @@ class DocumentProcessor:
                     if sample_metadata:
                         try:
                             metadata_bytes = len(
-                                json.dumps(
-                                    metadata, ensure_ascii=False, default=str)
+                                json.dumps(metadata, ensure_ascii=False, default=str)
                             )
                             self.ctx.stats.observe_timing(
                                 "metadata_bytes", metadata_bytes
@@ -708,8 +745,9 @@ class DocumentProcessor:
                                 k: v for k, v in metadata.items() if k != "text"
                             }
                             metadata_bytes_ex_text = len(
-                                json.dumps(metadata_no_text,
-                                           ensure_ascii=False, default=str)
+                                json.dumps(
+                                    metadata_no_text, ensure_ascii=False, default=str
+                                )
                             )
                             self.ctx.stats.observe_timing(
                                 "metadata_bytes_ex_text", metadata_bytes_ex_text
@@ -724,15 +762,15 @@ class DocumentProcessor:
                     )
                     if not valid:
                         self.ctx.logger.warning(
-                            "Invalid metadata for %s: %s", key, reason)
+                            "Invalid metadata for %s: %s", key, reason
+                        )
                         self.ctx.stats.increment("vectors_invalid_metadata")
                         self.ctx.stats.append_failed(f"{key}:chunk_{index}")
                         continue
                     if sample_metadata:
                         try:
                             metadata_bytes_post_validation = len(
-                                json.dumps(
-                                    metadata, ensure_ascii=False, default=str)
+                                json.dumps(metadata, ensure_ascii=False, default=str)
                             )
                             self.ctx.stats.observe_timing(
                                 "metadata_bytes_post_validation",
@@ -846,8 +884,9 @@ class DocumentProcessor:
                             extra_metadata,
                         )
 
-            flush_batch(doc_key, resolved_namespace,
-                        canonical, doc_type, extra_metadata)
+            flush_batch(
+                doc_key, resolved_namespace, canonical, doc_type, extra_metadata
+            )
 
         return vectors_to_upsert
 
@@ -894,11 +933,12 @@ class Extractor:
         key: str,
         extension: str,
         data: bytes,
-    ) -> tuple[list[DocTuple], str | None, str | None, bool, dict[str, list[str]] | None]:
+    ) -> tuple[
+        list[DocTuple], str | None, str | None, bool, dict[str, list[str]] | None
+    ]:
         precomputed_chunks: dict[str, list[str]] | None = None
         if extension not in ("csv", "xlsx", "xls"):
-            text_sample, chunks = self._processor.extract_text_and_chunks(
-                key, data)
+            text_sample, chunks = self._processor.extract_text_and_chunks(key, data)
             precomputed_chunks = {key: chunks}
         else:
             text_sample = None
@@ -953,16 +993,18 @@ class Vectoriser:
             docs=docs,
         )
 
-        vectors_to_upsert.extend(self._processor.build_vectors_from_docs(
-            key=key,
-            extension=extension,
-            file_id=file_id,
-            content_hash=content_hash,
-            processing_token=processing_token,
-            start_time=start_time,
-            docs=docs,
-            precomputed_chunks=precomputed_chunks,
-        ))
+        vectors_to_upsert.extend(
+            self._processor.build_vectors_from_docs(
+                key=key,
+                extension=extension,
+                file_id=file_id,
+                content_hash=content_hash,
+                processing_token=processing_token,
+                start_time=start_time,
+                docs=docs,
+                precomputed_chunks=precomputed_chunks,
+            )
+        )
 
         return vectors_to_upsert
 
@@ -1000,8 +1042,7 @@ class FileIngestOrchestrator:
             return FileProcessResult(status="skipped", vectors=[], vector_count=0)
 
         key, extension, data, content_hash, file_id, processing_token = prepared
-        max_seconds = getattr(self._processor.ctx.config,
-                              "max_file_seconds", 0)
+        max_seconds = getattr(self._processor.ctx.config, "max_file_seconds", 0)
 
         docs, text_sample, building, is_fra_candidate, precomputed_chunks = (
             self._extractor.extract(

@@ -232,8 +232,8 @@ USE_QUERY_MANAGER = True  # Set to True to enable new system
 QUERY_MANAGER_CONFIG = {
     "enable_caching": False,  # Enable query result caching
     "cache_ttl_seconds": 300,  # Cache TTL
-    "enable_metrics": True,    # Track query metrics
-    "log_level": "INFO",       # Logging level
+    "enable_metrics": True,  # Track query metrics
+    "log_level": "INFO",  # Logging level
 }
 
 # ===========================================================================
@@ -299,8 +299,7 @@ FRA_RISK_ITEMS_NAMESPACE = NAMESPACE_MAPPINGS[DocumentTypes.FRA_RISK_ITEM]
 
 TARGET_INDEXES = ["local-docs"]
 SEARCH_ALL_NAMESPACES = True
-DEFAULT_EMBED_MODEL = os.getenv(
-    "DEFAULT_EMBED_MODEL", "text-embedding-3-small")
+DEFAULT_EMBED_MODEL = os.getenv("DEFAULT_EMBED_MODEL", "text-embedding-3-small")
 ANSWER_MODEL = os.getenv("ANSWER_MODEL", "gpt-4o-mini")
 DIMENSION = 1536
 MIN_SCORE_THRESHOLD = 0.3

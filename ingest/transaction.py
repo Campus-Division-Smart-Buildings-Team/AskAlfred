@@ -3,59 +3,63 @@ Transaction management for Alfred Local ingestion.
 This module provides classes and functions to handle transactional operations during the ingestion process,
 including thread-safe statistics tracking, retry mechanisms, and FRA-specific processing.
 """
+
 import logging
-import time
 import threading
+import time
 import uuid
-from concurrent.futures import ProcessPoolExecutor
 from collections import OrderedDict
+from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime, timezone
 from threading import Lock, RLock
-from typing import Any, Optional, TYPE_CHECKING
-from interfaces import FileRecord, MetricsReader
-from config import (
-    FRA_RISK_ITEMS_NAMESPACE,
-    INGEST_VERIFY_FETCH_BATCH_SIZE,
-    INGEST_VERIFY_BACKOFF_BASE,
-    INGEST_VERIFY_BACKOFF_CAP,
-    FRA_LOCK_TIMEOUT_SECONDS,
-    get_display_namespace,
-    DocumentTypes,
-    INGEST_VECTOR_BUFFER_MAX_SIZE,
-)
-from config.constant import INGEST_METADATA_CACHE_SIZE
-from fra import (
-    restore_superseded_items,
-    mark_superseded_risk_items,
-    deduplicate_risk_items,
-    _fra_partition_key,
-    FRAActionPlanParser,
-    parse_action_plan_in_process,
-    sanitise_risk_item_for_metadata,
-    FRATriageComputer,
-    EnrichedRiskItem,
-    FraVectorExtractResult,
-)
+from typing import TYPE_CHECKING, Any, Optional
+
 from alfred_exceptions import (
     ExternalServiceError,
     IngestError,
     ModelNotInitialisedError,
     ParseError,
+    RollbackError,
     RoutingError,
     ValidationError,
-    RollbackError,
 )
+from config import (
+    FRA_LOCK_TIMEOUT_SECONDS,
+    FRA_RISK_ITEMS_NAMESPACE,
+    INGEST_VECTOR_BUFFER_MAX_SIZE,
+    INGEST_VERIFY_BACKOFF_BASE,
+    INGEST_VERIFY_BACKOFF_CAP,
+    INGEST_VERIFY_FETCH_BATCH_SIZE,
+    DocumentTypes,
+    get_display_namespace,
+)
+from config.constant import INGEST_METADATA_CACHE_SIZE
+from fra import (
+    EnrichedRiskItem,
+    FRAActionPlanParser,
+    FRATriageComputer,
+    FraVectorExtractResult,
+    _fra_partition_key,
+    deduplicate_risk_items,
+    mark_superseded_risk_items,
+    parse_action_plan_in_process,
+    restore_superseded_items,
+    sanitise_risk_item_for_metadata,
+)
+from interfaces import FileRecord, MetricsReader
 from pinecone_utils import NULL_SENTINEL
+
 from .document_content import (
     backoff_sleep,
     embed_texts_batch,
     ext,
 )
-from .utils import (
-    validate_with_truncation,
-    upsert_vectors,
-)
 from .helpers import _extract_fra_layout_text
+from .utils import (
+    upsert_vectors,
+    validate_with_truncation,
+)
+
 if TYPE_CHECKING:
     from .context import IngestContext
 
@@ -116,6 +120,7 @@ class ThreadSafeStats(MetricsReader):
 # ============================================================================
 # THREAD-SAFE CACHE
 # ============================================================================
+
 
 class ThreadSafeCache:
     def __init__(self, metadata_cache_size: int = INGEST_METADATA_CACHE_SIZE):
@@ -331,7 +336,9 @@ class FraSupersessionTxnLog:
         superseded_ids = self._tx_superseded[tx_id]
         self.logger.warning(
             "FRA txn rollback: %s (restoring %d items, reason=%s)",
-            tx_id, len(superseded_ids), reason
+            tx_id,
+            len(superseded_ids),
+            reason,
         )
         # Call the restore function from fra_integration
         restored = restore_superseded_items(ctx, superseded_ids)
@@ -347,6 +354,7 @@ class FraSupersessionTxnLog:
 # ---------------------------------------------------------------------------
 # 6. FraTransaction  (explicit prepare / execute / verify / rollback)
 # ---------------------------------------------------------------------------
+
 
 class FraTransaction:
     """
@@ -394,8 +402,7 @@ class FraTransaction:
         """
         buildings = sorted({b for b, _ in self._supersede_requests})
         self._txn_log = FraSupersessionTxnLog(logger=self._ctx.logger)
-        self._tx_id = self._txn_log.begin(
-            buildings, len(self._supersede_requests))
+        self._tx_id = self._txn_log.begin(buildings, len(self._supersede_requests))
         return _acquire_fra_locks(
             self._ctx,
             buildings,
@@ -428,7 +435,8 @@ class FraTransaction:
             self._superseded_ids.extend(superseded)
             if self._txn_log is not None:
                 self._txn_log.record_superseded(
-                    self._tx_id, building, superseded)  # type: ignore[arg-type]
+                    self._tx_id, building, superseded
+                )  # type: ignore[arg-type]
 
         self._raise_if_lock_lost()
         upsert_vectors(self._ctx, self._vectors)
@@ -456,13 +464,13 @@ class FraTransaction:
 
     def _raise_if_lock_lost(self) -> None:
         if self._lock_lost_event.is_set():
-            raise ExternalServiceError(
-                "Redis lock lost during FRA supersession")
+            raise ExternalServiceError("Redis lock lost during FRA supersession")
 
 
 # ---------------------------------------------------------------------------
 # upsert_vectors_atomic  (refactored — delegates to FraTransaction)
 # ---------------------------------------------------------------------------
+
 
 def _emit_verification_failure_event(
     ctx: "IngestContext",
@@ -480,7 +488,8 @@ def _emit_verification_failure_event(
         )
     except Exception as alert_error:  # pylint: disable=broad-except
         ctx.logger.warning(
-            "Verification failure alert emission failed: %s", alert_error)
+            "Verification failure alert emission failed: %s", alert_error
+        )
 
 
 def _handle_verification_failure(
@@ -542,22 +551,27 @@ def upsert_vectors_atomic(ctx: "IngestContext", vectors: list[dict[str, Any]]) -
             except Exception as error:  # pylint: disable=broad-except
                 ctx.logger.warning("FileRegistry update failed: %s", error)
 
-        except (ExternalServiceError, IngestError, ValidationError, RoutingError,
-                ParseError, ModelNotInitialisedError) as error:
+        except (
+            ExternalServiceError,
+            IngestError,
+            ValidationError,
+            RoutingError,
+            ParseError,
+            ModelNotInitialisedError,
+        ) as error:
             txn.rollback(str(error))
             _mark_batch_state(ctx, vectors, status="failed", error=str(error))
             try:
-                _record_ingested_files(
-                    ctx, vectors, status="failed", error=str(error))
+                _record_ingested_files(ctx, vectors, status="failed", error=str(error))
             except Exception as record_error:  # pylint: disable=broad-except
-                ctx.logger.warning(
-                    "FileRegistry update failed: %s", record_error)
+                ctx.logger.warning("FileRegistry update failed: %s", record_error)
             raise
 
 
 # ---------------------------------------------------------------------------
 # FRA supersession helpers
 # ---------------------------------------------------------------------------
+
 
 def _acquire_fra_locks(
     ctx: "IngestContext",
@@ -588,7 +602,8 @@ def _acquire_fra_locks(
                 elapsed = time.monotonic() - start
                 try:
                     ctx.stats.observe_timing(
-                        "fra_supersession_global_lock_wait_seconds", elapsed)
+                        "fra_supersession_global_lock_wait_seconds", elapsed
+                    )
                 except Exception:
                     pass
                 ctx.logger.info(
@@ -606,9 +621,7 @@ def _acquire_fra_locks(
                     self._building_ctx.__exit__(exc_type, exc, tb)
                 if self._global_ctx is not None:
                     self._global_ctx.__exit__(exc_type, exc, tb)
-                    ctx.logger.info(
-                        "FRA supersession global lock released"
-                    )
+                    ctx.logger.info("FRA supersession global lock released")
 
         return _Ctx()
 
@@ -649,7 +662,8 @@ def _filter_supersede_requests_with_registry(
             existing = ctx.job_registry.get(registry_id)
         except Exception as error:  # pylint: disable=broad-except
             ctx.logger.warning(
-                "JobRegistry lookup failed for %s: %s", registry_id, error)
+                "JobRegistry lookup failed for %s: %s", registry_id, error
+            )
             existing = None
         if existing and existing.status == "success":
             ctx.logger.info(
@@ -682,10 +696,11 @@ def _verify_fra_vectors_present(
     for attempt in range(attempts):
         still_missing = set()
         for i in range(0, len(fra_ids), batch_size):
-            batch = fra_ids[i:i + batch_size]
+            batch = fra_ids[i : i + batch_size]
             try:
                 response = ctx.vector_store.fetch(
-                    ids=batch, namespace=FRA_RISK_ITEMS_NAMESPACE)
+                    ids=batch, namespace=FRA_RISK_ITEMS_NAMESPACE
+                )
             except ExternalServiceError as error:
                 ctx.logger.error(
                     "FRA verification fetch failed (attempt %d/%d): %s",
@@ -720,6 +735,7 @@ def _verify_fra_vectors_present(
 # ---------------------------------------------------------------------------
 # Batch state / file registry helpers (unchanged)
 # ---------------------------------------------------------------------------
+
 
 def _record_ingested_files(
     ctx: "IngestContext",
@@ -828,6 +844,7 @@ def _mark_batch_failed(
 # FRA risk-item extraction
 # ---------------------------------------------------------------------------
 
+
 def _create_risk_item_summary(item: EnrichedRiskItem) -> str:
     """Create a searchable summary text for an FRA risk item."""
 
@@ -842,10 +859,10 @@ def _create_risk_item_summary(item: EnrichedRiskItem) -> str:
     issue_number = _as_str(item.get("issue_number"), "Unknown")
     risk_level_text = _as_str(item.get("risk_level_text"), "Unknown")
     risk_level = _as_str(item.get("risk_level"), "?")
-    building_name = _as_str(
-        item.get("canonical_building_name"), "Unknown building")
-    risk_category = _as_str(item.get("risk_category"),
-                            "other").replace("_", " ").title()
+    building_name = _as_str(item.get("canonical_building_name"), "Unknown building")
+    risk_category = (
+        _as_str(item.get("risk_category"), "other").replace("_", " ").title()
+    )
     completion_status = _as_str(item.get("completion_status"), "open").upper()
     issue_description = _as_str(
         item.get("issue_description"),
@@ -855,8 +872,7 @@ def _create_risk_item_summary(item: EnrichedRiskItem) -> str:
         item.get("proposed_solution"),
         "No proposed solution provided.",
     )
-    person_responsible = _as_str(
-        item.get("person_responsible"), "Not assigned")
+    person_responsible = _as_str(item.get("person_responsible"), "Not assigned")
     job_reference = _as_str(item.get("job_reference"), "No job reference")
 
     summary = f"""
@@ -980,10 +996,9 @@ def extract_fra_risk_items_integration(
 
     if used_layout_text and raw_text_sample:
         low_confidence = parsing_confidence < 0.35
-        low_fields = (
-            _field_score_below(parsing_field_scores, "issue_description", 0.5)
-            or _field_score_below(parsing_field_scores, "proposed_solution", 0.5)
-        )
+        low_fields = _field_score_below(
+            parsing_field_scores, "issue_description", 0.5
+        ) or _field_score_below(parsing_field_scores, "proposed_solution", 0.5)
         if low_confidence or low_fields:
             ctx.logger.warning(
                 "Low-quality FRA layout parse for %s (confidence %.2f); retrying text parse",
@@ -1012,16 +1027,13 @@ def extract_fra_risk_items_integration(
                 risk_items = retry_items
                 confidence = retry_confidence
                 parsing_confidence = retry_overall
-                parsing_warnings = list(
-                    getattr(retry_confidence, "warnings", []) or []
-                )
+                parsing_warnings = list(getattr(retry_confidence, "warnings", []) or [])
                 parsing_field_scores = dict(
                     getattr(retry_confidence, "field_scores", {}) or {}
                 )
 
     missing_action_plan = (
-        not risk_items and
-        "No action plan section found" in parsing_warnings
+        not risk_items and "No action plan section found" in parsing_warnings
     )
 
     if missing_action_plan:
@@ -1069,8 +1081,7 @@ def extract_fra_risk_items_integration(
         }
 
     if getattr(ctx.config, "dry_run", False):
-        ctx.logger.info(
-            "Dry-run: skipping FRA risk item embeddings for %s", key)
+        ctx.logger.info("Dry-run: skipping FRA risk item embeddings for %s", key)
         return {
             "added": 0,
             "parsing_confidence": parsing_confidence,

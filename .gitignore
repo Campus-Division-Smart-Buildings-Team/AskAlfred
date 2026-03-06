@@ -2,7 +2,7 @@
 .env
 *.env
 .env.*
-.venv
+.venv/
 
 # keys
 config/secrets/*

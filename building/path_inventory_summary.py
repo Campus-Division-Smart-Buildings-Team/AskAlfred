@@ -9,6 +9,7 @@ Scans a directory and uses the OpenAI client to generate a summary for each file
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 import logging
 import os
@@ -16,15 +17,12 @@ import random
 import re
 import threading
 import time
+from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
-from collections.abc import Iterable
 from pathlib import Path
 from typing import Optional
-import fnmatch
 
-from clients import get_oai
-from ingest.document_content import extract_text
 from openai import (
     APIConnectionError,
     APITimeoutError,
@@ -32,52 +30,90 @@ from openai import (
     PermissionDeniedError,
     RateLimitError,
 )
+
+from building.path_inventory import PathEntry, scan_path
+from clients import get_oai
 from config.constant import (
     ANSWER_MODEL,
     INGEST_BACKOFF_BASE,
     INGEST_BACKOFF_CAP,
     INGEST_BACKOFF_JITTER_MIN,
     INGEST_BACKOFF_JITTER_SPAN,
+    INGEST_RETRY_ATTEMPTS,
     INGEST_RETRY_EXP_MAX,
     INGEST_RETRY_EXP_MIN,
     INGEST_RETRY_EXP_MULTIPLIER,
-    INGEST_RETRY_ATTEMPTS,
 )
-from building.path_inventory import PathEntry, scan_path
-
+from ingest.document_content import extract_text
 
 DEFAULT_EXTENSIONS = {
-    "txt", "md", "rst", "json", "csv", "tsv",
-    "yaml", "yml", "ini", "cfg", "conf", "log",
-    "py", "js", "ts", "html", "css",
-    "pdf", "doc", "docx",
+    "txt",
+    "md",
+    "rst",
+    "json",
+    "csv",
+    "tsv",
+    "yaml",
+    "yml",
+    "ini",
+    "cfg",
+    "conf",
+    "log",
+    "py",
+    "js",
+    "ts",
+    "html",
+    "css",
+    "pdf",
+    "doc",
+    "docx",
 }
 
 # Enhanced sensitive patterns with case-insensitive and variant detection
 SENSITIVE_PATTERNS = {
-    ".env", ".env.local", ".env.*.local",
-    "*.pem", "*.key", "*.cert", "*.crt",
-    ".aws", ".ssh", ".git/config",
-    "secrets.json", "credentials.json",
-    ".npmrc", ".netrc", "docker.env",
-    "*.keystore", "*.jks", "*.p12", "*.pfx",
-    "*password*", "*api*key*", "*token*", "*secret*",
+    ".env",
+    ".env.local",
+    ".env.*.local",
+    "*.pem",
+    "*.key",
+    "*.cert",
+    "*.crt",
+    ".aws",
+    ".ssh",
+    ".git/config",
+    "secrets.json",
+    "credentials.json",
+    ".npmrc",
+    ".netrc",
+    "docker.env",
+    "*.keystore",
+    "*.jks",
+    "*.p12",
+    "*.pfx",
+    "*password*",
+    "*api*key*",
+    "*token*",
+    "*secret*",
 }
 
 # Regex-based sensitive content detection (best-effort, conservative)
 SENSITIVE_CONTENT_PATTERNS: tuple[tuple[str, str], ...] = (
     ("private_key_block", r"-----BEGIN (RSA|EC|DSA|OPENSSH|PGP) PRIVATE KEY-----"),
     ("aws_access_key_id", r"AKIA[0-9A-Z]{16}"),
-    ("aws_secret_access_key",
-     r"(?i)aws(.{0,20})?secret(.{0,20})?key\s*[:=]\s*[A-Za-z0-9/+=]{40}"),
+    (
+        "aws_secret_access_key",
+        r"(?i)aws(.{0,20})?secret(.{0,20})?key\s*[:=]\s*[A-Za-z0-9/+=]{40}",
+    ),
     ("github_pat", r"ghp_[A-Za-z0-9]{36}"),
     ("github_fine_grained_pat", r"github_pat_[A-Za-z0-9_]{82,}"),
     ("slack_token", r"xox[baprs]-[A-Za-z0-9-]{10,48}"),
     ("google_api_key", r"AIza[0-9A-Za-z\-_]{35}"),
     ("jwt", r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"),
     ("generic_password", r"(?i)(password|passwd|pwd)\s*[:=]\s*['\"]?.{8,}"),
-    ("generic_token",
-     r"(?i)(api[_-]?key|token|secret)\s*[:=]\s*['\"]?[A-Za-z0-9_\-]{16,}"),
+    (
+        "generic_token",
+        r"(?i)(api[_-]?key|token|secret)\s*[:=]\s*['\"]?[A-Za-z0-9_\-]{16,}",
+    ),
 )
 
 logger = logging.getLogger(__name__)
@@ -260,8 +296,7 @@ def _is_binary_file(path: Path) -> bool:
             return True
         # Check for high proportion of non-text bytes
         if len(chunk) > 0:
-            non_text = sum(1 for b in chunk if b <
-                           0x20 and b not in (0x09, 0x0A, 0x0D))
+            non_text = sum(1 for b in chunk if b < 0x20 and b not in (0x09, 0x0A, 0x0D))
             if non_text / len(chunk) > 0.3:
                 return True
         return False
@@ -278,8 +313,7 @@ def _has_sensitive_content(content: str) -> bool:
     for name, pattern in SENSITIVE_CONTENT_PATTERNS:
         try:
             if re.search(pattern, content):
-                logger.warning(
-                    "Sensitive content detected (%s); skipping file.", name)
+                logger.warning("Sensitive content detected (%s); skipping file.", name)
                 return True
         except re.error:
             logger.warning("Invalid sensitive content regex: %s", name)
@@ -377,18 +411,23 @@ def _summarize_text(*, client, model: str, filename: str, content: str) -> str:
             if attempt < max_retries - 1:
                 exp = min(
                     INGEST_RETRY_EXP_MAX,
-                    INGEST_RETRY_EXP_MIN *
-                    (INGEST_RETRY_EXP_MULTIPLIER ** attempt),
+                    INGEST_RETRY_EXP_MIN * (INGEST_RETRY_EXP_MULTIPLIER**attempt),
                 )
                 base = min(INGEST_BACKOFF_CAP, max(INGEST_BACKOFF_BASE, exp))
-                jitter = INGEST_BACKOFF_JITTER_MIN + random.random() * INGEST_BACKOFF_JITTER_SPAN
+                jitter = (
+                    INGEST_BACKOFF_JITTER_MIN
+                    + random.random() * INGEST_BACKOFF_JITTER_SPAN
+                )
                 sleep_s = min(INGEST_BACKOFF_CAP, base + jitter)
-                logger.warning("Rate limited (attempt %d/%d), retrying in %.2fs",
-                               attempt + 1, max_retries, sleep_s)
+                logger.warning(
+                    "Rate limited (attempt %d/%d), retrying in %.2fs",
+                    attempt + 1,
+                    max_retries,
+                    sleep_s,
+                )
                 time.sleep(sleep_s)
             else:
-                logger.exception(
-                    "Rate limited after %d attempts", max_retries)
+                logger.exception("Rate limited after %d attempts", max_retries)
                 return (
                     "Error: Rate limited after multiple retry attempts "
                     f"(last_error={last_error})."
@@ -398,18 +437,26 @@ def _summarize_text(*, client, model: str, filename: str, content: str) -> str:
             if attempt < max_retries - 1:
                 exp = min(
                     INGEST_RETRY_EXP_MAX,
-                    INGEST_RETRY_EXP_MIN *
-                    (INGEST_RETRY_EXP_MULTIPLIER ** attempt),
+                    INGEST_RETRY_EXP_MIN * (INGEST_RETRY_EXP_MULTIPLIER**attempt),
                 )
                 base = min(INGEST_BACKOFF_CAP, max(INGEST_BACKOFF_BASE, exp))
-                jitter = INGEST_BACKOFF_JITTER_MIN + random.random() * INGEST_BACKOFF_JITTER_SPAN
+                jitter = (
+                    INGEST_BACKOFF_JITTER_MIN
+                    + random.random() * INGEST_BACKOFF_JITTER_SPAN
+                )
                 sleep_s = min(INGEST_BACKOFF_CAP, base + jitter)
-                logger.warning("API timeout/connection error (attempt %d/%d), retrying in %.2fs: %s",
-                               attempt + 1, max_retries, sleep_s, type(exc).__name__)
+                logger.warning(
+                    "API timeout/connection error (attempt %d/%d), retrying in %.2fs: %s",
+                    attempt + 1,
+                    max_retries,
+                    sleep_s,
+                    type(exc).__name__,
+                )
                 time.sleep(sleep_s)
             else:
                 logger.exception(
-                    "API timeout/connection error after %d attempts", max_retries)
+                    "API timeout/connection error after %d attempts", max_retries
+                )
                 return (
                     "Error: API timeout/connection error after multiple retry attempts "
                     f"(last_error={last_error})."
@@ -417,7 +464,8 @@ def _summarize_text(*, client, model: str, filename: str, content: str) -> str:
         except (AuthenticationError, PermissionDeniedError) as exc:
             last_error = type(exc).__name__
             logger.exception(
-                "Authentication/permission error; not retrying: %s", last_error)
+                "Authentication/permission error; not retrying: %s", last_error
+            )
             return (
                 "Error: Authentication/permission error; request not retried "
                 f"(last_error={last_error})."
@@ -427,18 +475,24 @@ def _summarize_text(*, client, model: str, filename: str, content: str) -> str:
             if attempt < max_retries - 1:
                 exp = min(
                     INGEST_RETRY_EXP_MAX,
-                    INGEST_RETRY_EXP_MIN *
-                    (INGEST_RETRY_EXP_MULTIPLIER ** attempt),
+                    INGEST_RETRY_EXP_MIN * (INGEST_RETRY_EXP_MULTIPLIER**attempt),
                 )
                 base = min(INGEST_BACKOFF_CAP, max(INGEST_BACKOFF_BASE, exp))
-                jitter = INGEST_BACKOFF_JITTER_MIN + random.random() * INGEST_BACKOFF_JITTER_SPAN
+                jitter = (
+                    INGEST_BACKOFF_JITTER_MIN
+                    + random.random() * INGEST_BACKOFF_JITTER_SPAN
+                )
                 sleep_s = min(INGEST_BACKOFF_CAP, base + jitter)
-                logger.warning("API request failed (attempt %d/%d), retrying in %.2fs: %s",
-                               attempt + 1, max_retries, sleep_s, last_error)
+                logger.warning(
+                    "API request failed (attempt %d/%d), retrying in %.2fs: %s",
+                    attempt + 1,
+                    max_retries,
+                    sleep_s,
+                    last_error,
+                )
                 time.sleep(sleep_s)
             else:
-                logger.exception(
-                    "API request failed after %d attempts", max_retries)
+                logger.exception("API request failed after %d attempts", max_retries)
                 return (
                     "Error: Unable to summarize file after multiple retry attempts "
                     f"(last_error={last_error})."
@@ -450,7 +504,9 @@ def _summarize_text(*, client, model: str, filename: str, content: str) -> str:
     )
 
 
-def _build_result(entry: PathEntry, summary: Optional[str], status: Optional[str]) -> dict:
+def _build_result(
+    entry: PathEntry, summary: Optional[str], status: Optional[str]
+) -> dict:
     return {
         "path": entry.path,
         "relative_path": entry.relative_path,
@@ -578,8 +634,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     extensions = _parse_extensions(args.extensions)
 
     logger.info("Starting path inventory summarization for: %s", args.root_path)
-    logger.info("WARNING: File content will be sent to OpenAI API for summarization. "
-                "Ensure no sensitive data is exposed.")
+    logger.info(
+        "WARNING: File content will be sent to OpenAI API for summarization. "
+        "Ensure no sensitive data is exposed."
+    )
 
     try:
         payload = summarize_path(
@@ -600,8 +658,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         elif not args.stream:
             _write_output(payload, args.output)
 
-        logger.info("Summarization complete. Processed %d files.",
-                    len(payload["files"]))
+        logger.info(
+            "Summarization complete. Processed %d files.", len(payload["files"])
+        )
         return 0
     except ValueError as exc:
         logger.error("Invalid input: %s", exc)

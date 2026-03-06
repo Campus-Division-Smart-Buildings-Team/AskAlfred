@@ -4,12 +4,14 @@ on:
   push:
     branches: [ main, develop ]
     paths:
-      - 'requirements.txt'
+      - 'pyproject.toml'
+      - 'poetry.lock'
       - '.github/workflows/security-scan.yml'
   pull_request:
     branches: [ main, develop ]
     paths:
-      - 'requirements.txt'
+      - 'pyproject.toml'
+      - 'poetry.lock'
   schedule:
     # Run security scans daily at 2 AM UTC
     - cron: '0 2 * * *'
@@ -19,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ['3.10', '3.11', '3.12', '3.13']
+        python-version: ['3.10', '3.11', '3.12']
     
     steps:
       - uses: actions/checkout@v4
@@ -30,37 +32,40 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: 'pip'
       
-      - name: Install dependencies
+      - name: Install Poetry
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install safety pip-audit bandit
+          python -m pip install poetry
+
+      - name: Install dependencies
+        run: |
+          poetry install --no-interaction --no-root
       
       - name: Run Safety check
         id: safety
         run: |
           echo "## 🔒 Safety Vulnerability Check" >> $GITHUB_STEP_SUMMARY
-          safety check --json > safety-report.json
-          safety check >> $GITHUB_STEP_SUMMARY
+          poetry run safety scan --target . --output json > safety-report.json
+          poetry run safety scan --target . >> $GITHUB_STEP_SUMMARY
       
       - name: Run pip-audit
         id: pip-audit
         run: |
           echo "## 📦 Pip-Audit Check" >> $GITHUB_STEP_SUMMARY
-          pip-audit --desc >> $GITHUB_STEP_SUMMARY
+          poetry run pip-audit --desc >> $GITHUB_STEP_SUMMARY
       
       - name: Run Bandit security check
         id: bandit
         run: |
           echo "## 🔐 Bandit Code Security Check" >> $GITHUB_STEP_SUMMARY
-          bandit -r . -ll -f json -o bandit-report.json
-          bandit -r . -ll >> $GITHUB_STEP_SUMMARY
+          poetry run bandit -r . -ll -f json -o bandit-report.json
+          poetry run bandit -r . -ll >> $GITHUB_STEP_SUMMARY
       
-      - name: Check requirements.txt pinning
+      - name: Check Poetry lock
         id: pinning
         run: |
-          echo "## 📌 Requirements Pinning Check" >> $GITHUB_STEP_SUMMARY
-          python scripts/security_scan.py --json
+          echo "## 📌 Poetry Lock Check" >> $GITHUB_STEP_SUMMARY
+          poetry run python scripts/security_scan.py --json
       
       - name: Upload security reports
         if: always()
@@ -105,12 +110,16 @@ jobs:
           python-version: '3.10'
           cache: 'pip'
       
+      - name: Install Poetry
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install poetry
+
       - name: Check for outdated packages
         id: outdated
         continue-on-error: true
         run: |
-          pip install pip-tools
-          pip list --outdated
+          poetry show --outdated
       
       - name: Create issue for outdated packages
         if: failure() && github.event_name == 'schedule'

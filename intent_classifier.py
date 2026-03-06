@@ -11,50 +11,58 @@ Upgrades:
 - Fast-path for high-precision patterns
 """
 
-from typing import Any, Optional, TYPE_CHECKING, Protocol, cast
+import json
+import logging
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-import logging
-import json
-import time
 from pathlib import Path
+from typing import TYPE_CHECKING, Any, Optional, Protocol, cast
+
 import numpy as np
-from query_types import QueryType
-from query_context import QueryContext
-from emojis import (EMOJI_CAUTION, EMOJI_TIME, EMOJI_TICK, EMOJI_CROSS,)
+
 from alfred_exceptions import ModelNotInitialisedError
+from config import (
+    INTENT_BUILDING_CONDITION_BIAS,
+    INTENT_BUILDING_COUNTING_BIAS,
+    INTENT_BUILDING_MAINTENANCE_BIAS,
+    INTENT_BUILDING_SEMANTIC_BIAS,
+    INTENT_BUSINESS_CONDITION_BIAS,
+    INTENT_BUSINESS_COUNTING_BIAS,
+    INTENT_BUSINESS_SEMANTIC_BIAS,
+    INTENT_CONFIDENCE_THRESHOLD,
+    INTENT_FASTPATH_MIN_CONFIDENCE,
+    INTENT_FOLLOWUP_BOOST_FACTOR,
+    INTENT_HIGHER_MIDDLE_CONFIDENCE,
+    INTENT_HIGHER_UPPER_CONFIDENCE,
+    INTENT_LOWER_MIDDLE_CONFIDENCE,
+    INTENT_LOWER_UPPER_CONFIDENCE,
+    INTENT_LOWEST_CONFIDENCE,
+    INTENT_MAX_EXAMPLE_SIMILARITY_WEIGHT,
+    INTENT_MAX_EXAMPLES_PER_INTENT,
+    INTENT_MEAN_SIMILARITY_WEIGHT,
+    INTENT_QUERY_CACHE_MAX_SIZE,
+    INTENT_SOFTMAX_TEMPERATURE,
+    LOCAL_MODEL_DIR,
+)
+from emojis import (
+    EMOJI_CAUTION,
+    EMOJI_CROSS,
+    EMOJI_TICK,
+    EMOJI_TIME,
+)
+from query_context import QueryContext
+from query_types import QueryType
 from structured_queries import (
-    is_property_condition_query,
     COUNTING_PATTERNS,
     MAINTENANCE_PATTERNS,
     RANKING_PATTERNS,
-)
-from config import (
-    INTENT_MEAN_SIMILARITY_WEIGHT,
-    INTENT_MAX_EXAMPLE_SIMILARITY_WEIGHT,
-    INTENT_SOFTMAX_TEMPERATURE,
-    INTENT_FOLLOWUP_BOOST_FACTOR,
-    INTENT_BUILDING_MAINTENANCE_BIAS,
-    INTENT_BUILDING_COUNTING_BIAS,
-    INTENT_BUILDING_CONDITION_BIAS,
-    INTENT_BUILDING_SEMANTIC_BIAS,
-    INTENT_BUSINESS_COUNTING_BIAS,
-    INTENT_BUSINESS_SEMANTIC_BIAS,
-    INTENT_BUSINESS_CONDITION_BIAS,
-    INTENT_HIGHER_UPPER_CONFIDENCE,
-    INTENT_LOWER_UPPER_CONFIDENCE,
-    INTENT_HIGHER_MIDDLE_CONFIDENCE,
-    INTENT_LOWER_MIDDLE_CONFIDENCE,
-    INTENT_LOWEST_CONFIDENCE,
-    INTENT_CONFIDENCE_THRESHOLD,
-    INTENT_QUERY_CACHE_MAX_SIZE,
-    INTENT_FASTPATH_MIN_CONFIDENCE,
-    INTENT_MAX_EXAMPLES_PER_INTENT,
-    LOCAL_MODEL_DIR
+    is_property_condition_query,
 )
 
 try:
     from hf_hub_ctranslate2 import CT2SentenceTransformer, EncoderCT2fromHfHub
+
     CT2_AVAILABLE = True
     _CT2SentenceTransformerRuntime = CT2SentenceTransformer
     _EncoderCT2Runtime = EncoderCT2fromHfHub
@@ -72,7 +80,8 @@ if TYPE_CHECKING:
 
 class _EmbeddingModel(Protocol):
     def encode(
-        self, sentences: Sequence[str], convert_to_numpy: bool = True) -> np.ndarray: ...
+        self, sentences: Sequence[str], convert_to_numpy: bool = True
+    ) -> np.ndarray: ...
 
 
 class _CT2EncoderWrapper:
@@ -81,7 +90,9 @@ class _CT2EncoderWrapper:
     def __init__(self, model):
         self._model = model
 
-    def encode(self, sentences: Sequence[str], convert_to_numpy: bool = True) -> np.ndarray:
+    def encode(
+        self, sentences: Sequence[str], convert_to_numpy: bool = True
+    ) -> np.ndarray:
         outputs = self._model.generate(text=list(sentences))
         if "pooler_output" in outputs:
             embeddings = outputs["pooler_output"]
@@ -100,6 +111,7 @@ class _CT2EncoderWrapper:
         if isinstance(embeddings, np.ndarray):
             return embeddings if convert_to_numpy else embeddings
         return np.array(embeddings)
+
 
 # ---------------------------------------------------------------------------
 # TRAINING EXAMPLES (condensed but extensible)
@@ -154,7 +166,6 @@ INTENT_EXAMPLES = {
         "derelict or unused buildings",
         "show unoccupied properties",
     ],
-
     QueryType.COUNTING: [
         "how many buildings have FRAs",
         "count maintenance requests",
@@ -196,6 +207,7 @@ class IntentClassificationResult:
 # ---------------------------------------------------------------------------
 # MAIN CLASS
 # ---------------------------------------------------------------------------
+
 
 class NLPIntentClassifier:
     # Semantic similarity weights
@@ -253,7 +265,8 @@ class NLPIntentClassifier:
                 self.logger.error("%s Model init failed: %s", EMOJI_CROSS, e)
         else:
             self.logger.warning(
-                "%s Running in pattern-only mode (no CT2 transformer).", EMOJI_CAUTION)
+                "%s Running in pattern-only mode (no CT2 transformer).", EMOJI_CAUTION
+            )
 
     # ------------------------------------------------------------------
     # INITIALISATION / CACHE
@@ -261,15 +274,15 @@ class NLPIntentClassifier:
     def _save_cache_secure(self):
         """Save embeddings without pickle - uses JSON + npz."""
         try:
-            cache_base = Path(self.cache_path).with_suffix('')
-            json_path = cache_base.with_suffix('.json')
-            npz_path = cache_base.with_suffix('.npz')
+            cache_base = Path(self.cache_path).with_suffix("")
+            json_path = cache_base.with_suffix(".json")
+            npz_path = cache_base.with_suffix(".npz")
 
             # Prepare metadata (no numpy arrays, no enums)
             metadata = {
-                'model_name': self.model_name,
-                'examples_cap': self._max_examples_per_intent,
-                'intents': {}
+                "model_name": self.model_name,
+                "examples_cap": self._max_examples_per_intent,
+                "intents": {},
             }
 
             # Prepare embeddings for npz
@@ -279,37 +292,42 @@ class NLPIntentClassifier:
                 intent_str = intent.value  # Convert enum to string
 
                 # Store metadata in JSON
-                metadata['intents'][intent_str] = {
-                    'examples': data.get('examples', [])
-                }
+                metadata["intents"][intent_str] = {"examples": data.get("examples", [])}
 
                 # Store numpy arrays in npz
-                embeddings_dict[f"{intent_str}_mean"] = data['mean']
+                embeddings_dict[f"{intent_str}_mean"] = data["mean"]
                 embeddings_dict[f"{intent_str}_mean_norm"] = np.array(
-                    data.get('mean_norm', np.linalg.norm(
-                        data['mean'])).astype(np.float32)
+                    data.get("mean_norm", np.linalg.norm(data["mean"])).astype(
+                        np.float32
+                    )
                 )
-                embeddings_dict[f"{intent_str}_embeddings"] = data['embeddings']
-                if 'embeddings_norms' in data:
-                    embeddings_dict[f"{intent_str}_embeddings_norms"] = data['embeddings_norms']
+                embeddings_dict[f"{intent_str}_embeddings"] = data["embeddings"]
+                if "embeddings_norms" in data:
+                    embeddings_dict[f"{intent_str}_embeddings_norms"] = data[
+                        "embeddings_norms"
+                    ]
 
             # Save JSON metadata
-            with open(json_path, 'w', encoding="utf-8") as f:
+            with open(json_path, "w", encoding="utf-8") as f:
                 json.dump(metadata, f, indent=2)
 
             # Save numpy embeddings (compressed)
             np.savez_compressed(npz_path, **embeddings_dict)
 
             self.logger.info(
-                "%s Cached embeddings saved securely to %s and %s", EMOJI_TICK, json_path, npz_path)
+                "%s Cached embeddings saved securely to %s and %s",
+                EMOJI_TICK,
+                json_path,
+                npz_path,
+            )
 
         except Exception as e:
             self.logger.warning("Failed to save cache: %s", e)
 
     def _load_cache_secure(self):
         """Load embeddings without pickle - uses JSON + npz."""
-        json_path = Path(self.cache_path).with_suffix('').with_suffix('.json')
-        npz_path = Path(self.cache_path).with_suffix('').with_suffix('.npz')
+        json_path = Path(self.cache_path).with_suffix("").with_suffix(".json")
+        npz_path = Path(self.cache_path).with_suffix("").with_suffix(".npz")
 
         if not (json_path.exists() and npz_path.exists()):
             return False
@@ -318,25 +336,26 @@ class NLPIntentClassifier:
             # Reset to avoid partial state if load fails.
             self.intent_embeddings = {}
             # Load metadata
-            with open(json_path, 'r', encoding="utf-8") as f:
+            with open(json_path, "r", encoding="utf-8") as f:
                 metadata = json.load(f)
 
             # Verify model compatibility
-            if metadata.get('model_name') != self.model_name:
+            if metadata.get("model_name") != self.model_name:
                 self.logger.warning("Cache model mismatch")
                 return False
-            if metadata.get('examples_cap') != self._max_examples_per_intent:
+            if metadata.get("examples_cap") != self._max_examples_per_intent:
                 self.logger.warning("Cache examples cap mismatch")
                 return False
 
             # Load embeddings
             with np.load(npz_path) as npz_data:
-                for intent_str, intent_meta in metadata['intents'].items():
+                for intent_str, intent_meta in metadata["intents"].items():
                     try:
                         intent = QueryType(intent_str)
                     except Exception as e:
                         self.logger.warning(
-                            "Unknown intent in cache: %s (error: %s)", intent_str, e)
+                            "Unknown intent in cache: %s (error: %s)", intent_str, e
+                        )
                         continue
 
                     mean_key = f"{intent_str}_mean"
@@ -358,11 +377,11 @@ class NLPIntentClassifier:
                     )
 
                     self.intent_embeddings[intent] = {
-                        'mean': npz_data[mean_key],
-                        'mean_norm': mean_norm,
-                        'examples': intent_meta['examples'],
-                        'embeddings': emb_arr,
-                        'embeddings_norms': norms_arr
+                        "mean": npz_data[mean_key],
+                        "mean_norm": mean_norm,
+                        "examples": intent_meta["examples"],
+                        "embeddings": emb_arr,
+                        "embeddings_norms": norms_arr,
                     }
 
             # Require full coverage of all known intents (strict mode).
@@ -373,29 +392,26 @@ class NLPIntentClassifier:
             # Validate dimensions
             if self.intent_embeddings:
                 for intent, data in self.intent_embeddings.items():
-                    mean = data.get('mean')
-                    emb = data.get('embeddings')
+                    mean = data.get("mean")
+                    emb = data.get("embeddings")
                     if mean is None or emb is None:
-                        self.logger.warning(
-                            "Cache missing arrays for %s", intent)
+                        self.logger.warning("Cache missing arrays for %s", intent)
                         return False
                     if mean.ndim != 1 or emb.ndim != 2:
-                        self.logger.warning(
-                            "Cache shape invalid for %s", intent)
+                        self.logger.warning("Cache shape invalid for %s", intent)
                         return False
                     if emb.shape[1] != mean.shape[0]:
-                        self.logger.warning(
-                            "Cache dimension mismatch for %s", intent)
+                        self.logger.warning("Cache dimension mismatch for %s", intent)
                         return False
-                    norms = data.get('embeddings_norms')
+                    norms = data.get("embeddings_norms")
                     if norms is not None:
                         if norms.ndim != 1 or norms.shape[0] != emb.shape[0]:
                             self.logger.warning(
-                                "Cache norms shape invalid for %s", intent)
+                                "Cache norms shape invalid for %s", intent
+                            )
                             return False
 
-            self.logger.info(
-                "%s Loaded cached intent embeddings securely", EMOJI_TICK)
+            self.logger.info("%s Loaded cached intent embeddings securely", EMOJI_TICK)
             return True
 
         except Exception as e:
@@ -411,8 +427,7 @@ class NLPIntentClassifier:
         if LOCAL_MODEL_DIR.exists():
             t0 = time.time()
             try:
-                self.logger.info(
-                    "Loading local model from %s", LOCAL_MODEL_DIR)
+                self.logger.info("Loading local model from %s", LOCAL_MODEL_DIR)
                 if _EncoderCT2Runtime is None:
                     raise RuntimeError("EncoderCT2fromHfHub not available")
                 ct2 = _EncoderCT2Runtime(
@@ -422,7 +437,9 @@ class NLPIntentClassifier:
                 )
                 self.model = cast(_EmbeddingModel, _CT2EncoderWrapper(ct2))
                 self.logger.info(
-                    "%s Loaded CT2 encoder model in %.2f s", EMOJI_TIME, time.time() - t0
+                    "%s Loaded CT2 encoder model in %.2f s",
+                    EMOJI_TIME,
+                    time.time() - t0,
                 )
                 model_loaded = True
             except Exception as e:
@@ -466,7 +483,8 @@ class NLPIntentClassifier:
 
         if cache_loaded and not self.intent_embeddings:
             self.logger.warning(
-                "Cache loaded but no intent embeddings present; regenerating.")
+                "Cache loaded but no intent embeddings present; regenerating."
+            )
             cache_loaded = False
 
         if cache_loaded:
@@ -505,10 +523,12 @@ class NLPIntentClassifier:
         self.logger.info("Generating new intent embeddings...")
         model = self.model
         for intent, examples in INTENT_EXAMPLES.items():
-            if self._max_examples_per_intent and len(examples) > self._max_examples_per_intent:
+            if (
+                self._max_examples_per_intent
+                and len(examples) > self._max_examples_per_intent
+            ):
                 examples = examples[: self._max_examples_per_intent]
-            vecs = model.encode(
-                examples, convert_to_numpy=True).astype(np.float32)
+            vecs = model.encode(examples, convert_to_numpy=True).astype(np.float32)
             mean_vec = np.mean(vecs, axis=0)
             self.intent_embeddings[intent] = {
                 "mean": mean_vec,
@@ -518,7 +538,10 @@ class NLPIntentClassifier:
                 "embeddings_norms": np.linalg.norm(vecs, axis=1).astype(np.float32),
             }
         self.logger.info(
-            "%s Generated embeddings for %s intents", EMOJI_TICK, len(self.intent_embeddings))
+            "%s Generated embeddings for %s intents",
+            EMOJI_TICK,
+            len(self.intent_embeddings),
+        )
 
     def _get_query_embedding_cached(self, query: str) -> np.ndarray:
         """Instance-level cache for query embeddings"""
@@ -527,10 +550,10 @@ class NLPIntentClassifier:
 
         if self.model is None:
             raise ModelNotInitialisedError(
-                "CT2SentenceTransformer model not initialised")
+                "CT2SentenceTransformer model not initialised"
+            )
         if not self.intent_embeddings:
-            raise ModelNotInitialisedError(
-                "Intent embeddings not initialised")
+            raise ModelNotInitialisedError("Intent embeddings not initialised")
 
         model = self.model
         emb = model.encode([query], convert_to_numpy=True)[0]
@@ -547,7 +570,9 @@ class NLPIntentClassifier:
     # INTENT CLASSIFICATION
     # ------------------------------------------------------------------
 
-    def classify_intent(self, query: str, context: Optional["QueryContext"] = None) -> "IntentClassificationResult":
+    def classify_intent(
+        self, query: str, context: Optional["QueryContext"] = None
+    ) -> "IntentClassificationResult":
         """
         Classify intent using semantic embeddings when available, with pattern fallback.
         Ensures all returned results have a confidence distribution so context bias
@@ -561,7 +586,8 @@ class NLPIntentClassifier:
             """
             if not getattr(result, "confidence_scores", None):
                 result.confidence_scores = self._peaked_scores(
-                    result.intent, result.confidence)
+                    result.intent, result.confidence
+                )
 
         q = (query or "").strip()
         if not q:
@@ -602,7 +628,9 @@ class NLPIntentClassifier:
             except Exception as e:
                 # Any semantic failure -> fallback
                 self.logger.warning(
-                    "Semantic intent classification failed; using pattern fallback: %s", e)
+                    "Semantic intent classification failed; using pattern fallback: %s",
+                    e,
+                )
 
         # -----------------------------
         # 2) Pattern fallback
@@ -619,14 +647,16 @@ class NLPIntentClassifier:
     # SEMANTIC CLASSIFICATION
     # ------------------------------------------------------------------
 
-    def _semantic_intent(self, query: str, emb: Optional[np.ndarray] = None) -> IntentClassificationResult:
+    def _semantic_intent(
+        self, query: str, emb: Optional[np.ndarray] = None
+    ) -> IntentClassificationResult:
         """Returns calibrated probabilities using softmax"""
         if self.model is None:
             raise ModelNotInitialisedError(
-                "CT2SentenceTransformer model not initialised")
+                "CT2SentenceTransformer model not initialised"
+            )
         if not self.intent_embeddings:
-            raise ModelNotInitialisedError(
-                "Intent embeddings not initialised")
+            raise ModelNotInitialisedError("Intent embeddings not initialised")
 
         if emb is None:
             emb = self._get_query_embedding_cached(query)
@@ -669,16 +699,19 @@ class NLPIntentClassifier:
             metadata={"model": self.model_name},
         )
 
-    def classify_intents_batch(self, queries: list[str], contexts: Optional[list["QueryContext"]] = None):
+    def classify_intents_batch(
+        self, queries: list[str], contexts: Optional[list["QueryContext"]] = None
+    ):
         """Classify multiple queries efficiently using batch encoding"""
         if not queries:
             return []
 
         if self.model is None:
             # Fallback to individual pattern matching
-            return [self.classify_intent(q, ctx) for q, ctx in zip(
-                queries, contexts or [None] * len(queries)
-            )]
+            return [
+                self.classify_intent(q, ctx)
+                for q, ctx in zip(queries, contexts or [None] * len(queries))
+            ]
 
         try:
             # Check which queries are already cached
@@ -697,7 +730,8 @@ class NLPIntentClassifier:
             # Batch encode only uncached queries
             if uncached_queries:
                 fresh_embeddings = self.model.encode(
-                    uncached_queries, convert_to_numpy=True)
+                    uncached_queries, convert_to_numpy=True
+                )
                 for idx, emb in zip(uncached_indices, fresh_embeddings):
                     embeddings[idx] = emb
                     # Add to cache
@@ -707,10 +741,12 @@ class NLPIntentClassifier:
 
         except Exception as e:
             self.logger.warning(
-                "Batch encoding failed: %s, falling back to individual", e)
-            return [self.classify_intent(q, ctx) for q, ctx in zip(
-                queries, contexts or [None] * len(queries)
-            )]
+                "Batch encoding failed: %s, falling back to individual", e
+            )
+            return [
+                self.classify_intent(q, ctx)
+                for q, ctx in zip(queries, contexts or [None] * len(queries))
+            ]
 
         results = []
         for i, (query, emb) in enumerate(zip(queries, embeddings)):
@@ -749,15 +785,13 @@ class NLPIntentClassifier:
             try:
                 return QueryType(s)
             except (ValueError, KeyError) as e:
-                self.logger.debug(
-                    "Failed to match QueryType by value '%s': %s", s, e)
+                self.logger.debug("Failed to match QueryType by value '%s': %s", s, e)
 
             # 2) Match enum NAME: "SEMANTIC_SEARCH"
             try:
                 return QueryType[s]
             except (ValueError, KeyError) as e:
-                self.logger.debug(
-                    "Failed to match QueryType by name '%s': %s", s, e)
+                self.logger.debug("Failed to match QueryType by name '%s': %s", s, e)
                 return None
 
         # Unknown type
@@ -793,7 +827,8 @@ class NLPIntentClassifier:
             # Defensive: create a minimal distribution if upstream forgot.
             # (Prefer enforcing this invariant in classify_intent().)
             result.confidence_scores = self._peaked_scores(
-                result.intent, result.confidence)
+                result.intent, result.confidence
+            )
 
         scores = result.confidence_scores.copy()
 
@@ -811,7 +846,9 @@ class NLPIntentClassifier:
         first_token = tokens[0] if tokens else ""
         is_followup_query = (
             q_lower in {"and", "also", "what about", "tell me more", "more"}
-            or q_lower.startswith(("and ", "also ", "what about ", "any more", "more about", "more on"))
+            or q_lower.startswith(
+                ("and ", "also ", "what about ", "any more", "more about", "more on")
+            )
             or q_lower.endswith((" too", " as well"))
             or first_token in {"it", "this", "that", "those", "them", "these"}
         )
@@ -822,8 +859,14 @@ class NLPIntentClassifier:
         #   - Otherwise: tiny nudge SEMANTIC_SEARCH (buildings are common in doc retrieval)
         # -----------------------------------------------------
         if getattr(context, "building", None):
-            maint_tokens = ("maintenance", "ppm", "request",
-                            "job", "work order", "ticket")
+            maint_tokens = (
+                "maintenance",
+                "ppm",
+                "request",
+                "job",
+                "work order",
+                "ticket",
+            )
             if any(t in q_lower for t in maint_tokens):
                 bias[QueryType.MAINTENANCE] += self.BUILDING_MAINTENANCE_BIAS
             else:
@@ -834,8 +877,9 @@ class NLPIntentClassifier:
         #   - FRA: if counting language present, nudge COUNTING else SEMANTIC_SEARCH
         #   - Property condition: nudge PROPERTY_CONDITION
         # -----------------------------------------------------
-        is_counting_language = any(p in q_lower for p in (
-            "how many", "count", "number of", "total"))
+        is_counting_language = any(
+            p in q_lower for p in ("how many", "count", "number of", "total")
+        )
 
         try:
             has_bt = getattr(context, "has_business_term", None)
@@ -850,8 +894,7 @@ class NLPIntentClassifier:
                     bias[QueryType.PROPERTY_CONDITION] += self.BUILDING_CONDITION_BIAS
         except Exception as e:
             # Don't fail the request if a context accessor changes
-            self.logger.debug(
-                "Business-term bias skipped: %r", e, exc_info=True)
+            self.logger.debug("Business-term bias skipped: %r", e, exc_info=True)
 
         # -----------------------------------------------------
         # 3) Memory-based bias: previous_intent continuity on follow-ups
@@ -861,14 +904,15 @@ class NLPIntentClassifier:
 
         if is_followup_query:
             prev_qt = self._coerce_to_query_type(
-                getattr(context, "previous_intent", None))
+                getattr(context, "previous_intent", None)
+            )
             prev_conf = getattr(context, "previous_intent_confidence", None)
-            prev_conf_f = float(prev_conf) if isinstance(
-                prev_conf, (int, float)) else 0.6
+            prev_conf_f = (
+                float(prev_conf) if isinstance(prev_conf, (int, float)) else 0.6
+            )
 
             if prev_qt is not None and prev_qt in bias:
-                boost = self.FOLLOWUP_BOOST_FACTOR * \
-                    max(0.0, min(prev_conf_f, 1.0))
+                boost = self.FOLLOWUP_BOOST_FACTOR * max(0.0, min(prev_conf_f, 1.0))
                 bias[prev_qt] += boost
                 result.metadata["prev_intent_bias"] = {
                     "intent_raw": getattr(context, "previous_intent", None),
@@ -895,9 +939,13 @@ class NLPIntentClassifier:
                         if is_counting_language:
                             bias[QueryType.COUNTING] += self.BUSINESS_COUNTING_BIAS
                         else:
-                            bias[QueryType.SEMANTIC_SEARCH] += self.BUSINESS_SEMANTIC_BIAS
+                            bias[
+                                QueryType.SEMANTIC_SEARCH
+                            ] += self.BUSINESS_SEMANTIC_BIAS
                     elif ttype == "property_condition":
-                        bias[QueryType.PROPERTY_CONDITION] += self.BUSINESS_CONDITION_BIAS
+                        bias[
+                            QueryType.PROPERTY_CONDITION
+                        ] += self.BUSINESS_CONDITION_BIAS
 
         # -----------------------------------------------------
         # 5) Apply additive bias -> renormalise -> update result
@@ -913,7 +961,8 @@ class NLPIntentClassifier:
         result.intent = max(scores, key=lambda k: scores[k])
         result.confidence = scores[result.intent]
         result.metadata["context_bias"] = {
-            getattr(k, "value", str(k)): v for k, v in bias.items()}
+            getattr(k, "value", str(k)): v for k, v in bias.items()
+        }
 
         return result
 
@@ -936,8 +985,7 @@ class NLPIntentClassifier:
         n_others = len(intents) - 1
         base = (1.0 - chosen_prob) / n_others if n_others > 0 else 0.0
 
-        return {intent: chosen_prob if intent == chosen else base
-                for intent in intents}
+        return {intent: chosen_prob if intent == chosen else base for intent in intents}
 
     def _pattern_fallback(self, query: str) -> IntentClassificationResult:
         """Regex/keyword based fallback."""
@@ -994,7 +1042,7 @@ class NLPIntentClassifier:
 
     @staticmethod
     def _cosine(v1: np.ndarray, v2: np.ndarray) -> float:
-        denom = (np.linalg.norm(v1) * np.linalg.norm(v2))
+        denom = np.linalg.norm(v1) * np.linalg.norm(v2)
         if denom == 0:
             return 0.0
         return float(np.dot(v1, v2) / denom)

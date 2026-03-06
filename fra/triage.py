@@ -6,27 +6,29 @@ Provides decision support through structured prioritisation, NOT automated decis
 """
 
 import logging
-from typing import Any, Optional
-from datetime import datetime, timezone
 from dataclasses import dataclass, field
-from date_utils import parse_iso_date
+from datetime import datetime, timezone
+from typing import Any, Optional
+
 from config import (
-    FRA_LONG_OVERDUE_DAYS,
     FRA_CRITICAL_OVERDUE_DAYS,
     FRA_EXTREME_OVERDUE_DAYS,
+    FRA_LONG_OVERDUE_DAYS,
     FRA_MAX_DAYS_SANITY,
-    FRA_RISK_BASE_SCORES,
+    FRA_NO_JOB_REF_MIN_RISK_LEVEL,
     FRA_OVERDUE_DIVISOR_DAYS,
     FRA_OVERDUE_MULTIPLIER_CAP,
-    NO_JOB_REF_SCORE_MULTIPLIER,
-    FRA_NO_JOB_REF_MIN_RISK_LEVEL,
-    FRA_RISK_SCORE_MAX,
     FRA_PRIORITY_HIGH_RISK_LEVEL,
     FRA_PRIORITY_MEDIUM_RISK_LEVEL,
+    FRA_RISK_BASE_SCORES,
+    FRA_RISK_SCORE_MAX,
+    NO_JOB_REF_SCORE_MULTIPLIER,
     RISK_LEVEL_MAP,
 )
-from .types import RiskItem, EnrichedRiskItem
+from date_utils import parse_iso_date
+
 from .enrichment import FRAEnricher
+from .types import EnrichedRiskItem, RiskItem
 
 
 @dataclass
@@ -45,9 +47,7 @@ class TriageConfig:
     risk_score_max: int = FRA_RISK_SCORE_MAX
     priority_high_risk_level: int = FRA_PRIORITY_HIGH_RISK_LEVEL
     priority_medium_risk_level: int = FRA_PRIORITY_MEDIUM_RISK_LEVEL
-    risk_level_map: dict[str, str] = field(
-        default_factory=lambda: dict(RISK_LEVEL_MAP)
-    )
+    risk_level_map: dict[str, str] = field(default_factory=lambda: dict(RISK_LEVEL_MAP))
 
 
 class FRATriageComputer:
@@ -61,29 +61,65 @@ class FRATriageComputer:
     # Risk category keywords
     CATEGORY_KEYWORDS = {
         "structural": [
-            "door", "compartment", "wall", "ceiling", "staircase",
-            "floor", "construction", "fire-resisting", "partition"
+            "door",
+            "compartment",
+            "wall",
+            "ceiling",
+            "staircase",
+            "floor",
+            "construction",
+            "fire-resisting",
+            "partition",
         ],
         "electrical": [
-            "electrical", "wiring", "distribution board", "pat",
-            "cable", "socket", "lighting", "power"
+            "electrical",
+            "wiring",
+            "distribution board",
+            "pat",
+            "cable",
+            "socket",
+            "lighting",
+            "power",
         ],
         "escape_routes": [
-            "escape", "exit", "signage", "travel distance", "corridor",
-            "evacuation", "assembly point", "means of escape"
+            "escape",
+            "exit",
+            "signage",
+            "travel distance",
+            "corridor",
+            "evacuation",
+            "assembly point",
+            "means of escape",
         ],
         "detection_systems": [
-            "alarm", "detection", "emergency lighting", "suppression",
-            "extinguisher", "fire fighting", "ansul", "sprinkler"
+            "alarm",
+            "detection",
+            "emergency lighting",
+            "suppression",
+            "extinguisher",
+            "fire fighting",
+            "ansul",
+            "sprinkler",
         ],
         "housekeeping": [
-            "storage", "combustible", "housekeeping", "fire load",
-            "waste", "clutter", "accumulation"
+            "storage",
+            "combustible",
+            "housekeeping",
+            "fire load",
+            "waste",
+            "clutter",
+            "accumulation",
         ],
         "procedural": [
-            "training", "policy", "peep", "drill", "procedure",
-            "evacuation plan", "fire warden", "management"
-        ]
+            "training",
+            "policy",
+            "peep",
+            "drill",
+            "procedure",
+            "evacuation plan",
+            "fire warden",
+            "management",
+        ],
     }
 
     def __init__(
@@ -122,16 +158,14 @@ class FRATriageComputer:
         today = datetime.now(timezone.utc).date()
 
         # Parse dates
-        assessment_date = parse_iso_date(
-            risk_item.get("fra_assessment_date"))
-        expected_date = parse_iso_date(
-            risk_item.get("expected_completion_date"))
-        completion_date = parse_iso_date(
-            risk_item.get("actual_completion_date"))
+        assessment_date = parse_iso_date(risk_item.get("fra_assessment_date"))
+        expected_date = parse_iso_date(risk_item.get("expected_completion_date"))
+        completion_date = parse_iso_date(risk_item.get("actual_completion_date"))
 
         # Compute time-based metrics
         days_since_assessment = (
-            today - assessment_date).days if assessment_date else None
+            (today - assessment_date).days if assessment_date else None
+        )
 
         days_until_due = None
         days_overdue = None
@@ -200,7 +234,10 @@ class FRATriageComputer:
             )
 
         # Extreme value checks (likely data quality issues)
-        if days_since_assessment is not None and days_since_assessment > self.config.max_days_sanity:
+        if (
+            days_since_assessment is not None
+            and days_since_assessment > self.config.max_days_sanity
+        ):
             data_quality_issues.append("days_since_assessment_extreme")
             self.logger.warning(
                 "DATA QUALITY: %s - days_since_assessment extreme: %s",
@@ -239,24 +276,20 @@ class FRATriageComputer:
 
         flag_overdue = days_overdue is not None and days_overdue > 0 and not is_complete
 
-        flag_high_risk_no_job = (
-            risk_level >= 4 and
-            not has_job_ref and
-            not is_complete
-        )
+        flag_high_risk_no_job = risk_level >= 4 and not has_job_ref and not is_complete
 
         flag_intolerable = risk_level == 5 and not is_complete
 
         flag_long_overdue = (
-            flag_overdue and
-            days_overdue is not None and
-            days_overdue > self.config.long_overdue_days
+            flag_overdue
+            and days_overdue is not None
+            and days_overdue > self.config.long_overdue_days
         )
 
         flag_critical_overdue = (
-            flag_overdue and
-            days_overdue is not None and
-            days_overdue > self.config.critical_overdue_days
+            flag_overdue
+            and days_overdue is not None
+            and days_overdue > self.config.critical_overdue_days
         )
 
         # ====================================================================
@@ -268,24 +301,22 @@ class FRATriageComputer:
         # 2. High risk (level 4+) with no job ref AND overdue
         # 3. Any risk overdue > 180 days
         requires_immediate_action = (
-            flag_intolerable or
-            (risk_level >= 4 and not has_job_ref and flag_overdue) or
-            flag_critical_overdue
+            flag_intolerable
+            or (risk_level >= 4 and not has_job_ref and flag_overdue)
+            or flag_critical_overdue
         )
 
         # Requires attention (lower urgency)
         requires_attention = (
-            (risk_level >= 3 and flag_overdue and not requires_immediate_action) or
-            flag_high_risk_no_job
-        )
+            risk_level >= 3 and flag_overdue and not requires_immediate_action
+        ) or flag_high_risk_no_job
 
         # ====================================================================
         # CATEGORISATION
         # ====================================================================
 
         risk_category = self._categorise_risk(
-            risk_item.get("issue_description"),
-            risk_item.get("proposed_solution")
+            risk_item.get("issue_description"), risk_item.get("proposed_solution")
         )
 
         # ====================================================================
@@ -297,7 +328,7 @@ class FRATriageComputer:
             risk_level=risk_level,
             days_overdue=days_overdue,
             has_job_ref=has_job_ref,
-            is_complete=is_complete
+            is_complete=is_complete,
         )
 
         # ====================================================================
@@ -310,49 +341,44 @@ class FRATriageComputer:
             "days_since_assessment": days_since_assessment,
             "days_until_due": days_until_due,
             "days_overdue": days_overdue,
-
             # Base metadata
             **base_fields,
-
             # Primary flags
             "flag_overdue": flag_overdue,
             "flag_high_risk_no_job": flag_high_risk_no_job,
             "flag_intolerable": flag_intolerable,
             "flag_long_overdue": flag_long_overdue,
             "flag_critical_overdue": flag_critical_overdue,
-
             # Unprefixed aliases for reporting compatibility
             "overdue": flag_overdue,
             "high_risk_no_job": flag_high_risk_no_job,
             "intolerable": flag_intolerable,
             "long_overdue": flag_long_overdue,
             "critical_overdue": flag_critical_overdue,
-
             # Composite flags
             "requires_immediate_action": requires_immediate_action,
             "requires_attention": requires_attention,
-
             # Categorisation
             "risk_category": risk_category,
-
             # Ranking
             "risk_score": risk_score,
-
             # Data quality
             "flag_data_quality_issue": bool(data_quality_issues),
             "data_quality_issues": data_quality_issues,
-
             # Current status (computed in triage)
             "completion_status": completion_status,
         }
 
         # Log high-priority items
         if requires_immediate_action and self.verbose:
-            job_ref_text = "No job ref" if not has_job_ref else f"Job: {enriched_item['job_reference']}"
-            risk_level_text = (
-                enriched_item.get("risk_level_text")
-                or self.config.risk_level_map.get(str(risk_level), "Unknown")
+            job_ref_text = (
+                "No job ref"
+                if not has_job_ref
+                else f"Job: {enriched_item['job_reference']}"
             )
+            risk_level_text = enriched_item.get(
+                "risk_level_text"
+            ) or self.config.risk_level_map.get(str(risk_level), "Unknown")
             self.logger.warning(
                 "🚨 IMMEDIATE ACTION REQUIRED: %s Item #%s - %s (%s)",
                 enriched_item["canonical_building_name"],
@@ -397,7 +423,7 @@ class FRATriageComputer:
         risk_level: int,
         days_overdue: Optional[int],
         has_job_ref: bool,
-        is_complete: bool
+        is_complete: bool,
     ) -> int:
         """
         Compute numeric risk score (0-100) for ranking.
@@ -419,9 +445,10 @@ class FRATriageComputer:
 
         # Overdue multiplier (up to 1.5x)
         if days_overdue:
-            multiplier = 1.0 + \
-                min(days_overdue / self.config.overdue_divisor_days,
-                    self.config.overdue_multiplier_cap)
+            multiplier = 1.0 + min(
+                days_overdue / self.config.overdue_divisor_days,
+                self.config.overdue_multiplier_cap,
+            )
             score *= multiplier
 
         # No job penalty (10% reduction to priority)
@@ -464,7 +491,7 @@ class FRATriageComputer:
             "HIGH": "🔴",
             "MEDIUM": "🟡",
             "LOW": "🟢",
-            "COMPLETE": "✅"
+            "COMPLETE": "✅",
         }
 
         return emoji_map.get(label, "⚪")
@@ -477,9 +504,7 @@ class FRATriageReporter:
         self.logger = logging.getLogger(__name__)
 
     def generate_building_summary(
-        self,
-        building_name: str,
-        risk_items: list[EnrichedRiskItem]
+        self, building_name: str, risk_items: list[EnrichedRiskItem]
     ) -> dict[str, Any]:
         """
         Generate summary statistics for a building.
@@ -495,39 +520,30 @@ class FRATriageReporter:
             return {
                 "building": building_name,
                 "total_items": 0,
-                "error": "No risk items found"
+                "error": "No risk items found",
             }
 
         # Filter to current items only
-        current_items = [
-            item for item in risk_items
-            if item.get("is_current", True)
-        ]
+        current_items = [item for item in risk_items if item.get("is_current", True)]
 
         summary = {
             "building": building_name,
             "total_items": len(current_items),
-            "assessment_date": current_items[0].get("fra_assessment_date") if current_items else None,
-
+            "assessment_date": (
+                current_items[0].get("fra_assessment_date") if current_items else None
+            ),
             # By status
-            "by_status": {
-                "complete": 0,
-                "open": 0,
-                "overdue": 0
-            },
-
+            "by_status": {"complete": 0, "open": 0, "overdue": 0},
             # By risk level
             "by_risk_level": {
                 1: 0,  # Trivial
                 2: 0,  # Tolerable
                 3: 0,  # Moderate
                 4: 0,  # Substantial
-                5: 0   # Intolerable
+                5: 0,  # Intolerable
             },
-
             # By category
             "by_category": {},
-
             # Flags
             "flags": {
                 "overdue": 0,
@@ -538,7 +554,6 @@ class FRATriageReporter:
                 "requires_immediate_action": 0,
                 "requires_attention": 0,
             },
-
             # Risk score stats
             "risk_score_avg": 0,
             "risk_score_max": 0,
@@ -550,8 +565,7 @@ class FRATriageReporter:
         for item in current_items:
             # Status
             status = item["completion_status"]
-            summary["by_status"][status] = summary["by_status"].get(
-                status, 0) + 1
+            summary["by_status"][status] = summary["by_status"].get(status, 0) + 1
 
             # Risk level
             level = item["risk_level"]
@@ -559,8 +573,9 @@ class FRATriageReporter:
 
             # Category
             category = item.get("risk_category", "other")
-            summary["by_category"][category] = summary["by_category"].get(
-                category, 0) + 1
+            summary["by_category"][category] = (
+                summary["by_category"].get(category, 0) + 1
+            )
 
             # Flags
             for flag in summary["flags"]:
@@ -615,9 +630,7 @@ Top Categories:
 
         # Sort categories by count
         sorted_categories = sorted(
-            summary['by_category'].items(),
-            key=lambda x: x[1],
-            reverse=True
+            summary["by_category"].items(), key=lambda x: x[1], reverse=True
         )
 
         for category, count in sorted_categories[:5]:

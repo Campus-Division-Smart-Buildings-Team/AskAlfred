@@ -3,18 +3,12 @@ FRA package exports.
 """
 
 from .doc_metadata import extract_assessment_date, extract_fra_metadata
+from .enrichment import FRAEnricher
 from .integration import (
     _fra_partition_key,
     deduplicate_risk_items,
     mark_superseded_risk_items,
     restore_superseded_items,
-)
-from .types import (
-    CompletionStatus,
-    EnrichedRiskItem,
-    FraVectorExtractResult,
-    ParsedRowData,
-    RiskItem,
 )
 from .parser import (
     FRAActionPlanParser,
@@ -23,7 +17,13 @@ from .parser import (
     sanitise_risk_item_for_metadata,
 )
 from .triage import FRATriageComputer, TriageConfig
-from .enrichment import FRAEnricher
+from .types import (
+    CompletionStatus,
+    EnrichedRiskItem,
+    FraVectorExtractResult,
+    ParsedRowData,
+    RiskItem,
+)
 
 __all__ = [
     "CompletionStatus",

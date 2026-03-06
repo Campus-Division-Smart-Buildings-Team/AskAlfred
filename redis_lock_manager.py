@@ -1,19 +1,21 @@
 import logging
-import uuid
+import random
 import time
+import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass
 from threading import Event, Thread
 from typing import Any, Optional, Protocol
-import random
+
 from redis import Redis
+
 from alfred_exceptions import DeadlockError
 from config import (
     FRA_LOCK_ACQUIRE_SECONDS,
-    REDIS_LOCK_KEY_PREFIX,
     REDIS_LOCK_DEFAULT_TTL_MS,
-    REDIS_LOCK_RETRY_INTERVAL_S,
     REDIS_LOCK_JITTER_S,
+    REDIS_LOCK_KEY_PREFIX,
+    REDIS_LOCK_RETRY_INTERVAL_S,
 )
 
 
@@ -47,6 +49,7 @@ class RedisLock:
     """
     A distributed lock handle. Only the holder with the correct token can release/renew.
     """
+
     key: str
     token: str
     ttl_ms: int
@@ -59,12 +62,12 @@ class RedisLock:
         """Extend TTL if we still own the lock."""
         ttl = int(ttl_ms or self.ttl_ms)
         try:
-            res = self._renew_script(keys=[self.key], args=[
-                                     self.token, str(ttl)])
+            res = self._renew_script(keys=[self.key], args=[self.token, str(ttl)])
             ok = bool(res)
             if not ok:
                 self._logger.warning(
-                    "Redis lock renew failed (not owner?): %s", self.key)
+                    "Redis lock renew failed (not owner?): %s", self.key
+                )
             return ok
         except Exception:
             self._logger.exception("Redis lock renew error: %s", self.key)
@@ -77,7 +80,8 @@ class RedisLock:
             ok = bool(res)
             if not ok:
                 self._logger.warning(
-                    "Redis lock release failed (not owner?): %s", self.key)
+                    "Redis lock release failed (not owner?): %s", self.key
+                )
             return ok
         except Exception:
             self._logger.exception("Redis lock release error: %s", self.key)
@@ -108,8 +112,7 @@ class RedisLockManager:
         metrics: Optional["MetricsRecorder"] = None,
     ) -> None:
         if client is None:
-            raise RuntimeError(
-                "redis client not provided")
+            raise RuntimeError("redis client not provided")
 
         self._client = client
         self._key_prefix = key_prefix.rstrip(":")
@@ -144,7 +147,8 @@ class RedisLockManager:
                             lk.key,
                         )
                         self._logger.critical(
-                            "LOCK LOST: %s - operations may be unsafe!", lk.key)
+                            "LOCK LOST: %s - operations may be unsafe!", lk.key
+                        )
                         if lock_lost_event is not None:
                             lock_lost_event.set()
                         stop_event.set()
@@ -176,18 +180,21 @@ class RedisLockManager:
             except Exception as e:
                 # Treat Redis failures as "can't lock" rather than silently proceeding
                 raise DeadlockError(
-                    f"Redis lock acquire failed for {building}: {e}") from e
+                    f"Redis lock acquire failed for {building}: {e}"
+                ) from e
 
             if ok:
                 elapsed = time.monotonic() - start
                 if self._metrics is not None:
                     self._metrics.increment("fra_lock_acquire_total")
                     self._metrics.increment(
-                        "fra_lock_acquire_attempts_total", attempts + 1)
+                        "fra_lock_acquire_attempts_total", attempts + 1
+                    )
                     if attempts > 0:
                         self._metrics.increment("fra_lock_contended_total")
                     self._metrics.observe_timing(
-                        "fra_lock_acquire_wait_seconds", elapsed)
+                        "fra_lock_acquire_wait_seconds", elapsed
+                    )
                 return RedisLock(
                     key=key,
                     token=token,
@@ -205,8 +212,7 @@ class RedisLockManager:
                 )
 
             attempts += 1
-            time.sleep(self._retry_interval_s +
-                       random.random() * self._jitter_s)
+            time.sleep(self._retry_interval_s + random.random() * self._jitter_s)
 
     def release(self, lock: RedisLock) -> bool:
         return lock.release()
@@ -236,8 +242,7 @@ class RedisLockManager:
                 self._lock = manager.acquire(building, ttl_ms=ttl_ms)
                 if auto_renew and self._lock is not None:
                     ttl = int(renew_ttl_ms or self._lock.ttl_ms)
-                    interval = float(renew_interval_s or max(
-                        1.0, (ttl / 1000.0) / 3.0))
+                    interval = float(renew_interval_s or max(1.0, (ttl / 1000.0) / 3.0))
                     self._stop = manager._start_auto_renewer(
                         [self._lock],
                         ttl_ms=ttl,
@@ -290,8 +295,7 @@ class RedisLockManager:
 
                 if auto_renew and self._locks:
                     ttl = int(renew_ttl_ms or self._locks[0].ttl_ms)
-                    interval = float(renew_interval_s or max(
-                        1.0, (ttl / 1000.0) / 3.0))
+                    interval = float(renew_interval_s or max(1.0, (ttl / 1000.0) / 3.0))
                     self._stop = manager._start_auto_renewer(
                         self._locks,
                         ttl_ms=ttl,
@@ -321,13 +325,11 @@ class DryRunRedisLockManager:
 
         class _Ctx:
             def __enter__(self) -> None:
-                manager._logger.info(
-                    "[DRY-RUN] Would acquire lock for %s", building)
+                manager._logger.info("[DRY-RUN] Would acquire lock for %s", building)
                 return None
 
             def __exit__(self, exc_type, exc, tb) -> None:
-                manager._logger.info(
-                    "[DRY-RUN] Would release lock for %s", building)
+                manager._logger.info("[DRY-RUN] Would release lock for %s", building)
 
         return _Ctx()
 
@@ -338,11 +340,13 @@ class DryRunRedisLockManager:
         class _Ctx:
             def __enter__(self) -> list[None]:
                 manager._logger.info(
-                    "[DRY-RUN] Would acquire locks for %d buildings", len(bldgs))
+                    "[DRY-RUN] Would acquire locks for %d buildings", len(bldgs)
+                )
                 return [None for _ in bldgs]
 
             def __exit__(self, exc_type, exc, tb) -> None:
                 manager._logger.info(
-                    "[DRY-RUN] Would release locks for %d buildings", len(bldgs))
+                    "[DRY-RUN] Would release locks for %d buildings", len(bldgs)
+                )
 
         return _Ctx()

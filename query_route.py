@@ -13,7 +13,7 @@ from typing import Any
 
 @dataclass
 class QueryRoute:
-    handler: Any                           # Instance of a handler
+    handler: Any  # Instance of a handler
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):

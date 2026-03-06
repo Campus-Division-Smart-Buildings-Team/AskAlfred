@@ -12,9 +12,10 @@ It is passed through:
 Preprocessors enrich this object; handlers consume it.
 """
 
-from typing import Any, Optional
-from dataclasses import dataclass, field
 import time
+from dataclasses import dataclass, field
+from typing import Any, Optional
+
 from query_types import QueryType
 
 

@@ -1,4 +1,5 @@
 """Tests for the _parse_row_content method of FRAActionPlanParser, focusing on date extraction logic."""
+
 from __future__ import annotations
 
 import importlib.util

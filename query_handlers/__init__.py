@@ -23,10 +23,10 @@ Available Handlers:
 Example Usage:
     from query_handlers import ConversationalHandler
     from query_manager import QueryContext, QueryResult
-    
+
     handler = ConversationalHandler()
     context = QueryContext(query="Hello Alfred")
-    
+
     if handler.can_handle(context):
         result = handler.handle(context)
         print(result.answer)
@@ -40,39 +40,34 @@ Adding a New Handler:
 """
 
 # Base classes
-from query_handlers.base_handler import (
-    BaseQueryHandler,
-    PatternBasedHandler
-)
+from query_handlers.base_handler import BaseQueryHandler, PatternBasedHandler
 
 # Concrete handlers
 from query_handlers.conversational_handler import ConversationalHandler
-from query_handlers.maintenance_handler import MaintenanceHandler
-from query_handlers.ranking_handler import RankingHandler
-from query_handlers.property_handler import PropertyHandler
 from query_handlers.counting_handler import CountingHandler
+from query_handlers.maintenance_handler import MaintenanceHandler
+from query_handlers.property_handler import PropertyHandler
+from query_handlers.ranking_handler import RankingHandler
 from query_handlers.semantic_search_handler import SemanticSearchHandler
-
 
 # Public API
 __all__ = [
     # Base classes
-    'BaseQueryHandler',
-    'PatternBasedHandler',
-
+    "BaseQueryHandler",
+    "PatternBasedHandler",
     # Handlers
-    'ConversationalHandler',
-    'MaintenanceHandler',
-    'RankingHandler',
-    'PropertyHandler',
-    'CountingHandler',
-    'SemanticSearchHandler',
+    "ConversationalHandler",
+    "MaintenanceHandler",
+    "RankingHandler",
+    "PropertyHandler",
+    "CountingHandler",
+    "SemanticSearchHandler",
 ]
 
 
 # Package metadata
-__version__ = '1.0.0'
-__author__ = 'University of Bristol Smart Technology Team'
+__version__ = "1.0.0"
+__author__ = "University of Bristol Smart Technology Team"
 
 
 def get_available_handlers():
@@ -87,7 +82,7 @@ def get_available_handlers():
     handlers = []
 
     for handler_name in __all__:
-        if handler_name.endswith('Handler'):
+        if handler_name.endswith("Handler"):
             handler_class = globals().get(handler_name)
             if handler_class is not None:
                 handlers.append(handler_class)
@@ -109,15 +104,15 @@ def get_handler_info():
             # Create temporary instance to get info
             temp = handler_class()
             info[handler_class.__name__] = {
-                'priority': temp.priority,
-                'query_type': temp.query_type.value if temp.query_type else 'unknown',
-                'class': handler_class,
-                'module': handler_class.__module__,
+                "priority": temp.priority,
+                "query_type": temp.query_type.value if temp.query_type else "unknown",
+                "class": handler_class,
+                "module": handler_class.__module__,
             }
         except Exception as e:
             info[handler_class.__name__] = {
-                'error': str(e),
-                'class': handler_class,
+                "error": str(e),
+                "class": handler_class,
             }
 
     return info
@@ -147,7 +142,8 @@ def print_handler_chain():
         print(f"{i}. {handler.__class__.__name__}")
         print(f"   Priority: {handler.priority}")
         print(
-            f"   Type: {handler.query_type.value if handler.query_type else 'unknown'}")
+            f"   Type: {handler.query_type.value if handler.query_type else 'unknown'}"
+        )
         print()
 
 
@@ -169,5 +165,5 @@ if __name__ == "__main__":
     for name, details in get_handler_info().items():
         print(f"\n{name}:")
         for key, value in details.items():
-            if key != 'class':
+            if key != "class":
                 print(f"  {key}: {value}")

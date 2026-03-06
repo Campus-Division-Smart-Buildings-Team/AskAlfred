@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from threading import Lock
-from typing import Any, Optional, Protocol, Mapping, runtime_checkable
+from typing import Any, Mapping, Optional, Protocol, runtime_checkable
 
 from ingest.utils import MetricsExporter
 

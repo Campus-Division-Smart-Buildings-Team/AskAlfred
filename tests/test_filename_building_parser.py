@@ -1,7 +1,7 @@
 import pytest
 
-from filename_building_parser import extract_building_from_filename
 from building.utils import extract_building_from_query
+from filename_building_parser import extract_building_from_filename
 
 
 @pytest.mark.parametrize(
@@ -16,7 +16,9 @@ def test_extract_building_from_filename_hybrid_fallback(filename, expected):
     assert extract_building_from_filename(filename) == expected
 
 
-def test_extract_building_from_query_uses_provided_known_buildings_when_cache_empty(monkeypatch):
+def test_extract_building_from_query_uses_provided_known_buildings_when_cache_empty(
+    monkeypatch,
+):
     monkeypatch.setattr(
         "building.utils.BuildingCacheManager.is_populated",
         lambda: False,

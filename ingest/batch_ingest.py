@@ -4,52 +4,60 @@ Batch Ingest for AskAlfred.
 Core logic for batch ingestion, focused on local directory ingestion with progress tracking and security.
 This module contains two main layers:
 1. run_ingest() - Core ingest loop, independent of UI/progress concerns. Processes files, handles worker coordination, and returns an IngestReport.
-2. ingest_local_directory_with_progress() - Thin wrapper around run_ingest() that handles local file discovery, building resolution, and progress tracking. 
+2. ingest_local_directory_with_progress() - Thin wrapper around run_ingest() that handles local file discovery, building resolution, and progress tracking.
 Also emits metrics and logs summary after completion.
 """
-import time
+
 import threading
+import time
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from queue import Queue, Empty
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 from datetime import datetime, timezone
-from pathlib import Path
+from queue import Empty, Queue
 from typing import Any
 
 from alfred_exceptions import (
     IngestError,
 )
 from config import (
-    INGEST_UPSERT_JOIN_TIMEOUT_SECONDS,
     INGEST_UPSERT_JOIN_POLL_SECONDS,
+    INGEST_UPSERT_JOIN_TIMEOUT_SECONDS,
 )
-from file_operations_validator import validate_directory_safety, FileOperationSecurityError
+from file_operations_validator import (
+    FileOperationSecurityError,
+    validate_directory_safety,
+)
 from filename_building_parser import FilenameBuildingResolver
+
 from .context import IngestContext
 from .document_content import (
     load_building_names_with_aliases,
 )
 from .document_processor import DocumentProcessor, FileIngestOrchestrator, Writer
+from .helpers import UpsertQueueItem
+from .transaction import (
+    extract_fra_risk_items_integration,
+    upsert_vectors_atomic,
+)
+from .upsert_handler import (
+    VectorWriteCoordinator,
+    _mark_batch_failed,
+    _upsert_worker,
+)
 from .utils import (
     IngestionProgressTracker,
     list_local_files_secure,
 )
-from .helpers import UpsertQueueItem
-from .upsert_handler import (
-    VectorWriteCoordinator, _mark_batch_failed,
-)
-from .transaction import (
-    extract_fra_risk_items_integration, upsert_vectors_atomic,)
-from .upsert_handler import (_upsert_worker)
-
 
 # ---------------------------------------------------------------------------
 # 7. IngestReport  +  run_ingest()  (core logic, no UI)
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class IngestReport:
     """Value object returned by run_ingest()."""
+
     files_found: int
     files_processed: int
     files_skipped: int
@@ -60,7 +68,11 @@ class IngestReport:
 
     @property
     def vectors_per_second(self) -> float:
-        return self.total_vectors / self.duration_seconds if self.duration_seconds > 0 else 0.0
+        return (
+            self.total_vectors / self.duration_seconds
+            if self.duration_seconds > 0
+            else 0.0
+        )
 
 
 def _run_ingest_sequential(
@@ -90,8 +102,7 @@ def _run_ingest_sequential(
             if result.status == "skipped":
                 ctx.stats.increment("files_skipped")
         except Exception as error:  # pylint: disable=broad-except
-            ctx.logger.warning("Failed to ingest file %s: %s",
-                               obj.get("Key"), error)
+            ctx.logger.warning("Failed to ingest file %s: %s", obj.get("Key"), error)
             ctx.stats.increment("files_failed")
             failed_key = obj.get("Key") or obj.get("key") or ""
             if failed_key:
@@ -125,10 +136,7 @@ def _run_ingest_parallel(
     worker_count = min(worker_count, 32)
 
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
-        futures = {
-            executor.submit(orchestrator.process, obj): obj
-            for obj in objs
-        }
+        futures = {executor.submit(orchestrator.process, obj): obj for obj in objs}
         for future in as_completed(futures):
             if upsert_stop_event.is_set():
                 break
@@ -148,8 +156,9 @@ def _run_ingest_parallel(
                 if result.status == "skipped":
                     ctx.stats.increment("files_skipped")
             except Exception as error:  # pylint: disable=broad-except
-                ctx.logger.warning("Failed to ingest file %s: %s",
-                                   obj.get("Key"), error)
+                ctx.logger.warning(
+                    "Failed to ingest file %s: %s", obj.get("Key"), error
+                )
                 ctx.stats.increment("files_failed")
                 failed_key = obj.get("Key") or obj.get("key") or ""
                 if failed_key:
@@ -184,11 +193,13 @@ def run_ingest(
     t_start = time.time()
 
     if ctx.config.max_io_workers == 1 and ctx.config.max_parse_workers == 1:
-        _run_ingest_sequential(ctx, objs, orchestrator,
-                               coordinator, upsert_stop_event, progress)
+        _run_ingest_sequential(
+            ctx, objs, orchestrator, coordinator, upsert_stop_event, progress
+        )
     else:
-        _run_ingest_parallel(ctx, objs, orchestrator,
-                             coordinator, upsert_stop_event, progress)
+        _run_ingest_parallel(
+            ctx, objs, orchestrator, coordinator, upsert_stop_event, progress
+        )
 
     # Close coordinator and handle abort/normal paths
     if upsert_stop_event.is_set():
@@ -210,8 +221,7 @@ def run_ingest(
 
     # Check for worker errors
     if upsert_errors:
-        ctx.logger.error("Upsert worker reported %d error(s)",
-                         len(upsert_errors))
+        ctx.logger.error("Upsert worker reported %d error(s)", len(upsert_errors))
         for error in upsert_errors:
             ctx.logger.error("  - %s", error)
 
@@ -247,7 +257,8 @@ def _teardown_worker(
     if upsert_stop_event.is_set():
         # Abort path: drain queue and mark all pending batches as failed
         ctx.logger.warning(
-            "Upsert worker stop_event set; draining and failing pending batches")
+            "Upsert worker stop_event set; draining and failing pending batches"
+        )
         pending_count = 0
         while True:
             try:
@@ -265,7 +276,8 @@ def _teardown_worker(
 
         if pending_count > 0:
             ctx.logger.warning(
-                "Marked %d pending batch(es) as failed during abort", pending_count)
+                "Marked %d pending batch(es) as failed during abort", pending_count
+            )
 
         # Send sentinel and wait for worker to exit
         for _ in upsert_threads:
@@ -300,11 +312,10 @@ def _teardown_worker(
                     ctx.logger.info(
                         "Still waiting for upsert queue (%.1fs elapsed, %d tasks remaining)...",
                         elapsed,
-                        upsert_queue.unfinished_tasks
+                        upsert_queue.unfinished_tasks,
                     )
             except KeyboardInterrupt:
-                ctx.logger.warning(
-                    "Keyboard interrupt during queue drain; aborting")
+                ctx.logger.warning("Keyboard interrupt during queue drain; aborting")
                 upsert_stop_event.set()
                 # Switch to abort path (don't recurse, handle inline)
                 while True:
@@ -314,8 +325,7 @@ def _teardown_worker(
                             upsert_queue.put(None)
                             break
                         batch, _, _ = queued
-                        _mark_batch_failed(
-                            ctx, batch, reason="keyboard_interrupt")
+                        _mark_batch_failed(ctx, batch, reason="keyboard_interrupt")
                         upsert_queue.task_done()
                     except Empty:
                         break
@@ -329,7 +339,7 @@ def _teardown_worker(
             ctx.logger.warning(
                 "Upsert queue join timed out after %.1fs (%d tasks remaining); sending sentinel anyway",
                 INGEST_UPSERT_JOIN_TIMEOUT_SECONDS,
-                upsert_queue.unfinished_tasks
+                upsert_queue.unfinished_tasks,
             )
             ctx.logger.warning(
                 "Upsert queue timeout details: unfinished_tasks=%d",
@@ -346,12 +356,10 @@ def _teardown_worker(
                         upsert_queue.put(None)
                         break
                     batch, _, _ = queued
-                    _mark_batch_failed(
-                        ctx, batch, reason="queue_drain_timeout")
+                    _mark_batch_failed(ctx, batch, reason="queue_drain_timeout")
                     for vector in batch:
                         metadata = vector.get("metadata") or {}
-                        file_key = metadata.get(
-                            "key") or metadata.get("source")
+                        file_key = metadata.get("key") or metadata.get("source")
                         if isinstance(file_key, str) and file_key:
                             failed_files.add(file_key)
                             continue
@@ -381,8 +389,7 @@ def _teardown_worker(
                 )
         else:
             queue_join_elapsed = time.perf_counter() - queue_join_start
-            ctx.logger.info("Upsert queue drained in %.3fs",
-                            queue_join_elapsed)
+            ctx.logger.info("Upsert queue drained in %.3fs", queue_join_elapsed)
 
         # Send sentinel to stop worker
         for _ in upsert_threads:
@@ -404,12 +411,14 @@ def _teardown_worker(
             )
         else:
             ctx.logger.info(
-                "Upsert worker thread(s) exited in %.3fs", thread_join_elapsed)
+                "Upsert worker thread(s) exited in %.3fs", thread_join_elapsed
+            )
 
 
 # ---------------------------------------------------------------------------
 # 8. ingest_local_directory_with_progress  (thin UI/progress wrapper)
 # ---------------------------------------------------------------------------
+
 
 def _emit_ingest_metrics(
     ctx: IngestContext,
@@ -417,8 +426,7 @@ def _emit_ingest_metrics(
     base_path: str,
 ) -> None:
     """Export Prometheus and event-sink metrics after ingestion."""
-    prom_path = (
-        getattr(ctx.config, "prometheus_metrics_file", "") or "").strip()
+    prom_path = (getattr(ctx.config, "prometheus_metrics_file", "") or "").strip()
     if prom_path:
         try:
             ctx.event_sink.export_metrics(
@@ -432,8 +440,7 @@ def _emit_ingest_metrics(
             )
             ctx.logger.info("📊 Exported Prometheus metrics to %s", prom_path)
         except IngestError as error:
-            ctx.logger.warning(
-                "Could not export Prometheus metrics: %s", error)
+            ctx.logger.warning("Could not export Prometheus metrics: %s", error)
 
     if getattr(ctx.config, "export_events", False):
         metrics = {
@@ -450,8 +457,7 @@ def _emit_ingest_metrics(
         try:
             ctx.event_sink.emit_event(metrics)
         except IngestError as error:
-            ctx.logger.warning(
-                "Could not write ingestion summary event: %s", error)
+            ctx.logger.warning("Could not write ingestion summary event: %s", error)
 
 
 def _log_ingest_summary(ctx: IngestContext, report: IngestReport) -> None:
@@ -532,8 +538,7 @@ def ingest_local_directory_with_progress(
             load_building_names_with_aliases(ctx, base_path, csv_candidates[0])
         )
     else:
-        ctx.logger.warning(
-            "No property CSV found for building name resolution")
+        ctx.logger.warning("No property CSV found for building name resolution")
 
     building_resolver = FilenameBuildingResolver(
         name_to_canonical=name_to_canonical,
@@ -563,15 +568,11 @@ def ingest_local_directory_with_progress(
     parse_pool: ProcessPoolExecutor | None = None
     try:
         if ctx.config.max_parse_workers > 1:
-            cpu_pool = ProcessPoolExecutor(
-                max_workers=ctx.config.max_parse_workers
-            )
+            cpu_pool = ProcessPoolExecutor(max_workers=ctx.config.max_parse_workers)
             orchestrator.set_cpu_pool(cpu_pool)
 
         if ctx.config.max_parse_workers > 1:
-            parse_pool = ProcessPoolExecutor(
-                max_workers=ctx.config.max_parse_workers
-            )
+            parse_pool = ProcessPoolExecutor(max_workers=ctx.config.max_parse_workers)
             orchestrator.set_parse_pool(parse_pool)
 
         upsert_threads: list[threading.Thread] | None = None
@@ -579,11 +580,12 @@ def ingest_local_directory_with_progress(
         if use_worker:
             batch_size = max(
                 1,
-                min(int(ctx.config.upsert_batch),
-                    max(1, int(ctx.config.max_pending_vectors))),
+                min(
+                    int(ctx.config.upsert_batch),
+                    max(1, int(ctx.config.max_pending_vectors)),
+                ),
             )
-            queue_max = max(
-                1, int(ctx.config.max_pending_vectors) // batch_size)
+            queue_max = max(1, int(ctx.config.max_pending_vectors) // batch_size)
             upsert_queue = Queue(maxsize=queue_max)
             upsert_threads = []
             worker_count = max(1, int(ctx.config.upsert_workers))

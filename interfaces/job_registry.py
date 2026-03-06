@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Protocol, Optional, Any, cast
 from datetime import datetime, timezone
+from typing import Any, Optional, Protocol, cast
 
 from redis import Redis
+
 from config.constant import (
     INGEST_JOB_TTL_DEFAULT_SECONDS,
     INGEST_JOB_TTL_SUPERSEDE_SECONDS,

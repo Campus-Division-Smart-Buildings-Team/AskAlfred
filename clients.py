@@ -9,16 +9,17 @@ Credentials are loaded on-demand via SecureCredentialManager:
 - Sanitized error messages to prevent credential exposure
 """
 
-import os
 import logging
+import os
 from typing import Optional
-from pinecone import Pinecone
+
 from openai import OpenAI
+from pinecone import Pinecone
 from redis import Redis
 
 from alfred_exceptions import ConfigError
-from log_sanitiser import sanitise_message
 from credential_manager import SecureCredentialManager
+from log_sanitiser import sanitise_message
 
 # print("pinecone loaded from:", Pinecone.__module__)
 # print("openai loaded from:", OpenAI.__module__)
@@ -54,8 +55,7 @@ class ClientManager:
             ) from e
         except Exception as e:
             # Log sanitized error - credential manager has already redacted the key
-            logging.error("Failed to initialise Pinecone: %s",
-                          sanitise_message(str(e)))
+            logging.error("Failed to initialise Pinecone: %s", sanitise_message(str(e)))
             raise ConfigError("Failed to initialise Pinecone client") from e
 
     @classmethod
@@ -75,11 +75,11 @@ class ClientManager:
         except KeyError as e:
             logging.error("OpenAI API key not configured")
             raise ConfigError(
-                "OPENAI_API_KEY not set. Please configure credentials.") from e
+                "OPENAI_API_KEY not set. Please configure credentials."
+            ) from e
         except Exception as e:
             # Log sanitized error - credential manager has already redacted the key
-            logging.error("Failed to initialise OpenAI: %s",
-                          sanitise_message(str(e)))
+            logging.error("Failed to initialise OpenAI: %s", sanitise_message(str(e)))
             raise ConfigError("Failed to initialise OpenAI client") from e
 
     @classmethod
@@ -97,9 +97,7 @@ class ClientManager:
         redis_password = os.environ.get("REDIS_PASSWORD", "")
 
         if not redis_host:
-            raise ConfigError(
-                "REDIS_HOST is not set in environment"
-            )
+            raise ConfigError("REDIS_HOST is not set in environment")
 
         try:
             redis_port = int(redis_port_str)
@@ -121,8 +119,7 @@ class ClientManager:
             return cls._redis
         except Exception as e:
             # Log sanitized error
-            logging.error("Failed to initialise Redis: %s",
-                          sanitise_message(str(e)))
+            logging.error("Failed to initialise Redis: %s", sanitise_message(str(e)))
             raise ConfigError("Failed to initialise Redis client") from e
 
 

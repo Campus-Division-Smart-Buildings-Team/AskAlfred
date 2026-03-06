@@ -10,20 +10,34 @@ Guidelines
 * Normalisation is **lossy** and intended only for matching/lookup, not display.
 * Keep this file tiny, deterministic, and well-tested.
 """
+
 from __future__ import annotations
 
-from functools import lru_cache
 import re
-from collections.abc import Iterable
 import unicodedata
+from collections.abc import Iterable
+from functools import lru_cache
 
-
-__all__ = ["normalise_building_name", "normalise_key", "normalise_keys",]
+__all__ = [
+    "normalise_building_name",
+    "normalise_key",
+    "normalise_keys",
+]
 
 
 # Common suffixes we strip off for lookups (display names remain untouched).
-_SUFFIXES = (" building", " house", " hall", " centre", " center",
-             " complex", " tower", " block", " wing", " facility",)
+_SUFFIXES = (
+    " building",
+    " house",
+    " hall",
+    " centre",
+    " center",
+    " complex",
+    " tower",
+    " block",
+    " wing",
+    " facility",
+)
 
 
 # Collapse multiple whitespace

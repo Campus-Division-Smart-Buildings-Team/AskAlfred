@@ -7,14 +7,16 @@ Usage:
   python analyse_events_jsonl.py building_events.jsonl --export analysis.csv
 """
 
+import csv
 import json
 import sys
-import csv
 from collections import Counter
 from pathlib import Path
 
-
-from config import BUILDING_REVIEW_FILENAME_MIN_CONFIDENCE, BUILDING_REVIEW_TEXT_MIN_CONFIDENCE
+from config import (
+    BUILDING_REVIEW_FILENAME_MIN_CONFIDENCE,
+    BUILDING_REVIEW_TEXT_MIN_CONFIDENCE,
+)
 
 
 def load_events(path: Path):
@@ -91,15 +93,21 @@ def export_csv(results: dict, output: str):
         w = csv.writer(f)
         w.writerow(["file", "building", "confidence", "source", "flag_review"])
 
-        for ev_list in (results["unknown"], results["flagged"], results["low_confidence"]):
+        for ev_list in (
+            results["unknown"],
+            results["flagged"],
+            results["low_confidence"],
+        ):
             for ev in ev_list:
-                w.writerow([
-                    ev.get("file"),
-                    ev.get("canonical_building_name"),
-                    ev.get("confidence"),
-                    ev.get("source"),
-                    ev.get("flag_review"),
-                ])
+                w.writerow(
+                    [
+                        ev.get("file"),
+                        ev.get("canonical_building_name"),
+                        ev.get("confidence"),
+                        ev.get("source"),
+                        ev.get("flag_review"),
+                    ]
+                )
 
     print(f"✅ Exported CSV: {output}")
 
@@ -107,7 +115,8 @@ def export_csv(results: dict, output: str):
 def main():
     if len(sys.argv) < 2:
         print(
-            "Usage: python analyse_events_jsonl.py building_events.jsonl [--export file.csv]")
+            "Usage: python analyse_events_jsonl.py building_events.jsonl [--export file.csv]"
+        )
         return
 
     path = Path(sys.argv[1])

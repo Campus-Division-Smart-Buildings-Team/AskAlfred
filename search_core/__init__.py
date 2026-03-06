@@ -10,21 +10,21 @@ Provides:
 - execute()              unified router for SearchInstructions
 """
 
-from .semantic_search import semantic_search
-from .planon_search import planon_search
 from .maintenance_search import maintenance_search
+from .planon_search import planon_search
 
 # Router for SearchInstructions
 from .search_router import execute
 
 # Utilities (optional re-export)
 from .search_utils import (
-    search_one_index,
-    deduplicate_results,
-    apply_doc_type_boost,
     apply_building_boost,
+    apply_doc_type_boost,
+    deduplicate_results,
     get_effective_score,
+    search_one_index,
 )
+from .semantic_search import semantic_search
 
 __all__ = [
     "semantic_search",

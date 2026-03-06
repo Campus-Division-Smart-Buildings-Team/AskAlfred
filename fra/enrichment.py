@@ -8,9 +8,14 @@ from __future__ import annotations
 
 import hashlib
 import re
-from datetime import datetime, date, timezone
+from datetime import date, datetime, timezone
 from typing import Optional
-from config import (DocumentTypes, RISK_LEVEL_MAP,)
+
+from config import (
+    RISK_LEVEL_MAP,
+    DocumentTypes,
+)
+
 from .types import CompletionStatus, RiskItem
 
 
@@ -57,11 +62,12 @@ class FRAEnricher:
             risk_item.get("issue_number"),
         )
 
-        ingestion_timestamp = risk_item.get(
-            "ingestion_timestamp") or datetime.now(timezone.utc).isoformat()
+        ingestion_timestamp = (
+            risk_item.get("ingestion_timestamp")
+            or datetime.now(timezone.utc).isoformat()
+        )
 
-        document_type = risk_item.get(
-            "document_type") or DocumentTypes.FRA_RISK_ITEM
+        document_type = risk_item.get("document_type") or DocumentTypes.FRA_RISK_ITEM
         is_current = risk_item.get("is_current")
         if is_current is None:
             is_current = True
@@ -80,11 +86,10 @@ class FRAEnricher:
         self,
         building: Optional[str],
         assessment_date: Optional[str],
-        issue_num: Optional[str]
+        issue_num: Optional[str],
     ) -> str:
         """Generate stable hash identifier for risk item."""
-        building_safe = re.sub(r"[^a-zA-Z0-9]+", "_",
-                               building or "unknown").lower()
+        building_safe = re.sub(r"[^a-zA-Z0-9]+", "_", building or "unknown").lower()
         date_part = assessment_date or "unknown"
         issue_part = issue_num or "unknown"
 

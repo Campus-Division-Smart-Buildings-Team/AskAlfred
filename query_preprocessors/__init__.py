@@ -30,18 +30,18 @@ Available Preprocessors:
 Example Usage:
     from query_preprocessors import BuildingExtractor, BusinessTermExtractor
     from query_manager import QueryContext
-    
+
     # Create preprocessors
     building_extractor = BuildingExtractor()
     term_extractor = BusinessTermExtractor()
-    
+
     # Create context
     context = QueryContext(query="Show FRAs for Senate House")
-    
+
     # Run preprocessors
     building_extractor.process(context)
     term_extractor.process(context)
-    
+
     # Context now has extracted info
     print(context.building)        # "Senate House"
     print(context.business_terms)  # [{'term': 'FRA', 'type': 'fire_risk_assessment'}]
@@ -50,12 +50,12 @@ Creating a New Preprocessor:
     1. Inherit from BasePreprocessor
     2. Implement process(context) method
     3. Add to QueryManager.__init__() preprocessors list
-    
+
     class MyPreprocessor(BasePreprocessor):
         def process(self, context: QueryContext) -> None:
             # Extract information
             something = self.extract_from(context.query)
-            
+
             # Add to context
             context.add_to_cache('my_data', something)
 """
@@ -67,23 +67,21 @@ from query_preprocessors.business_term_extractor import BusinessTermExtractor
 from query_preprocessors.query_complexity_analyser import QueryComplexityAnalyser
 from query_preprocessors.spell_checker import SpellCheckPreprocessor
 
-
 # Public API
 __all__ = [
     # Base class
-    'BasePreprocessor',
-
+    "BasePreprocessor",
     # Preprocessors
-    'BuildingExtractor',
-    'BusinessTermExtractor',
-    'QueryComplexityAnalyser',
-    'SpellCheckPreprocessor',
+    "BuildingExtractor",
+    "BusinessTermExtractor",
+    "QueryComplexityAnalyser",
+    "SpellCheckPreprocessor",
 ]
 
 
 # Package metadata
-__version__ = '1.0.0'
-__author__ = 'University of Bristol Smart Technology Team'
+__version__ = "1.0.0"
+__author__ = "University of Bristol Smart Technology Team"
 
 
 def get_available_preprocessors():
@@ -96,7 +94,7 @@ def get_available_preprocessors():
     preprocessors = []
 
     for preprocessor_name in __all__:
-        if preprocessor_name != 'BasePreprocessor':
+        if preprocessor_name != "BasePreprocessor":
             preprocessor_class = globals().get(preprocessor_name)
             if preprocessor_class is not None:
                 preprocessors.append(preprocessor_class)
@@ -116,14 +114,18 @@ def get_preprocessor_info():
     for preprocessor_class in get_available_preprocessors():
         try:
             info[preprocessor_class.__name__] = {
-                'class': preprocessor_class,
-                'module': preprocessor_class.__module__,
-                'docstring': preprocessor_class.__doc__.split('\n')[0] if preprocessor_class.__doc__ else 'No description'
+                "class": preprocessor_class,
+                "module": preprocessor_class.__module__,
+                "docstring": (
+                    preprocessor_class.__doc__.split("\n")[0]
+                    if preprocessor_class.__doc__
+                    else "No description"
+                ),
             }
         except Exception as e:
             info[preprocessor_class.__name__] = {
-                'error': str(e),
-                'class': preprocessor_class,
+                "error": str(e),
+                "class": preprocessor_class,
             }
 
     return info
@@ -140,9 +142,9 @@ def create_default_preprocessor_pipeline():
 
     # Order matters - each preprocessor can use results from previous ones
     preprocessor_classes = [
-        BuildingExtractor,           # Extract building names
-        BusinessTermExtractor,       # Extract business terms
-        QueryComplexityAnalyser,     # Analyze complexity
+        BuildingExtractor,  # Extract building names
+        BusinessTermExtractor,  # Extract business terms
+        QueryComplexityAnalyser,  # Analyze complexity
         # SpellCheckPreprocessor,    # Spell check (optional, can be slow)
     ]
 
@@ -151,8 +153,7 @@ def create_default_preprocessor_pipeline():
             try:
                 pipeline.append(preprocessor_class())
             except Exception as e:
-                print(
-                    f"⚠️  Could not create {preprocessor_class.__name__}: {e}")
+                print(f"⚠️  Could not create {preprocessor_class.__name__}: {e}")
 
     return pipeline
 
@@ -170,7 +171,7 @@ def print_preprocessor_info():
 
     for name, details in get_preprocessor_info().items():
         print(f"{name}:")
-        if 'error' in details:
+        if "error" in details:
             print(f"  ❌ Error: {details['error']}")
         else:
             print(f"  📄 {details['docstring']}")

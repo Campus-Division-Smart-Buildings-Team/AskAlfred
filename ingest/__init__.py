@@ -2,8 +2,8 @@
 Ingest package exports.
 """
 
-from .context import IngestContext
 from .batch_ingest import ingest_local_directory_with_progress
+from .context import IngestContext
 from .utils import validate_namespace_routing
 
 __all__ = [

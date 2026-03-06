@@ -5,6 +5,9 @@ description = "Modular, hybrid-intent building-aware search assistant."
 readme = "README.md"
 package-mode = false
 
+[tool.poetry.scripts]
+security-scan = "scripts.security_scan:main"
+
 [tool.poetry.dependencies]
 python = ">=3.10,<3.13"
 anthropic = ">=0.66.0"
@@ -97,7 +100,6 @@ safety = ">=3.7.0"
 safety-schemas = ">=0.0.16"
 cyclonedx-python-lib = ">=11.6.0"
 
-pytest = ">=8.4.0"
 
 pillow = ">=12.1.1"
 
@@ -188,3 +190,16 @@ ruamel-yaml = ">=0.16.7"
 [build-system]
 requires = ["poetry-core>=1.8.0"]
 build-backend = "poetry.core.masonry.api"
+
+[dependency-groups]
+dev = [
+    "black (>=26.1.0,<27.0.0)",
+    "ruff (>=0.15.5,<0.16.0)",
+    "pytest (>=9.0.2,<10.0.0)"
+]
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]

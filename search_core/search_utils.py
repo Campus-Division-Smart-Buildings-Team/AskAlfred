@@ -3,27 +3,23 @@
 """
 Search utils
 """
-from __future__ import annotations
-import logging
-from typing import Optional, Any
 
-from config import (
-    TARGET_INDEXES,
-    SEARCH_ALL_NAMESPACES,
-    get_index_config
-)
-from pinecone_utils import (
-    open_index,
-    list_namespaces_for_index,
-    vector_query,
-    normalise_matches
-)
+from __future__ import annotations
+
+import logging
+from typing import Any, Optional
 
 from building.utils import (
     create_building_metadata_filter,
     filter_results_by_building,
-    result_matches_building
-
+    result_matches_building,
+)
+from config import SEARCH_ALL_NAMESPACES, TARGET_INDEXES, get_index_config
+from pinecone_utils import (
+    list_namespaces_for_index,
+    normalise_matches,
+    open_index,
+    vector_query,
 )
 
 # ============================================================================
@@ -31,11 +27,35 @@ from building.utils import (
 # ============================================================================
 
 # Stop words for building name matching
-STOP_WORDS = frozenset({
-    'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
-    'of', 'with', 'by', 'from', 'as', 'is', 'was', 'are', 'were', 'bms',
-    'building', 'house', 'data', 'planon'
-})
+STOP_WORDS = frozenset(
+    {
+        "the",
+        "a",
+        "an",
+        "and",
+        "or",
+        "but",
+        "in",
+        "on",
+        "at",
+        "to",
+        "for",
+        "of",
+        "with",
+        "by",
+        "from",
+        "as",
+        "is",
+        "was",
+        "are",
+        "were",
+        "bms",
+        "building",
+        "house",
+        "data",
+        "planon",
+    }
+)
 
 # Score boost for matching document types
 DOC_TYPE_BOOST_FACTOR = 1.2
@@ -73,8 +93,8 @@ def get_doc_type(hit: dict[str, Any]) -> str:
     Extract document type from hit consistently.
     Checks both metadata and top-level fields.
     """
-    metadata = hit.get('metadata', {})
-    return metadata.get('document_type') or hit.get('document_type', 'unknown')
+    metadata = hit.get("metadata", {})
+    return metadata.get("document_type") or hit.get("document_type", "unknown")
 
 
 # ============================================================================
@@ -87,7 +107,7 @@ def search_one_index(
     query: str,
     k: int = 10,
     embed_model: Optional[str] = None,
-    building_filter: Optional[str] = None
+    building_filter: Optional[str] = None,
 ) -> list[dict[str, Any]]:
     """
     Search a single index with building-aware filtering.
@@ -103,10 +123,12 @@ def search_one_index(
 
     # FIXED: Ensure embed_model is always a string
     if embed_model is None:
-        embed_model = index_config['model']
+        embed_model = index_config["model"]
 
     # Assert that embed_model is now a string for type checker
-    assert embed_model is not None, f"No embedding model configured for index {idx_name}"
+    assert (
+        embed_model is not None
+    ), f"No embedding model configured for index {idx_name}"
 
     namespaces = _namespaces_to_search(idx)
     all_hits = []
@@ -115,8 +137,7 @@ def search_one_index(
     metadata_filter = None
     if building_filter:
         metadata_filter = create_building_metadata_filter(building_filter)
-        logging.info("🏢 Created metadata filter for building: %s",
-                     building_filter)
+        logging.info("🏢 Created metadata filter for building: %s", building_filter)
 
     for ns in namespaces:
         # ADD LOGGING HERE - BEFORE THE TRY BLOCK
@@ -133,7 +154,7 @@ def search_one_index(
                 query=query,
                 k=k,
                 embed_model=embed_model,  # No longer None
-                metadata_filter=metadata_filter if building_filter else None
+                metadata_filter=metadata_filter if building_filter else None,
             )
 
             hits = normalise_matches(raw)
@@ -143,8 +164,8 @@ def search_one_index(
                 hits = filter_results_by_building(hits, building_filter)
 
             for h in hits:
-                h['index'] = idx_name
-                h['namespace'] = ns
+                h["index"] = idx_name
+                h["namespace"] = ns
 
             all_hits.extend(hits)
 
@@ -152,7 +173,9 @@ def search_one_index(
             ns_display = "(default)" if ns is None else ns
             logging.warning(
                 "Search failed for index='%s', namespace='%s': %s",
-                idx_name, ns_display, e
+                idx_name,
+                ns_display,
+                e,
             )
 
     return all_hits
@@ -160,7 +183,7 @@ def search_one_index(
 
 def get_effective_score(result: dict[str, Any]) -> float:
     """Get effective score from result (boosted or original)."""
-    return result.get('boosted_score', result.get('score', 0.0))
+    return result.get("boosted_score", result.get("score", 0.0))
 
 
 def deduplicate_results(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -175,7 +198,7 @@ def deduplicate_results(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """
     seen_ids = {}
     for result in results:
-        result_id = result.get('id')
+        result_id = result.get("id")
         if not result_id:
             continue
 
@@ -191,7 +214,7 @@ def deduplicate_results(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def apply_doc_type_boost(
     results: list[dict[str, Any]],
     target_doc_type: str,
-    boost_factor: float = DOC_TYPE_BOOST_FACTOR
+    boost_factor: float = DOC_TYPE_BOOST_FACTOR,
 ) -> list[dict[str, Any]]:
     """
     Apply score boost to results matching target document type.
@@ -207,9 +230,9 @@ def apply_doc_type_boost(
     for result in results:
         doc_type = get_doc_type(result)
         if doc_type == target_doc_type:
-            original_score = result.get('score', 0.0)
-            result['boosted_score'] = original_score * boost_factor
-            result['boost_reason'] = f'document_type:{doc_type}'
+            original_score = result.get("score", 0.0)
+            result["boosted_score"] = original_score * boost_factor
+            result["boost_reason"] = f"document_type:{doc_type}"
 
     return results
 
@@ -217,7 +240,7 @@ def apply_doc_type_boost(
 def apply_building_boost(
     results: list[dict[str, Any]],
     target_building: str,
-    boost_factor: float = BUILDING_BOOST_FACTOR
+    boost_factor: float = BUILDING_BOOST_FACTOR,
 ) -> list[dict[str, Any]]:
     """
     Apply score boost to results matching target building.
@@ -236,15 +259,16 @@ def apply_building_boost(
 
     for result in results:
         if result_matches_building(result, target_building):
-            original_score = result.get(
-                'boosted_score', result.get('score', 0.0))
-            result['boosted_score'] = original_score * boost_factor
-            result['boost_reason'] = result.get('boost_reason', '').strip(
-                ';') + f';building:{target_building}'
+            original_score = result.get("boosted_score", result.get("score", 0.0))
+            result["boosted_score"] = original_score * boost_factor
+            result["boost_reason"] = (
+                result.get("boost_reason", "").strip(";")
+                + f";building:{target_building}"
+            )
 
             # Store the matched building name
             if not result.get("building_name"):
-                result['building_name'] = target_building
+                result["building_name"] = target_building
 
     return results
 
@@ -274,7 +298,7 @@ def search_by_building(building_name: str, top_k: int = 10) -> list[dict[str, An
             f"building information for {building_name}",
             top_k * 2,
             embed_model=None,
-            building_filter=building_name
+            building_filter=building_name,
         )
         all_results.extend(results)
 
@@ -307,24 +331,24 @@ def get_search_statistics(hits: list[dict[str, Any]]) -> dict[str, Any]:
         doc_type_counts[doc_type] = doc_type_counts.get(doc_type, 0) + 1
 
         # Buildings
-        building = hit.get('building_name', 'Unknown')
+        building = hit.get("building_name", "Unknown")
         building_counts[building] = building_counts.get(building, 0) + 1
 
         # Indexes
-        index = hit.get('index', 'Unknown')
+        index = hit.get("index", "Unknown")
         index_counts[index] = index_counts.get(index, 0) + 1
 
     return {
-        'total_results': len(hits),
-        'doc_types': doc_type_counts,
-        'buildings': building_counts,
-        'indexes': index_counts,
-        'avg_score': sum(hit.get('score', 0.0) for hit in hits) / len(hits) if hits else 0,
-        'max_score': max((hit.get('score', 0.0) for hit in hits), default=0),
-        'min_score': min((hit.get('score', 0.0) for hit in hits), default=0),
-        'avg_boosted_score': (
-            sum(get_effective_score(hit) for hit in hits) / len(hits)
-            if hits else 0
+        "total_results": len(hits),
+        "doc_types": doc_type_counts,
+        "buildings": building_counts,
+        "indexes": index_counts,
+        "avg_score": (
+            sum(hit.get("score", 0.0) for hit in hits) / len(hits) if hits else 0
         ),
-
+        "max_score": max((hit.get("score", 0.0) for hit in hits), default=0),
+        "min_score": min((hit.get("score", 0.0) for hit in hits), default=0),
+        "avg_boosted_score": (
+            sum(get_effective_score(hit) for hit in hits) / len(hits) if hits else 0
+        ),
     }

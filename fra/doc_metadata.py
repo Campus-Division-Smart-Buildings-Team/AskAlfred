@@ -1,5 +1,6 @@
-from typing import Optional, TypedDict
 import re
+from typing import Optional, TypedDict
+
 from date_utils import parse_date_to_iso
 
 
