@@ -222,7 +222,7 @@ def process_word_documents(
     # Process each file
     for i, word_file in enumerate(word_files, 1):
         logging.info("\n[%d/%d] Processing: %s", i, len(word_files), word_file.name)
-        logging.info("    Location: %s", word_file.parent)
+        logging.info("📍  Location: %s", word_file.parent)
 
         if dry_run:
             logging.info("    Would convert to: %s", word_file.with_suffix(".pdf").name)
