@@ -120,7 +120,10 @@ class RankingHandler(BaseQueryHandler):
         query_text = context.query.strip()
 
         try:
-            answer = generate_ranking_answer(query_text)
+            answer = generate_ranking_answer(
+                query_text,
+                access_filter=context.access_filter,
+            )
 
             if not answer:
                 answer = (

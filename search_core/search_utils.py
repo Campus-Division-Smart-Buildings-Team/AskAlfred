@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Optional
 
+from access_control import filter_authorized_matches
 from building.utils import (
     create_building_metadata_filter,
     filter_results_by_building,
@@ -63,6 +64,23 @@ DOC_TYPE_BOOST_FACTOR = 1.2
 # Score boost for matching buildings (higher priority)
 BUILDING_BOOST_FACTOR = 2.0  # 2x boost for correct building
 
+OCCUPANCY_QUERY_TERMS = (
+    "accommodate",
+    "occupancy",
+    "capacity",
+    "staff",
+    "visitors",
+    "persons",
+)
+OCCUPANCY_TEXT_TERMS = (
+    "occupancy",
+    "staff/visitors",
+    "staff visitors",
+    "capacity",
+    "persons",
+)
+OCCUPANCY_BOOST_FACTOR = 1.35
+
 
 # ============================================================================
 # HELPER FUNCTIONS
@@ -108,6 +126,7 @@ def search_one_index(
     k: int = 10,
     embed_model: Optional[str] = None,
     building_filter: Optional[str] = None,
+    access_filter: Optional[dict[str, Any]] = None,
 ) -> list[dict[str, Any]]:
     """
     Search a single index with building-aware filtering.
@@ -134,10 +153,14 @@ def search_one_index(
     all_hits = []
 
     # Create building filter if specified
-    metadata_filter = None
+    building_metadata_filter = None
     if building_filter:
-        metadata_filter = create_building_metadata_filter(building_filter)
+        building_metadata_filter = create_building_metadata_filter(building_filter)
         logging.info("🏢 Created metadata filter for building: %s", building_filter)
+
+    metadata_filter = _combine_metadata_filters(access_filter, building_metadata_filter)
+    if access_filter:
+        logging.info("Applied retrieval access filter keys: %s", sorted(access_filter))
 
     for ns in namespaces:
         # ADD LOGGING HERE - BEFORE THE TRY BLOCK
@@ -154,10 +177,14 @@ def search_one_index(
                 query=query,
                 k=k,
                 embed_model=embed_model,  # No longer None
-                metadata_filter=metadata_filter if building_filter else None,
+                metadata_filter=metadata_filter,
             )
 
             hits = normalise_matches(raw)
+            hits = filter_authorized_matches(
+                hits,
+                access_filter=access_filter,
+            )
 
             # Apply building filter post-query if we have one
             if building_filter:
@@ -179,6 +206,30 @@ def search_one_index(
             )
 
     return all_hits
+
+
+def _combine_metadata_filters(
+    access_filter: Optional[dict[str, Any]],
+    building_filter: Optional[dict[str, Any]],
+) -> Optional[dict[str, Any]]:
+    """Combine independent Pinecone metadata filters with logical AND."""
+    filters = [filter_dict for filter_dict in (access_filter, building_filter) if filter_dict]
+    if not filters:
+        return None
+    if len(filters) == 1:
+        return filters[0]
+
+    clauses: list[dict[str, Any]] = []
+    for filter_dict in filters:
+        if (
+            isinstance(filter_dict, dict)
+            and set(filter_dict.keys()) == {"$and"}
+            and isinstance(filter_dict["$and"], list)
+        ):
+            clauses.extend(filter_dict["$and"])
+        else:
+            clauses.append(filter_dict)
+    return {"$and": clauses}
 
 
 def get_effective_score(result: dict[str, Any]) -> float:
@@ -234,6 +285,37 @@ def apply_doc_type_boost(
             result["boosted_score"] = original_score * boost_factor
             result["boost_reason"] = f"document_type:{doc_type}"
 
+    return results
+
+
+def apply_occupancy_capacity_boost(
+    results: list[dict[str, Any]],
+    query: str,
+    boost_factor: float = OCCUPANCY_BOOST_FACTOR,
+) -> list[dict[str, Any]]:
+    """Boost chunks mentioning occupancy/capacity for matching user queries."""
+    query_lower = (query or "").lower()
+    if not any(term in query_lower for term in OCCUPANCY_QUERY_TERMS):
+        return results
+
+    boosted_count = 0
+    for result in results:
+        text = (
+            result.get("text")
+            or (result.get("metadata", {}) or {}).get("text")
+            or ""
+        )
+        text_lower = str(text).lower()
+        if any(term in text_lower for term in OCCUPANCY_TEXT_TERMS):
+            base_score = get_effective_score(result)
+            result["boosted_score"] = base_score * boost_factor
+            boosted_count += 1
+
+    logging.info(
+        "Applied occupancy/capacity boost to %d result(s) for query '%s'",
+        boosted_count,
+        query,
+    )
     return results
 
 

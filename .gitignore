@@ -16,7 +16,6 @@ __pycache__/
 *.pkl
 *.bin
 *.log
-
 *.json
 !.safety-policy.json
 *.pklz
@@ -44,4 +43,4 @@ data/
 !README.md
 
 # metrics
-#*.prom
+*.prom

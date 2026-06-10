@@ -19,6 +19,33 @@ from typing import Any, Optional
 from query_types import QueryType
 
 
+DENY_ALL_TENANT_ID = "__deny_access__"
+
+
+def build_access_filter(
+    *,
+    tenant_id: Optional[str],
+    user_roles: tuple[str, ...],
+    authenticated: bool,
+) -> dict[str, Any]:
+    """
+    Build the first-pass retrieval access filter from the current auth context.
+
+    This initial enforcement is intentionally narrow: authenticated users are
+    constrained to their tenant, while anonymous/dev sessions keep the current
+    unfiltered behaviour until the wider authz rollout is complete.
+    """
+    del user_roles  # Roles will be threaded into retrieval in a later patch.
+
+    if not authenticated:
+        return {}
+
+    if not tenant_id:
+        return {"tenant_id": {"$eq": DENY_ALL_TENANT_ID}}
+
+    return {"tenant_id": {"$eq": str(tenant_id)}}
+
+
 @dataclass
 class QueryContext:
     """
@@ -54,6 +81,7 @@ class QueryContext:
     user_roles: tuple[str, ...] = field(default_factory=tuple)
     authenticated: bool = False
     auth_source: str = "anonymous"
+    access_filter: dict[str, Any] = field(default_factory=dict)
 
     # Preprocessor-enriched attributes
     building: Optional[str] = None

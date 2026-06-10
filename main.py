@@ -7,6 +7,7 @@ With dynamic building cache initialisation across all indexes.
 
 import logging
 import os
+import re
 import time
 import zipfile
 from pathlib import Path
@@ -14,7 +15,6 @@ from typing import Any, Optional
 
 import streamlit as st
 from markupsafe import escape
-from openai import OpenAI
 
 from auth_manager import (
     authentication_required,
@@ -42,6 +42,7 @@ from config.constant import IS_PRODUCTION
 from emojis import EMOJI_BOOKS, EMOJI_CAUTION, EMOJI_GORILLA, EMOJI_TIME
 from input_validator import get_validation_summary, validate_query_security
 from log_sanitiser import sanitise_error
+from query_context import build_access_filter
 from query_manager import QueryManager
 from rate_limiter import (
     check_query_rate_limit,
@@ -305,6 +306,7 @@ def handle_query_with_manager(query: str, top_k: int):
                 # Display answer
                 if result.answer:
                     safe_markdown(result.answer)
+                    render_citation_legend(result.answer, result.results)
 
                 # Optional UI elements
                 if getattr(result, "publication_date_info", None):
@@ -406,14 +408,22 @@ def render_result_item(
         st.markdown("📍 **TOP RESULT**")
 
     # Format score and metadata
-    score = result.get("score", 0)
+    score = result.get("score", 0.0)
+    boosted_score = result.get("boosted_score")
+    boost_reason = result.get("boost_reason")
     key = result.get("key", "Unknown")
     index_name = result.get("index", "?")
     namespace = result.get("namespace", "__default__")
 
+    score_text = f"**{index}. Score:** {score:.3f}"
+    if isinstance(boosted_score, (int, float)):
+        score_text += f" (boosted: {boosted_score:.3f})"
+    if boost_reason:
+        score_text += f"  \n_Boost:_ `{escape(str(boost_reason))}`"
+
     # Display metadata safely (escaping key value which could contain user input)
     st.markdown(
-        f"**{index}. Score:** {score:.3f}  \n"
+        f"{score_text}  \n"
         f"_Document:_ `{escape(str(key))}`  •  _Index:_ `{escape(str(index_name))}`  •  _Namespace:_ `{escape(str(namespace))}`"
     )
 
@@ -567,6 +577,13 @@ def handle_search_query(query: str, top_k: int):
                     type="semantic",
                     query=query,
                     top_k=top_k,
+                    access_filter=build_access_filter(
+                        tenant_id=st.session_state.get("tenant_id"),
+                        user_roles=tuple(st.session_state.get("user_roles", [])),
+                        authenticated=bool(
+                            st.session_state.get("authenticated", False)
+                        ),
+                    ),
                 )
 
                 results, answer, publication_date_info, score_too_low = safe_execute(
@@ -598,6 +615,7 @@ def handle_no_results():
 def handle_low_score_results(answer: str, results: list[dict[str, Any]]):
     """Handle case when results have scores below threshold."""
     safe_markdown(answer)
+    render_citation_legend(answer, results)
     display_safe_low_score_warning()
 
     st.session_state.messages.append(
@@ -617,6 +635,7 @@ def handle_successful_results(
     if answer:
         # Display LLM-generated answer
         safe_markdown(answer)
+        render_citation_legend(answer, results)
 
         # Display publication date info prominently
         if publication_date_info:
@@ -705,6 +724,33 @@ def display_last_results():
                 st.markdown("---")
 
 
+def render_citation_legend(answer: str, results: list[dict[str, Any]]) -> None:
+    """Render a simple legend for inline [S1]-style citations."""
+    if not answer or not results:
+        return
+
+    citation_numbers = []
+    seen = set()
+    for match in re.findall(r"\[S(\d+)\]", answer):
+        number = int(match)
+        if number not in seen:
+            citation_numbers.append(number)
+            seen.add(number)
+
+    if not citation_numbers:
+        return
+
+    st.markdown("**Sources cited**")
+    for number in citation_numbers:
+        if number < 1 or number > len(results):
+            continue
+        result = results[number - 1]
+        metadata = result.get("metadata", {}) or {}
+        key = result.get("key") or metadata.get("key") or "Unknown"
+        namespace = result.get("namespace", "__default__")
+        st.caption(f"[S{number}] {key} ({namespace})")
+
+
 def update_conversation_summary():
     """Generate or extend a rolling conversation summary."""
     if len(st.session_state.messages) < 4:
@@ -725,7 +771,7 @@ Here are the last few dialogue turns:
 
 Please produce an updated, concise summary that preserves all facts.
 """
-    client = OpenAI()
+    client = ClientManager.get_oai()
 
     try:
         response = client.chat.completions.create(

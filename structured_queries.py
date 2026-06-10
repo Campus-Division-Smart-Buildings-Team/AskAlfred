@@ -15,6 +15,10 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Optional, cast
 
+from access_control import (
+    combine_pinecone_filters,
+    filter_authorized_structured_matches,
+)
 from building import (
     BuildingCacheManager,
     extract_building_from_query,
@@ -235,6 +239,7 @@ def query_property_by_condition(
     condition: str,
     building_filter: Optional[str] = None,
     index_names: Optional[list[str]] = None,
+    access_filter: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """
     Query buildings by property condition from the 'planon_data' namespace.
@@ -258,6 +263,7 @@ def query_property_by_condition(
             idx_name=idx_name,
             namespace=namespace,
             filter_dict=filter_dict,
+            access_filter=access_filter,
             top_k=DEFAULT_BATCH_TOP_K,
         )
 
@@ -288,7 +294,10 @@ def query_property_by_condition(
 
 
 def rank_buildings_by_area(
-    area_type: str = "gross", order: str = "desc", limit: Optional[int] = None
+    area_type: str = "gross",
+    order: str = "desc",
+    limit: Optional[int] = None,
+    access_filter: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """
     Rank buildings by gross or net area from Planon data vectors in Pinecone.
@@ -335,6 +344,7 @@ def rank_buildings_by_area(
                 idx_name=idx_name,
                 namespace=namespace,
                 filter_dict=None,
+                access_filter=access_filter,
                 top_k=DEFAULT_BATCH_TOP_K,
             )
         except Exception as e:
@@ -497,6 +507,7 @@ def _query_index_with_batches(
     idx_name: str,
     namespace: Optional[str],
     filter_dict: Optional[dict[str, Any]] = None,
+    access_filter: Optional[dict[str, Any]] = None,
     top_k: int = DEFAULT_BATCH_TOP_K,
 ) -> list[dict[str, Any]]:
     """
@@ -532,25 +543,30 @@ def _query_index_with_batches(
         dim = idx.describe_index_stats().get("dimension", 1536)
         zero_vec = [0.0] * dim
 
+        combined_filter = combine_pinecone_filters(filter_dict, access_filter)
+
         all_matches = query_all_chunks(
             index=idx,
             namespace=namespace,
             query_vector=zero_vec,
-            filter_dict=filter_dict,
+            filter_dict=combined_filter,
             top_k=safe_top_k,
             include_metadata=True,
         )
 
-        # normalised = normalise_matches(all_matches)
         deduped = _dedupe_matches_by_key(all_matches)
+        authorised = filter_authorized_structured_matches(
+            deduped,
+            access_filter=access_filter,
+        )
         logging.info(
-            "[%s] Retrieved %d unique matches (from %d total)",
+            "[%s] Retrieved %d authorised unique matches (from %d total)",
             idx_name,
-            len(deduped),
+            len(authorised),
             len(all_matches),
         )
 
-        return deduped
+        return authorised
 
     except Exception as e:
         logging.error("Error querying %s: %s", idx_name, sanitise_error(e))
@@ -561,6 +577,7 @@ def _query_index_with_fallback(
     idx_name: str,
     primary_namespace: Optional[str],
     filter_dict: Optional[dict[str, Any]] = None,
+    access_filter: Optional[dict[str, Any]] = None,
     top_k: int = DEFAULT_BATCH_TOP_K,
 ) -> list[dict[str, Any]]:
     """
@@ -581,7 +598,13 @@ def _query_index_with_fallback(
         primary_namespace,
         idx_name,
     )
-    matches = _query_index_with_batches(idx_name, primary_namespace, filter_dict, top_k)
+    matches = _query_index_with_batches(
+        idx_name,
+        primary_namespace,
+        filter_dict,
+        access_filter,
+        top_k,
+    )
 
     if matches:
         logging.info(
@@ -620,7 +643,7 @@ def _query_index_with_fallback(
             logging.info("%s Trying fallback namespace: %s", EMOJI_REPEAT, display_ns)
 
             matches = _query_index_with_batches(
-                idx_name, fallback_ns, filter_dict, top_k
+                idx_name, fallback_ns, filter_dict, access_filter, top_k
             )
 
             if matches:
@@ -904,7 +927,10 @@ def create_document_building_filter(building_name: str) -> dict[str, Any]:
 # -----------------------------------------------------------------------------
 
 
-def generate_property_condition_answer(query: str) -> Optional[str]:
+def generate_property_condition_answer(
+    query: str,
+    access_filter: Optional[dict[str, Any]] = None,
+) -> Optional[str]:
     # condition = normalise_property_condition(query)
     # if not condition:
     #     return "Please specify a property condition (e.g., Condition A, Condition B, Derelict)."
@@ -931,6 +957,7 @@ def generate_property_condition_answer(query: str) -> Optional[str]:
                 idx_name=idx_name,
                 namespace="planon_data",
                 filter_dict=create_building_filter(building),
+                access_filter=access_filter,
                 top_k=DEFAULT_BATCH_TOP_K,
             )
             matches_found.extend(matches)
@@ -959,7 +986,11 @@ def generate_property_condition_answer(query: str) -> Optional[str]:
     # e.g. "Is BDFI derelict?" or "Which buildings are derelict?"
     # ------------------------------------------------------------------
     if condition:
-        results = query_property_by_condition(condition, building_filter=building)
+        results = query_property_by_condition(
+            condition,
+            building_filter=building,
+            access_filter=access_filter,
+        )
         building_count = results["building_count"]
 
         # If user asked about a specific building + yes/no intent → return boolean answer
@@ -1025,7 +1056,10 @@ def generate_property_condition_answer(query: str) -> Optional[str]:
     # return answer
 
 
-def generate_ranking_answer(query: str) -> Optional[str]:
+def generate_ranking_answer(
+    query: str,
+    access_filter: Optional[dict[str, Any]] = None,
+) -> Optional[str]:
     """
     Generate an answer for building ranking queries (by area).
     Works with rank_buildings_by_area() structured output.
@@ -1058,7 +1092,12 @@ def generate_ranking_answer(query: str) -> Optional[str]:
     )
 
     # Run structured ranking
-    results = rank_buildings_by_area(area_type=area_type, order=order, limit=limit)
+    results = rank_buildings_by_area(
+        area_type=area_type,
+        order=order,
+        limit=limit,
+        access_filter=access_filter,
+    )
 
     total_buildings = results.get("total_buildings", 0)
     ranked = results.get("results", [])
@@ -1119,14 +1158,17 @@ def generate_ranking_answer(query: str) -> Optional[str]:
 # -----------------------------------------------------------------------------
 
 
-def generate_counting_answer(query: str) -> Optional[str]:
+def generate_counting_answer(
+    query: str,
+    access_filter: Optional[dict[str, Any]] = None,
+) -> Optional[str]:
     # Route to other handlers first
     if is_maintenance_query(query):
-        return generate_maintenance_answer(query)
+        return generate_maintenance_answer(query, access_filter=access_filter)
     if is_property_condition_query(query):
-        return generate_property_condition_answer(query)
+        return generate_property_condition_answer(query, access_filter=access_filter)
     if is_ranking_query(query):
-        return generate_ranking_answer(query)
+        return generate_ranking_answer(query, access_filter=access_filter)
     if not is_counting_query(query):
         return None
 
@@ -1160,7 +1202,12 @@ def generate_counting_answer(query: str) -> Optional[str]:
         """Query a single index for counting and return matches."""
         try:
             ns = _route_namespace(doc_type)
-            return _query_index_with_batches(idx_name, ns, filter_dict)
+            return _query_index_with_batches(
+                idx_name,
+                ns,
+                filter_dict,
+                access_filter,
+            )
         except Exception as e:
             logging.error("Failed to query index %s for counting: %s", idx_name, e)
             return []

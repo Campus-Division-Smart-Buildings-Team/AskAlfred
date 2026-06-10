@@ -53,6 +53,7 @@ def execute(instr: SearchInstructions) -> ReturnUnion:
             query=instr.query,
             top_k=instr.top_k,
             building_filter=getattr(instr, "building", None),
+            access_filter=getattr(instr, "access_filter", None),
         )
 
     # Planon structured search (property/condition/ranking)

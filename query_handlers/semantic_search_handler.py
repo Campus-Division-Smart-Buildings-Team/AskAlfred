@@ -103,7 +103,10 @@ class SemanticSearchHandler(BaseQueryHandler):
 
         try:
             results, answer, pub_date_info, score_too_low = search_core.semantic_search(
-                query_text, context.top_k, building_filter=context.building_filter
+                query_text,
+                context.top_k,
+                building_filter=context.building_filter,
+                access_filter=context.access_filter,
             )
 
             elapsed = round(time.time() - start, 3)
@@ -136,6 +139,7 @@ class SemanticSearchHandler(BaseQueryHandler):
                     "elapsed_seconds": elapsed,
                     "score_too_low": score_too_low,
                     "building_filter": context.building_filter,
+                    "access_control_applied": bool(context.access_filter),
                 },
             )
 

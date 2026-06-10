@@ -10,9 +10,15 @@ def planon_search(instruction):
 
     # Ranking (e.g. "biggest buildings", "top 5 by area")
     if "rank" in q or "biggest" in q or "largest" in q:
-        answer = generate_ranking_answer(instruction.query)
+        answer = generate_ranking_answer(
+            instruction.query,
+            access_filter=getattr(instruction, "access_filter", None),
+        )
         return [], answer, ""
 
     # Property condition queries ("which buildings have asbestos?")
-    answer = generate_property_condition_answer(instruction.query)
+    answer = generate_property_condition_answer(
+        instruction.query,
+        access_filter=getattr(instruction, "access_filter", None),
+    )
     return [], answer, ""

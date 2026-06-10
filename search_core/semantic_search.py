@@ -17,6 +17,7 @@ from generate_semantic_answer import (
 from search_core.search_utils import (
     apply_building_boost,
     apply_doc_type_boost,
+    apply_occupancy_capacity_boost,
     deduplicate_results,
     get_effective_score,
     search_one_index,
@@ -24,7 +25,10 @@ from search_core.search_utils import (
 
 
 def semantic_search(
-    query: str, top_k: int, building_filter: Optional[str] = None
+    query: str,
+    top_k: int,
+    building_filter: Optional[str] = None,
+    access_filter: Optional[dict] = None,
 ) -> tuple[list[dict], str, str, bool]:
 
     logging.info(
@@ -54,7 +58,11 @@ def semantic_search(
     if building:
         for idx in TARGET_INDEXES:
             hits = search_one_index(
-                idx, enhanced_query, top_k * 3, building_filter=building
+                idx,
+                enhanced_query,
+                top_k * 3,
+                building_filter=building,
+                access_filter=access_filter,
             )
             results.extend(hits)
 
@@ -66,7 +74,11 @@ def semantic_search(
     if not results:
         for idx in TARGET_INDEXES:
             hits = search_one_index(
-                idx, enhanced_query, top_k * 3, building_filter=None
+                idx,
+                enhanced_query,
+                top_k * 3,
+                building_filter=None,
+                access_filter=access_filter,
             )
             results.extend(hits)
 
@@ -81,6 +93,8 @@ def semantic_search(
         results = apply_building_boost(
             results, building, boost_factor=3.0 if not used_filter else 1.5
         )
+
+    results = apply_occupancy_capacity_boost(results, enhanced_query)
 
     # Sort by boosted or base score
     results.sort(key=get_effective_score, reverse=True)

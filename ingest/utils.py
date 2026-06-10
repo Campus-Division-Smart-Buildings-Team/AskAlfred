@@ -26,8 +26,12 @@ from typing import TYPE_CHECKING, Any, Optional
 
 from tqdm import tqdm
 
+from access_control import apply_acl_defaults, has_required_acl_metadata
 from alfred_exceptions import ExternalServiceError, RoutingError, ValidationError
 from config import (
+    INGEST_DEFAULT_ACCESS_LEVEL,
+    INGEST_DEFAULT_ALLOWED_ROLES,
+    INGEST_DEFAULT_TENANT_ID,
     _route_namespace,
 )
 from pinecone_utils import sanitise_metadata_for_pinecone
@@ -154,6 +158,12 @@ def validate_with_truncation(
     2) Truncate text field
     3) Validate (rechecks size)
     """
+    apply_acl_defaults(
+        metadata,
+        tenant_id=INGEST_DEFAULT_TENANT_ID,
+        access_level=INGEST_DEFAULT_ACCESS_LEVEL,
+        allowed_roles=INGEST_DEFAULT_ALLOWED_ROLES,
+    )
     size_bytes, ok, size_error = MetadataValidator.estimate_size(
         metadata,
         max_metadata_size=ctx.config.max_metadata_size,
@@ -213,6 +223,9 @@ class MetadataValidator:
         missing = MetadataValidator.REQUIRED_FIELDS - metadata.keys()
         if missing:
             return False, f"Missing required fields: {missing}"
+
+        if not has_required_acl_metadata(metadata):
+            return False, "Missing required ACL metadata fields"
 
         nulls = [k for k, v in metadata.items() if v is None]
         if nulls:

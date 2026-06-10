@@ -6,9 +6,14 @@ CLI entrypoint for AskAlfred local batch ingestion.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 import logging
 import sys
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from dotenv import load_dotenv
 
@@ -23,10 +28,6 @@ from ingest import (
     ingest_local_directory_with_progress,
     validate_namespace_routing,
 )
-
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
 
 
 def parse_args() -> argparse.Namespace:
@@ -93,9 +94,29 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def configure_logging() -> Path:
+    """Configure console and timestamped file logging for an ingest run."""
+    logs_dir = ROOT / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    log_path = logs_dir / f"ingest_{datetime.now():%Y%m%d_%H%M%S}.log"
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        handlers=[
+            logging.StreamHandler(sys.stdout),
+            logging.FileHandler(log_path, encoding="utf-8"),
+        ],
+        force=True,
+    )
+    return log_path
+
+
 def main() -> int:
+    log_path = configure_logging()
     load_dotenv()
     args = parse_args()
+    logging.info("Writing ingest log to %s", log_path)
 
     try:
         config = BatchIngestConfig.from_env()

@@ -39,6 +39,19 @@ AUTH_STRICT_TENANT = os.getenv("AUTH_STRICT_TENANT", "true").strip().lower() in 
     "on",
 }
 AUTH_REDIRECT_URI = os.getenv("AUTH_REDIRECT_URI", "http://localhost:8501")
+INGEST_DEFAULT_TENANT_ID = os.getenv(
+    "INGEST_DEFAULT_TENANT_ID",
+    os.getenv("AZURE_TENANT_ID", ""),
+).strip() or None
+INGEST_DEFAULT_ACCESS_LEVEL = (
+    os.getenv("INGEST_DEFAULT_ACCESS_LEVEL", "pilot_internal").strip()
+    or "pilot_internal"
+)
+INGEST_DEFAULT_ALLOWED_ROLES = tuple(
+    role.strip()
+    for role in os.getenv("INGEST_DEFAULT_ALLOWED_ROLES", "pilot_user").split(",")
+    if role.strip()
+)
 
 DEFAULT_NAMESPACE: Optional[str] = None  # None means default namespace
 
@@ -318,7 +331,7 @@ class DocumentTypes:
 
 FRA_RISK_ITEMS_NAMESPACE = NAMESPACE_MAPPINGS[DocumentTypes.FRA_RISK_ITEM]
 
-TARGET_INDEXES = ["local-docs"]
+TARGET_INDEXES = ["testacl"]
 SEARCH_ALL_NAMESPACES = True
 DEFAULT_EMBED_MODEL = os.getenv("DEFAULT_EMBED_MODEL", "text-embedding-3-small")
 ANSWER_MODEL = os.getenv("ANSWER_MODEL", "gpt-4o-mini")
@@ -345,6 +358,9 @@ __all__ = [
     "ALLOW_ANONYMOUS_DEV",
     "AUTH_STRICT_TENANT",
     "AUTH_REDIRECT_URI",
+    "INGEST_DEFAULT_TENANT_ID",
+    "INGEST_DEFAULT_ACCESS_LEVEL",
+    "INGEST_DEFAULT_ALLOWED_ROLES",
     "DEFAULT_NAMESPACE",
     "BUILDING_FUZZY_STRONG",
     "BUILDING_FUZZY_WEAK",

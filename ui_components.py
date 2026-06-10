@@ -6,6 +6,7 @@ Enhanced with building cache status display.
 """
 
 import os
+import re
 from datetime import datetime, timezone
 from html import escape
 
@@ -475,6 +476,38 @@ def display_chat_history():
             if message.get("score_too_low", False):
                 display_safe_low_score_warning()
 
+            _render_citation_legend(
+                message.get("content", ""),
+                message.get("results", []),
+            )
+
             # Display search results if they exist
             if "results" in message:
                 display_search_results(message["results"])
+
+
+def _render_citation_legend(answer: str, results: list[dict]) -> None:
+    """Render a simple legend for inline [S1]-style answer citations."""
+    if not answer or not results:
+        return
+
+    citation_numbers = []
+    seen = set()
+    for match in re.findall(r"\[S(\d+)\]", answer):
+        number = int(match)
+        if number not in seen:
+            citation_numbers.append(number)
+            seen.add(number)
+
+    if not citation_numbers:
+        return
+
+    st.markdown("**Sources cited**")
+    for number in citation_numbers:
+        if number < 1 or number > len(results):
+            continue
+        result = results[number - 1]
+        metadata = result.get("metadata", {}) or {}
+        key = result.get("key") or metadata.get("key") or "Unknown"
+        namespace = result.get("namespace", "__default__")
+        st.caption(f"[S{number}] {key} ({namespace})")

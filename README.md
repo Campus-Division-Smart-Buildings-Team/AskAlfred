@@ -663,6 +663,7 @@ Beyond the core variables, these optional settings provide fine-grained control:
 # Environment mode
 ENVIRONMENT=development          # development | staging | production
 IS_PRODUCTION=false             # Enables stricter validation in production
+ALLOW_LOCAL_ENV=true            # Local dev only: opt in to loading repository .env
 
 # Feature flags
 ENABLE_SERVICE_STATUS=true      # Show service health in UI
@@ -689,6 +690,12 @@ LOG_FORMAT=json                 # json | text
 LOG_FILE=/var/log/alfred.log    # Optional file logging
 SENSITIVE_LOG_FIELDS=api_key,password,token  # Fields to redact
 ```
+
+Notes:
+- Repository `.env` loading is disabled by default.
+- `.env` is only loaded when `ALLOW_LOCAL_ENV=true` and `ENVIRONMENT=development`.
+- `.env` is ignored in `staging` and `production`, even if `ALLOW_LOCAL_ENV=true`.
+- Real environment variables always take precedence over values in `.env`.
 
 ---
 

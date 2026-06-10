@@ -421,7 +421,11 @@ class DocumentProcessor:
             docs = [(key, building, text_sample, building_metadata)]
             is_fra_candidate = _is_fra_candidate_policy(key, text_sample)
             if is_fra_candidate:
-                fra_metadata = extract_fra_metadata(text_sample)
+                fra_metadata = {
+                    field: value
+                    for field, value in extract_fra_metadata(text_sample).items()
+                    if value is not None
+                }
                 building_metadata.update(
                     {
                         **fra_metadata,

@@ -5,6 +5,7 @@ Query Manager - Centralised query orchestration for AskAlfred.
 
 """
 
+import json
 import logging
 import time
 from typing import Any, Optional
@@ -19,7 +20,7 @@ from config import (
 from emojis import EMOJI_CAUTION, EMOJI_CROSS, EMOJI_TICK, EMOJI_TIME
 from intent_classifier import NLPIntentClassifier
 from log_sanitiser import sanitise_error
-from query_context import QueryContext
+from query_context import QueryContext, build_access_filter
 from query_handlers import (
     ConversationalHandler,
     CountingHandler,
@@ -298,6 +299,12 @@ class QueryManager:
 
         # Create context
         context = QueryContext(query=query, **kwargs)
+        if not context.access_filter:
+            context.access_filter = build_access_filter(
+                tenant_id=context.tenant_id,
+                user_roles=context.user_roles,
+                authenticated=context.authenticated,
+            )
 
         # ---------------------------------------------------
         # Load previous conversational memory from SessionManager
@@ -696,8 +703,16 @@ class QueryManager:
 
         # Ensure we capture building context which influences the search results
         building_part = context.building_filter or ""
+        access_part = (
+            json.dumps(context.access_filter, sort_keys=True, default=str)
+            if context.access_filter
+            else ""
+        )
 
-        return f"{context.user_id}:{query_part}:{context.top_k}:{building_part}"
+        return (
+            f"{context.user_id}:{query_part}:{context.top_k}:"
+            f"{building_part}:{access_part}"
+        )
 
     def _update_stats(
         self, handler_class_name: str, query_type: str, elapsed_ms: float, success: bool

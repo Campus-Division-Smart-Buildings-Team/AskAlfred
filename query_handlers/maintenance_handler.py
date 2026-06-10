@@ -78,7 +78,9 @@ class MaintenanceHandler(BaseQueryHandler):
             )
 
             answer = generate_maintenance_answer(
-                query_text, building_override=building_override
+                query_text,
+                building_override=building_override,
+                access_filter=context.access_filter,
             )
 
             if not answer:

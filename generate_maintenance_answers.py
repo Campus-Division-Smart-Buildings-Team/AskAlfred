@@ -5,6 +5,7 @@ import logging
 import re
 from typing import Any, Optional, cast
 
+from access_control import filter_authorized_structured_matches
 from building.utils import (
     BuildingCacheManager,
 )
@@ -34,6 +35,7 @@ from pinecone_utils import open_index
 def generate_maintenance_answer(
     query: str,
     building_override: str | None = None,
+    access_filter: Optional[dict[str, Any]] = None,
 ) -> Optional[str]:
     """
     Handles maintenance queries using building-level vectors in Pinecone.
@@ -122,6 +124,7 @@ def generate_maintenance_answer(
             top_k=2000,
             namespace=namespace,
             include_metadata=True,
+            filter=access_filter if access_filter else None,
         )
         response = (
             raw.to_dict() if hasattr(raw, "to_dict") else cast(dict[str, Any], raw)
@@ -137,6 +140,15 @@ def generate_maintenance_answer(
 
     logging.info(
         "%s Retrieved %d maintenance building vectors from Pinecone (all target indexes)",
+        EMOJI_CHART,
+        len(matches),
+    )
+    matches = filter_authorized_structured_matches(
+        matches,
+        access_filter=access_filter,
+    )
+    logging.info(
+        "%s Authorised maintenance vectors after ACL enforcement: %d",
         EMOJI_CHART,
         len(matches),
     )
