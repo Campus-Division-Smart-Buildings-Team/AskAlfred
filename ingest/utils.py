@@ -18,6 +18,7 @@ These utilities are designed to support the main ingestion workflow while keepin
 import json
 import logging
 import mimetypes
+import random
 import time
 import uuid
 from math import ceil
@@ -140,6 +141,10 @@ def validate_safe_path(
 def truncate_by_tokens(text: str, encoder, max_tokens: int) -> str:
     if not text:
         return text
+    # Every token spans at least one character, so a text with no more
+    # characters than max_tokens cannot exceed the budget — skip encoding.
+    if len(text) <= max_tokens:
+        return text
     tokens = encoder.encode(text)
     if len(tokens) <= max_tokens:
         return text
@@ -164,6 +169,9 @@ def validate_with_truncation(
         access_level=INGEST_DEFAULT_ACCESS_LEVEL,
         allowed_roles=INGEST_DEFAULT_ALLOWED_ROLES,
     )
+    # Apply the schema version before estimating so the estimated size is
+    # exact and validate() can reuse it instead of re-serialising.
+    metadata.setdefault("_schema_version", MetadataValidator.SCHEMA_VERSION)
     size_bytes, ok, size_error = MetadataValidator.estimate_size(
         metadata,
         max_metadata_size=ctx.config.max_metadata_size,
@@ -171,18 +179,22 @@ def validate_with_truncation(
     if not ok:
         return False, f"{size_error} ({size_bytes} bytes)"
 
+    truncated = False
     text_value = metadata.get("text", "")
     if isinstance(text_value, str):
-        metadata["text"] = truncate_by_tokens(
+        new_text = truncate_by_tokens(
             text_value,
             encoder=ctx.encoder,
             max_tokens=ctx.config.max_metadata_text_tokens,
         )
+        truncated = new_text is not text_value
+        metadata["text"] = new_text
 
     return MetadataValidator.validate(
         metadata,
         max_metadata_size=ctx.config.max_metadata_size,
         logger=logger,
+        precomputed_size=None if truncated else size_bytes,
     )
 
 
@@ -217,6 +229,7 @@ class MetadataValidator:
         *,
         max_metadata_size: int,
         logger: logging.Logger | None = None,
+        precomputed_size: int | None = None,
     ) -> tuple[bool, Optional[str]]:
         log = _get_logger(logger)
         metadata.setdefault("_schema_version", MetadataValidator.SCHEMA_VERSION)
@@ -238,6 +251,13 @@ class MetadataValidator:
                 "Deprecated fields found: %s. Please update your extraction logic.",
                 found_deprecated,
             )
+        if precomputed_size is not None:
+            # Caller already serialised this exact metadata (no truncation
+            # happened since); avoid a second json.dumps per vector.
+            if precomputed_size > max_metadata_size:
+                return False, "Metadata too large"
+            return True, None
+
         try:
             size = len(json.dumps(metadata, ensure_ascii=False).encode("utf-8"))
             if size > max_metadata_size:
@@ -445,10 +465,18 @@ def list_local_files_secure(
             skipped_ext += 1
             continue
 
+        # Stat once per file; repeated stat() calls are expensive on
+        # network/synced filesystems (e.g. OneDrive).
+        try:
+            stat_result = filepath.stat()
+        except OSError as e:
+            log.warning("Could not stat %s: %s", filepath, e)
+            continue
+
         # Pre-filter by size
-        size_mb = filepath.stat().st_size / (1024 * 1024)
+        size_mb = stat_result.st_size / (1024 * 1024)
         if max_file_size_mb > 0 and size_mb > max_file_size_mb:
-            log.debug(
+            log.warning(
                 "Skipping large file: %s (%.2fMB)",
                 filepath.name,
                 size_mb,
@@ -461,8 +489,8 @@ def list_local_files_secure(
             relative_path = filepath.relative_to(base_path_obj)
             obj = {
                 "Key": str(relative_path),
-                "Size": filepath.stat().st_size,
-                "LastModified": filepath.stat().st_mtime,
+                "Size": stat_result.st_size,
+                "LastModified": stat_result.st_mtime,
             }
             files.append(obj)
         except ValueError as e:
@@ -480,18 +508,91 @@ def list_local_files_secure(
 
 
 # ============================================================================
+# BATCH SIZE ESTIMATION
+# ============================================================================
+
+
+def _sample_batch(
+    batch: list[dict[str, Any]],
+    *,
+    sample_rate: float = 0.1,
+) -> list[dict[str, Any]]:
+    """
+    Sample vectors from a batch at the given rate.
+    If no samples are drawn, return the first vector as a fallback.
+    """
+    if not batch:
+        return []
+    sample: list[dict[str, Any]] = []
+    for vector in batch:
+        if random.random() < sample_rate:
+            sample.append(vector)
+    if not sample:
+        sample = [batch[0]]
+    return sample
+
+
+def _estimate_batch_bytes(
+    batch: list[dict[str, Any]],
+    *,
+    sample_rate: float = 0.1,
+) -> int | None:
+    if not batch:
+        return None
+    sample = _sample_batch(batch, sample_rate=sample_rate)
+    total = 0
+    for vector in sample:
+        try:
+            total += len(json.dumps(vector, ensure_ascii=False, default=str))
+        except (TypeError, ValueError):
+            total += len(str(vector))
+    return int(total * (len(batch) / max(len(sample), 1)))
+
+
+def _estimate_metadata_bytes_per_vector(
+    batch: list[dict[str, Any]],
+    *,
+    sample_rate: float = 0.1,
+) -> int | None:
+    if not batch:
+        return None
+    sample = _sample_batch(batch, sample_rate=sample_rate)
+    total = 0
+    for vector in sample:
+        metadata = vector.get("metadata") or {}
+        try:
+            total += len(json.dumps(metadata, ensure_ascii=False, default=str))
+        except (TypeError, ValueError):
+            total += len(str(metadata))
+    est_total = total * (len(batch) / max(len(sample), 1))
+    return int(est_total / max(len(batch), 1))
+
+
+# ============================================================================
 # MAX BATCH HELPER
 # ============================================================================
 
 
-def calculate_max_batch_size(dimension: int, max_request_mb: float = 1.0) -> int:
+def calculate_max_batch_size(
+    dimension: int,
+    max_request_mb: float = 1.0,
+    *,
+    metadata_bytes_per_vector: int = 0,
+    per_vector_overhead_bytes: int = 128,
+) -> int:
     """
-    Calculate a safe Pinecone upsert batch size based on embedding dimension.
+    Calculate a safe Pinecone upsert batch size based on embedding dimension
+    and estimated metadata size per vector.
 
     Pinecone request payloads should stay under ~2MB.
-    Default uses a conservative 1.8MB safety margin.
+    Default caps the request at a conservative 1MB; metadata and a small
+    per-record overhead (id + JSON framing) consume from the same budget.
     """
-    bytes_per_vector = dimension * 4  # float32
+    bytes_per_vector = (
+        dimension * 4  # float32
+        + max(0, metadata_bytes_per_vector)
+        + per_vector_overhead_bytes
+    )
     bytes_per_mb = 1024 * 1024
     max_bytes = max_request_mb * bytes_per_mb
     return max(1, int(max_bytes / bytes_per_vector))
@@ -521,13 +622,6 @@ def upsert_vectors(ctx, vectors: list[dict[str, Any]]) -> None:
 
         # Upsert per namespace
 
-        MAX_REQUEST_VECTORS = calculate_max_batch_size(ctx.config.dimension)
-        ctx.logger.debug(
-            "Calculated MAX_REQUEST_VECTORS=%d for dimension=%d",
-            MAX_REQUEST_VECTORS,
-            ctx.config.dimension,
-        )
-
         for ns, vecs in grouped.items():
             clean_vecs = []
             for v in vecs:
@@ -541,12 +635,28 @@ def upsert_vectors(ctx, vectors: list[dict[str, Any]]) -> None:
                     clean_v["metadata"] = {}
                 clean_vecs.append(clean_v)
 
+            # Size requests from sanitised metadata so metadata-heavy batches
+            # stay under the Pinecone request payload limit
+            metadata_est = _estimate_metadata_bytes_per_vector(clean_vecs) or 0
+            max_request_vectors = calculate_max_batch_size(
+                ctx.config.dimension,
+                metadata_bytes_per_vector=metadata_est,
+            )
+            ctx.logger.debug(
+                "Calculated max_request_vectors=%d for dimension=%d"
+                " (~%d metadata bytes/vector, ns=%s)",
+                max_request_vectors,
+                ctx.config.dimension,
+                metadata_est,
+                ns or "__default__",
+            )
+
             # Split large batches into smaller chunks
             total = len(clean_vecs)
-            chunks = ceil(total / MAX_REQUEST_VECTORS)
+            chunks = ceil(total / max_request_vectors)
             for i in range(chunks):
-                start = i * MAX_REQUEST_VECTORS
-                end = start + MAX_REQUEST_VECTORS
+                start = i * max_request_vectors
+                end = start + max_request_vectors
                 batch = clean_vecs[start:end]
                 upsert_start = time.perf_counter()
                 try:

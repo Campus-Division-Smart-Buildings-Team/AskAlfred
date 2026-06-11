@@ -24,6 +24,7 @@ from file_operations_validator import (
     FileTypeError,
     PathTraversalError,
     SymlinkError,
+    has_suspicious_patterns,
     is_safe_extension,
     read_file_safe,
     validate_directory_safety,
@@ -98,6 +99,16 @@ class TestPathTraversalPrevention:
             for path in dangerous:
                 with pytest.raises(PathTraversalError):
                     validate_path_safety(tmpdir, path)
+
+    def test_ampersand_allowed_inside_legitimate_filename(self):
+        """Test that normal ampersands in document names are accepted."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = "UoB-Retort-House-BMS-O&M-Manual-rev1.pdf"
+            filepath = Path(tmpdir) / path
+            filepath.write_text("content")
+
+            assert not has_suspicious_patterns(path)
+            assert validate_path_safety(tmpdir, path) == filepath.resolve()
 
     def test_absolute_path_traversal_rejected(self):
         """Test that absolute path traversal is rejected."""

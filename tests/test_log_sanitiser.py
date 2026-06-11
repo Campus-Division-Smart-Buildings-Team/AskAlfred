@@ -323,7 +323,7 @@ class TestSanitisedFormatter:
         """Test formatter with exception information."""
         formatter = SanitisedFormatter("%(message)s")
         try:
-            raise ValueError("Password is secret123")
+            raise ValueError("password=secret123")
         except ValueError:
             import sys
 
@@ -338,8 +338,10 @@ class TestSanitisedFormatter:
                 exc_info=exc_info,
             )
             formatted = formatter.format(record)
-            # The formatted output might contain the traceback
-            # but sensitive values should be redacted
+            # The formatted output may contain the traceback,
+            # but sensitive values must be redacted from it.
+            assert "Exception occurred" in formatted
+            assert "secret123" not in formatted
 
     def test_formatter_preserves_non_sensitive_data(self):
         """Test that formatter preserves non-sensitive information."""

@@ -679,6 +679,9 @@ ALLOWED_FILE_EXTENSIONS=.pdf,.docx,.xlsx,.csv
 REDIS_DB=0                      # Redis database number
 REDIS_SSL=false                 # Enable SSL for Redis connection
 REDIS_MAX_CONNECTIONS=10        # Connection pool size
+REDIS_SOCKET_TIMEOUT=5          # Max seconds for Redis commands
+REDIS_SOCKET_CONNECT_TIMEOUT=5  # Max seconds to establish Redis connection
+REDIS_HEALTH_CHECK_INTERVAL=30  # Seconds between Redis connection health checks
 
 # Pinecone settings
 PINECONE_ENVIRONMENT=us-east-1  # Pinecone region

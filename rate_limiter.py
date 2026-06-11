@@ -348,6 +348,9 @@ class RateLimiterManager:
         Args:
             redis_client: Optional Redis client. If None, uses in-memory backend.
         """
+        if self._backend is not None:
+            return
+
         if redis_client:
             try:
                 # Test Redis connection

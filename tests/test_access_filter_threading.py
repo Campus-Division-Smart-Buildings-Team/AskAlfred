@@ -1,12 +1,12 @@
-from access_control import filter_authorized_structured_matches
-from query_context import DENY_ALL_TENANT_ID, build_access_filter
 from types import SimpleNamespace
 
 import ingest.utils as ingest_utils
 import structured_queries
-from search_instructions import SearchInstructions
+from access_control import filter_authorized_structured_matches
+from query_context import DENY_ALL_TENANT_ID, build_access_filter
 from search_core.search_router import execute
 from search_core.search_utils import search_one_index
+from search_instructions import SearchInstructions
 
 
 def test_build_access_filter_is_empty_for_anonymous_sessions():
@@ -22,11 +22,26 @@ def test_build_access_filter_is_empty_for_anonymous_sessions():
 def test_build_access_filter_scopes_authenticated_user_to_tenant():
     access_filter = build_access_filter(
         tenant_id="tenant-123",
-        user_roles=("viewer",),
+        user_roles=(),
         authenticated=True,
     )
 
     assert access_filter == {"tenant_id": {"$eq": "tenant-123"}}
+
+
+def test_build_access_filter_adds_role_constraint_when_roles_present():
+    access_filter = build_access_filter(
+        tenant_id="tenant-123",
+        user_roles=("viewer", ""),
+        authenticated=True,
+    )
+
+    assert access_filter == {
+        "$and": [
+            {"tenant_id": {"$eq": "tenant-123"}},
+            {"allowed_roles": {"$in": ["viewer"]}},
+        ]
+    }
 
 
 def test_build_access_filter_denies_authenticated_user_without_tenant():
@@ -79,7 +94,7 @@ def test_search_one_index_combines_building_and_access_filters(monkeypatch):
     )
     monkeypatch.setattr(
         "search_core.search_utils._namespaces_to_search",
-        lambda idx: [None],
+        lambda idx, idx_name: [None],
     )
     monkeypatch.setattr(
         "search_core.search_utils.create_building_metadata_filter",
@@ -91,9 +106,13 @@ def test_search_one_index_combines_building_and_access_filters(monkeypatch):
         "search_core.search_utils.normalise_matches",
         lambda raw: [],
     )
+    monkeypatch.setattr(
+        "search_core.search_utils.embed_texts",
+        lambda texts, model: [[0.0]],
+    )
 
     def fake_vector_query(
-        idx, namespace, query, k, embed_model, metadata_filter=None
+        idx, namespace, query, k, embed_model, metadata_filter=None, query_vector=None
     ):
         captured["metadata_filter"] = metadata_filter
         return {"matches": []}
@@ -123,7 +142,11 @@ def test_search_one_index_filters_semantic_hits_missing_acl(monkeypatch):
     )
     monkeypatch.setattr(
         "search_core.search_utils._namespaces_to_search",
-        lambda idx: [None],
+        lambda idx, idx_name: [None],
+    )
+    monkeypatch.setattr(
+        "search_core.search_utils.embed_texts",
+        lambda texts, model: [[0.0]],
     )
     monkeypatch.setattr(
         "search_core.search_utils.normalise_matches",
@@ -146,7 +169,7 @@ def test_search_one_index_filters_semantic_hits_missing_acl(monkeypatch):
     )
     monkeypatch.setattr(
         "search_core.search_utils.vector_query",
-        lambda idx, namespace, query, k, embed_model, metadata_filter=None: {
+        lambda idx, namespace, query, k, embed_model, metadata_filter=None, query_vector=None: {
             "matches": []
         },
     )
@@ -209,6 +232,16 @@ def test_filter_authorized_structured_matches_fails_closed_on_missing_acl():
             }
         }
     ]
+
+
+def test_filter_authorized_structured_matches_keeps_legacy_vectors_when_unscoped():
+    """Unscoped (anonymous/dev) sessions still see pre-ACL legacy vectors."""
+    matches = [
+        {"metadata": {"key": "legacy-no-acl"}},
+    ]
+
+    assert filter_authorized_structured_matches(matches, access_filter=None) == matches
+    assert filter_authorized_structured_matches(matches, access_filter={}) == matches
 
 
 def test_query_index_with_batches_combines_filters_and_filters_acl(monkeypatch):

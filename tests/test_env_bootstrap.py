@@ -14,6 +14,9 @@ def _reset_bootstrap_state(monkeypatch):
 
 
 def _install_fake_dotenv(monkeypatch, values: dict[str, str]):
+    def fake_dotenv_values(_path):
+        return values
+
     def fake_load_dotenv(_path, override=False):
         for key, value in values.items():
             if override or key not in os.environ:
@@ -23,7 +26,7 @@ def _install_fake_dotenv(monkeypatch, values: dict[str, str]):
     monkeypatch.setitem(
         sys.modules,
         "dotenv",
-        SimpleNamespace(load_dotenv=fake_load_dotenv),
+        SimpleNamespace(dotenv_values=fake_dotenv_values, load_dotenv=fake_load_dotenv),
     )
 
 
@@ -79,6 +82,26 @@ def test_load_local_env_loads_when_opted_in_for_development(monkeypatch):
     monkeypatch.delenv("BOOTSTRAP_TEST_VALUE", raising=False)
     _install_fake_path(monkeypatch, env_exists=True)
     _install_fake_dotenv(monkeypatch, {"BOOTSTRAP_TEST_VALUE": "from-dotenv"})
+
+    env_bootstrap.load_local_env()
+
+    assert os.environ.get("BOOTSTRAP_TEST_VALUE") == "from-dotenv"
+
+
+def test_load_local_env_loads_when_opted_in_from_dotenv(monkeypatch):
+    _reset_bootstrap_state(monkeypatch)
+    monkeypatch.delenv("ALLOW_LOCAL_ENV", raising=False)
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+    monkeypatch.delenv("BOOTSTRAP_TEST_VALUE", raising=False)
+    _install_fake_path(monkeypatch, env_exists=True)
+    _install_fake_dotenv(
+        monkeypatch,
+        {
+            "ALLOW_LOCAL_ENV": "true",
+            "ENVIRONMENT": "development",
+            "BOOTSTRAP_TEST_VALUE": "from-dotenv",
+        },
+    )
 
     env_bootstrap.load_local_env()
 

@@ -18,7 +18,6 @@ from typing import Any, Optional
 
 from query_types import QueryType
 
-
 DENY_ALL_TENANT_ID = "__deny_access__"
 
 
@@ -32,18 +31,26 @@ def build_access_filter(
     Build the first-pass retrieval access filter from the current auth context.
 
     This initial enforcement is intentionally narrow: authenticated users are
-    constrained to their tenant, while anonymous/dev sessions keep the current
+    constrained to their tenant (and to documents allowing one of their roles,
+    when roles are present), while anonymous/dev sessions keep the current
     unfiltered behaviour until the wider authz rollout is complete.
     """
-    del user_roles  # Roles will be threaded into retrieval in a later patch.
-
     if not authenticated:
         return {}
 
     if not tenant_id:
         return {"tenant_id": {"$eq": DENY_ALL_TENANT_ID}}
 
-    return {"tenant_id": {"$eq": str(tenant_id)}}
+    access_filter: dict[str, Any] = {"tenant_id": {"$eq": str(tenant_id)}}
+    roles = [str(role) for role in user_roles if role]
+    if roles:
+        access_filter = {
+            "$and": [
+                access_filter,
+                {"allowed_roles": {"$in": roles}},
+            ]
+        }
+    return access_filter
 
 
 @dataclass
@@ -81,7 +88,9 @@ class QueryContext:
     user_roles: tuple[str, ...] = field(default_factory=tuple)
     authenticated: bool = False
     auth_source: str = "anonymous"
-    access_filter: dict[str, Any] = field(default_factory=dict)
+    # None means "not yet built" (QueryManager builds it from the auth context);
+    # an explicit {} means "deliberately unfiltered" and is preserved.
+    access_filter: Optional[dict[str, Any]] = None
 
     # Preprocessor-enriched attributes
     building: Optional[str] = None

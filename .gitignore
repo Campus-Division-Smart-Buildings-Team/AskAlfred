@@ -44,3 +44,6 @@ data/
 
 # metrics
 *.prom
+
+# generated security reports
+security_report*.html

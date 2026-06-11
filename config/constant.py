@@ -39,10 +39,13 @@ AUTH_STRICT_TENANT = os.getenv("AUTH_STRICT_TENANT", "true").strip().lower() in 
     "on",
 }
 AUTH_REDIRECT_URI = os.getenv("AUTH_REDIRECT_URI", "http://localhost:8501")
-INGEST_DEFAULT_TENANT_ID = os.getenv(
-    "INGEST_DEFAULT_TENANT_ID",
-    os.getenv("AZURE_TENANT_ID", ""),
-).strip() or None
+INGEST_DEFAULT_TENANT_ID = (
+    os.getenv(
+        "INGEST_DEFAULT_TENANT_ID",
+        os.getenv("AZURE_TENANT_ID", ""),
+    ).strip()
+    or None
+)
 INGEST_DEFAULT_ACCESS_LEVEL = (
     os.getenv("INGEST_DEFAULT_ACCESS_LEVEL", "pilot_internal").strip()
     or "pilot_internal"
@@ -58,12 +61,12 @@ DEFAULT_NAMESPACE: Optional[str] = None  # None means default namespace
 # ===========================================================================
 # BUILDING RESOLUTION & ORDER CONFIGURATION
 # ===========================================================================
-BUILDING_FUZZY_STRONG = 0.75
+BUILDING_FUZZY_STRONG = 0.80
 BUILDING_FUZZY_WEAK = 0.50
 BUILDING_TEXT_CUTOFF = 0.80
 BUILDING_TEXT_CONFIDENCE = 0.60
 BUILDING_REVIEW_TEXT_MIN_CONFIDENCE = 0.70
-BUILDING_REVIEW_FILENAME_MIN_CONFIDENCE = 0.75
+BUILDING_REVIEW_FILENAME_MIN_CONFIDENCE = 0.80
 BUILDING_TEXT_FIRST_LINES = 50
 BUILDING_TEXT_NGRAM_MAX = 5
 BUILDING_TEXT_NGRAM_MIN = 2
@@ -79,6 +82,12 @@ BUILDING_NAME_FIELDS = [
 # ===========================================================================
 INGEST_LOW_CONFIDENCE_WARN = 0.70
 INGEST_FETCH_MAX_SIZE_MB = 100
+# Parser-level resource guards (defense beyond raw file-size checks):
+# cap PDF page counts and DOCX archive entry counts/decompressed size so a
+# crafted document (zip bomb, page bomb) cannot exhaust memory/CPU at parse time.
+INGEST_PDF_MAX_PAGES = 2000
+INGEST_DOCX_MAX_ARCHIVE_ENTRIES = 10000
+INGEST_DOCX_MAX_UNCOMPRESSED_MB = 250
 INGEST_BACKOFF_BASE = 0.5
 INGEST_BACKOFF_CAP = 10.0
 INGEST_BACKOFF_JITTER_MIN = 0.5
@@ -97,12 +106,15 @@ INGEST_UPSERT_SPLIT_MAX_DEPTH = 4
 INGEST_UPSERT_SPLIT_MIN_BATCH_SIZE = 10
 INGEST_METADATA_MAX_SIZE = 10240  # Previously 40960
 INGEST_METADATA_CACHE_SIZE = 2048
-INGEST_METADATA_MAX_TEXT_TOKENS = 250
+# Must be >= chunk_tokens (default 500) plus headroom for the per-chunk
+# context header, otherwise the stored metadata text is truncated below the
+# embedded chunk and the answer model cannot see content that matched the query.
+INGEST_METADATA_MAX_TEXT_TOKENS = 600
 INGEST_VECTOR_BUFFER_MAX_SIZE = 10000
 INGEST_PROGRESS_LOG_INTERVAL = 10
 INGEST_PROCESSING_LEASE_SECONDS = 10 * 60  # Previously 900
 INGEST_UPSERT_FLUSH_SECONDS = 2.0
-INGEST_UPSERT_JOIN_TIMEOUT_SECONDS = 900.0
+INGEST_UPSERT_JOIN_TIMEOUT_SECONDS = 1800.0
 INGEST_UPSERT_JOIN_POLL_SECONDS = 2.0
 INGEST_FILE_TTL_SUCCESS_SECONDS = 30 * 60  # Previously 30 * 24 * 60 * 60
 INGEST_FILE_TTL_FAILED_SECONDS = 10 * 60  # Previously 7 * 24 * 60 * 60
@@ -338,7 +350,7 @@ ANSWER_MODEL = os.getenv("ANSWER_MODEL", "gpt-4o-mini")
 DIMENSION = 1536
 MIN_SCORE_THRESHOLD = 0.3
 INDEX_CONFIGS = {
-    "local-docs": {"model": DEFAULT_EMBED_MODEL, "dimension": DIMENSION},
+    "testacl": {"model": DEFAULT_EMBED_MODEL, "dimension": DIMENSION},
 }
 
 # ===========================================================================
@@ -374,6 +386,9 @@ __all__ = [
     "BUILDING_NAME_FIELDS",
     "INGEST_LOW_CONFIDENCE_WARN",
     "INGEST_FETCH_MAX_SIZE_MB",
+    "INGEST_PDF_MAX_PAGES",
+    "INGEST_DOCX_MAX_ARCHIVE_ENTRIES",
+    "INGEST_DOCX_MAX_UNCOMPRESSED_MB",
     "INGEST_BACKOFF_BASE",
     "INGEST_BACKOFF_CAP",
     "INGEST_BACKOFF_JITTER_MIN",

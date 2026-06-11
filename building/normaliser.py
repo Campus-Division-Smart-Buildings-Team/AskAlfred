@@ -42,6 +42,13 @@ _SUFFIXES = (
 
 # Collapse multiple whitespace
 _ws = re.compile(r"\s+")
+_STREET_SUFFIX_REPLACEMENTS = (
+    (re.compile(r"\brd\.?$"), "road"),
+    (re.compile(r"\bst\.?$"), "street"),
+    (re.compile(r"\bave\.?$"), "avenue"),
+    (re.compile(r"\bln\.?$"), "lane"),
+    (re.compile(r"\bdr\.?$"), "drive"),
+)
 
 
 @lru_cache(maxsize=2048)
@@ -81,6 +88,8 @@ def normalise_building_name(name: str | None) -> str:
     s = str(name).strip().lower()
     # Collapse whitespace around hyphens so "8 - 10" and "8-10" match.
     s = re.sub(r"\s*-\s*", "-", s)
+    for pattern, replacement in _STREET_SUFFIX_REPLACEMENTS:
+        s = pattern.sub(replacement, s)
 
     # Strip known generic suffixes (if present) **once**
     for suf in _SUFFIXES:

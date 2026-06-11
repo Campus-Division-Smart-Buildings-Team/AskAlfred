@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 from pinecone import Pinecone
 
 from alfred_exceptions import ConfigError
+from csv_sanitiser import neutralise_csv_formula
 from pinecone_utils import desanitise_metadata_from_pinecone
 
 # ---------------- Env & constants ----------------
@@ -27,12 +28,13 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s",
 )
 
-PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
-if not PINECONE_API_KEY:
-    raise ConfigError("PINECONE_API_KEY is not set")
 
-# Initialise Pinecone client
-pc = Pinecone(api_key=PINECONE_API_KEY)
+def get_pinecone_client() -> Pinecone:
+    """Create the Pinecone client on demand; importing stays side-effect free."""
+    api_key = os.getenv("PINECONE_API_KEY")
+    if not api_key:
+        raise ConfigError("PINECONE_API_KEY is not set")
+    return Pinecone(api_key=api_key)
 
 
 def get_all_namespaces(index) -> list[str]:
@@ -181,8 +183,8 @@ def format_value_for_csv(value: Any) -> str:
     if isinstance(value, (int, float)):
         return str(value)
 
-    # Everything else to string
-    return str(value)
+    # Everything else to string, neutralised against spreadsheet formula injection
+    return neutralise_csv_formula(str(value))
 
 
 def export_namespace_to_csv(
@@ -339,7 +341,7 @@ def export_index_to_csv(
         sample_size: Number of vectors to sample for field discovery
     """
     try:
-        index = pc.Index(idx_name)
+        index = get_pinecone_client().Index(idx_name)
 
         # Get index statistics
         stats = index.describe_index_stats()

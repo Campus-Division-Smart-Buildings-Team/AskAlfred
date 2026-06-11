@@ -101,6 +101,8 @@ class MaintenanceHandler(BaseQueryHandler):
         except Exception as e:
             self.logger.error("Maintenance handler error: %s", e, exc_info=True)
 
+            # Metadata may be displayed/persisted by callers, so expose only an
+            # error code/type; the detailed text stays in the sanitized logs.
             return QueryResult(
                 query=query_text,
                 answer="Sorry — I encountered an error while processing your maintenance query.",
@@ -108,5 +110,8 @@ class MaintenanceHandler(BaseQueryHandler):
                 success=False,
                 handler_used="MaintenanceHandler",
                 query_type=self.query_type.value,
-                metadata={"error": str(e)},
+                metadata={
+                    "error": "maintenance_handler_error",
+                    "error_type": type(e).__name__,
+                },
             )

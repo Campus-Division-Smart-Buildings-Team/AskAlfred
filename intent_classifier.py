@@ -13,11 +13,12 @@ Upgrades:
 
 import json
 import logging
+import threading
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional, Protocol, cast
+from typing import Any, Optional, Protocol, cast
 
 import numpy as np
 
@@ -60,22 +61,61 @@ from structured_queries import (
     is_property_condition_query,
 )
 
-try:
-    from hf_hub_ctranslate2 import CT2SentenceTransformer, EncoderCT2fromHfHub
+# hf_hub_ctranslate2 transitively imports transformers/torch, which costs tens of
+# seconds cold. Import lazily so app startup does not pay for it; the cost is
+# deferred to first classifier construction (or hidden via warm_encoder_runtime_async).
+_ENCODER_CT2_RUNTIME: Optional[Any] = None
+_CT2_IMPORT_ATTEMPTED = False
+_CT2_IMPORT_LOCK = threading.Lock()
 
-    CT2_AVAILABLE = True
-    _CT2SentenceTransformerRuntime = CT2SentenceTransformer
-    _EncoderCT2Runtime = EncoderCT2fromHfHub
-except ImportError:
-    CT2_AVAILABLE = False
-    _CT2SentenceTransformerRuntime = None
-    _EncoderCT2Runtime = None
-    logging.warning(
-        "%s hf-hub-ctranslate2 not installed. Run `pip install hf-hub-ctranslate2`.",
-        EMOJI_CAUTION,
-    )
-if TYPE_CHECKING:
-    from hf_hub_ctranslate2 import CT2SentenceTransformer, EncoderCT2fromHfHub
+
+def _get_encoder_ct2_runtime() -> Optional[Any]:
+    """Return EncoderCT2fromHfHub, importing it on first use. None if unavailable.
+
+    Thread-safe: a caller arriving while the warm-up thread is mid-import blocks
+    until the import finishes rather than seeing a half-initialised state.
+    """
+    global _ENCODER_CT2_RUNTIME, _CT2_IMPORT_ATTEMPTED
+    with _CT2_IMPORT_LOCK:
+        if _CT2_IMPORT_ATTEMPTED:
+            return _ENCODER_CT2_RUNTIME
+        try:
+            from hf_hub_ctranslate2 import EncoderCT2fromHfHub
+
+            _ENCODER_CT2_RUNTIME = EncoderCT2fromHfHub
+        except ImportError:
+            logging.warning(
+                "%s hf-hub-ctranslate2 not installed. "
+                "Run `pip install hf-hub-ctranslate2`.",
+                EMOJI_CAUTION,
+            )
+        _CT2_IMPORT_ATTEMPTED = True
+    return _ENCODER_CT2_RUNTIME
+
+
+def warm_encoder_runtime_async() -> Optional[threading.Thread]:
+    """Import hf_hub_ctranslate2 in a background daemon thread.
+
+    Call once at app startup so the heavy transformers/torch import overlaps
+    with the rest of initialisation instead of stalling the first query.
+    Safe to call repeatedly: no-ops once the import has been attempted.
+    """
+    if _CT2_IMPORT_ATTEMPTED:
+        return None
+
+    def _warm() -> None:
+        t0 = time.time()
+        runtime = _get_encoder_ct2_runtime()
+        if runtime is not None:
+            logging.info(
+                "%s Warmed CT2 encoder import in %.2f s (background)",
+                EMOJI_TIME,
+                time.time() - t0,
+            )
+
+    thread = threading.Thread(target=_warm, name="ct2-import-warmup", daemon=True)
+    thread.start()
+    return thread
 
 
 class _EmbeddingModel(Protocol):
@@ -257,7 +297,7 @@ class NLPIntentClassifier:
             for ex in examples
         }
 
-        if CT2_AVAILABLE:
+        if _get_encoder_ct2_runtime() is not None:
             try:
                 self._load_or_init_model()
                 self.enabled = True
@@ -420,6 +460,7 @@ class NLPIntentClassifier:
             return False
 
     def _load_or_init_model(self):
+        encoder_runtime = _get_encoder_ct2_runtime()
         # -----------------------------------------------------
         # Step 1: Load from local CT2 model directory if present
         # -----------------------------------------------------
@@ -428,9 +469,9 @@ class NLPIntentClassifier:
             t0 = time.time()
             try:
                 self.logger.info("Loading local model from %s", LOCAL_MODEL_DIR)
-                if _EncoderCT2Runtime is None:
+                if encoder_runtime is None:
                     raise RuntimeError("EncoderCT2fromHfHub not available")
-                ct2 = _EncoderCT2Runtime(
+                ct2 = encoder_runtime(
                     model_name_or_path=str(LOCAL_MODEL_DIR),
                     device="cpu",
                     compute_type="int8",
@@ -461,9 +502,9 @@ class NLPIntentClassifier:
                 LOCAL_MODEL_DIR,
                 self.model_name,
             )
-            if _EncoderCT2Runtime is None:
+            if encoder_runtime is None:
                 raise RuntimeError("EncoderCT2fromHfHub not available")
-            ct2 = _EncoderCT2Runtime(
+            ct2 = encoder_runtime(
                 model_name_or_path=self.model_name,
                 device="cpu",
                 compute_type="int8",
@@ -508,12 +549,13 @@ class NLPIntentClassifier:
         """Generate embeddings for all intent examples."""
         # Ensure the CT2SentenceTransformer model is initialised before encoding.
         if self.model is None:
-            if not CT2_AVAILABLE or _EncoderCT2Runtime is None:
+            encoder_runtime = _get_encoder_ct2_runtime()
+            if encoder_runtime is None:
                 raise ModelNotInitialisedError(
                     "CT2 encoder is not available; cannot generate embeddings. "
                     "Install hf-hub-ctranslate2 or run in pattern-only mode."
                 )
-            ct2 = _EncoderCT2Runtime(
+            ct2 = encoder_runtime(
                 model_name_or_path=self.model_name,
                 device="cpu",
                 compute_type="int8",

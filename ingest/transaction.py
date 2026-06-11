@@ -800,6 +800,12 @@ def _mark_batch_state(
     status: str,
     error: str | None = None,
 ) -> None:
+    ctx.stats.increment(f"batch_state_{status}_total")
+
+    # The state is per file, so collapse the batch to one registry write per
+    # file_id rather than one per vector.
+    records: dict[str, dict[str, Any]] = {}
+    namespaces: dict[str, set[str]] = {}
     for vector in batch:
         vector_id = vector.get("id")
         if not vector_id:
@@ -807,19 +813,30 @@ def _mark_batch_state(
         file_id = str(vector_id).split(":", 1)[0]
         if not file_id:
             continue
-        metadata = vector.get("metadata") or {}
         ns = get_display_namespace(vector.get("namespace"))
-        processing_token = vector.get("_processing_token")
+        file_namespaces = namespaces.setdefault(file_id, set())
+        if ns:
+            file_namespaces.add(ns)
+        if file_id not in records:
+            metadata = vector.get("metadata") or {}
+            records[file_id] = {
+                "processing_token": vector.get("_processing_token"),
+                "source_path": metadata.get("source_path", ""),
+                "source_key": metadata.get("key") or metadata.get("source") or "",
+                "content_hash": metadata.get("content_hash"),
+            }
+
+    for file_id, payload in records.items():
         try:
             ctx.file_registry.mark_state(
                 file_id=file_id,
-                processing_token=processing_token,
+                processing_token=payload["processing_token"],
                 status=status,
                 error=error,
-                source_path=metadata.get("source_path", ""),
-                source_key=metadata.get("key") or metadata.get("source") or "",
-                content_hash=metadata.get("content_hash"),
-                namespaces=(ns,) if ns else (),
+                source_path=payload["source_path"],
+                source_key=payload["source_key"],
+                content_hash=payload["content_hash"],
+                namespaces=tuple(sorted(namespaces.get(file_id, set()))),
             )
         except Exception as err:  # pylint: disable=broad-except
             ctx.logger.warning("FileRegistry state update failed: %s", err)

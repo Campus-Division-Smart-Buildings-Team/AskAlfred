@@ -37,7 +37,10 @@ def filter_authorized_structured_matches(
     authorised_matches: list[dict[str, Any]] = []
     for match in matches:
         metadata = match.get("metadata", {}) or {}
-        if not has_required_acl_metadata(metadata):
+        # Only enforce the ACL envelope when an access filter is in play;
+        # legacy vectors without ACL metadata remain visible to unscoped
+        # (anonymous/dev) sessions until they are re-ingested.
+        if access_filter and not has_required_acl_metadata(metadata):
             continue
         if access_filter and not metadata_matches_filter(metadata, access_filter):
             continue
@@ -81,7 +84,7 @@ def apply_acl_defaults(
         metadata["tenant_id"] = tenant_id
     if access_level and not metadata.get("access_level"):
         metadata["access_level"] = access_level
-    if allowed_roles and not metadata.get("allowed_roles"):
+    if allowed_roles is not None and not metadata.get("allowed_roles"):
         metadata["allowed_roles"] = [
             str(role).strip() for role in allowed_roles if str(role).strip()
         ]

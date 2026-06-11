@@ -299,7 +299,7 @@ class QueryManager:
 
         # Create context
         context = QueryContext(query=query, **kwargs)
-        if not context.access_filter:
+        if context.access_filter is None:
             context.access_filter = build_access_filter(
                 tenant_id=context.tenant_id,
                 user_roles=context.user_roles,

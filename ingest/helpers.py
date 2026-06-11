@@ -2,19 +2,17 @@
 """
 Ingestion helper functions for Alfred Local.
 This module provides various helper functions used during the ingestion process, including:
-- Batch namespace summarisation and sampling for vector batches.
-- Estimation of batch byte sizes for efficient processing.
+- Batch namespace summarisation for vector batches.
 - Extraction of layout-preserved text from PDFs for improved FRA parsing.
 - Detection of rate limit errors from exceptions.
 These helpers are designed to support the main ingestion workflow while keeping the code modular and maintainable.
 """
 
-import json
-import random
 import subprocess
 import tempfile
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeAlias
+from typing import TYPE_CHECKING, Any
 
 from alfred_exceptions import (
     ValidationError,
@@ -26,7 +24,15 @@ from .utils import (
     validate_safe_path,
 )
 
-UpsertQueueItem: TypeAlias = tuple[list[dict[str, Any]], int, int]
+
+@dataclass(frozen=True, slots=True)
+class UpsertQueueItem:
+    """A batch queued for the upsert worker, with retry/split bookkeeping."""
+
+    batch: list[dict[str, Any]] = field(default_factory=list)
+    retry_index: int = 0
+    split_depth: int = 0
+    not_before: float = 0.0  # time.monotonic() deadline; 0 = ready now
 
 
 # ---------------------------------------------------------------------------
@@ -42,62 +48,6 @@ def _summarise_batch_namespaces(batch: list[dict[str, Any]]) -> str:
         namespace = str(vector.get("namespace") or "")
         counts[namespace] = counts.get(namespace, 0) + 1
     return ",".join(f"{ns or 'default'}:{count}" for ns, count in counts.items())
-
-
-def _sample_batch(
-    batch: list[dict[str, Any]],
-    *,
-    sample_rate: float = 0.1,
-) -> list[dict[str, Any]]:
-    """
-    Sample vectors from a batch at the given rate.
-    If no samples are drawn, return the first vector as a fallback.
-    """
-    if not batch:
-        return []
-    sample: list[dict[str, Any]] = []
-    for vector in batch:
-        if random.random() < sample_rate:
-            sample.append(vector)
-    if not sample:
-        sample = [batch[0]]
-    return sample
-
-
-def _estimate_batch_bytes(
-    batch: list[dict[str, Any]],
-    *,
-    sample_rate: float = 0.1,
-) -> int | None:
-    if not batch:
-        return None
-    sample = _sample_batch(batch, sample_rate=sample_rate)
-    total = 0
-    for vector in sample:
-        try:
-            total += len(json.dumps(vector, ensure_ascii=False, default=str))
-        except (TypeError, ValueError):
-            total += len(str(vector))
-    return int(total * (len(batch) / max(len(sample), 1)))
-
-
-def _estimate_metadata_bytes_per_vector(
-    batch: list[dict[str, Any]],
-    *,
-    sample_rate: float = 0.1,
-) -> int | None:
-    if not batch:
-        return None
-    sample = _sample_batch(batch, sample_rate=sample_rate)
-    total = 0
-    for vector in sample:
-        metadata = vector.get("metadata") or {}
-        try:
-            total += len(json.dumps(metadata, ensure_ascii=False, default=str))
-        except (TypeError, ValueError):
-            total += len(str(metadata))
-    est_total = total * (len(batch) / max(len(sample), 1))
-    return int(est_total / max(len(batch), 1))
 
 
 def _extract_fra_layout_text(

@@ -525,8 +525,9 @@ def populate_building_cache_from_index(
         # Try multiple namespaces since planon_data might be in planon_data namespace
         dummy_vector = [0.0] * dimension
 
-        # List of namespaces to try
-        namespaces_to_try = [namespace, "planon_data", None]
+        # List of namespaces to try, deduplicated: the caller's namespace is
+        # often None (default), which would otherwise be queried twice.
+        namespaces_to_try = list(dict.fromkeys([namespace, "planon_data", None]))
         matches = []
 
         for ns in namespaces_to_try:

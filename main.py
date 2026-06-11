@@ -7,7 +7,6 @@ With dynamic building cache initialisation across all indexes.
 
 import logging
 import os
-import re
 import time
 import zipfile
 from pathlib import Path
@@ -41,6 +40,7 @@ from config import (
 from config.constant import IS_PRODUCTION
 from emojis import EMOJI_BOOKS, EMOJI_CAUTION, EMOJI_GORILLA, EMOJI_TIME
 from input_validator import get_validation_summary, validate_query_security
+from intent_classifier import warm_encoder_runtime_async
 from log_sanitiser import sanitise_error
 from query_context import build_access_filter
 from query_manager import QueryManager
@@ -59,6 +59,7 @@ from search_instructions import SearchInstructions
 from ui_components import (
     display_chat_history,
     initialise_chat_history,
+    render_citation_legend,
     render_custom_css,
     render_header,
     render_sidebar,
@@ -111,6 +112,10 @@ for n in ("torch", "torch._dynamo", "torch._subclasses.fake_tensor"):
     lg = logging.getLogger(n)
     lg.setLevel(logging.WARNING)
     lg.propagate = False
+
+# Warm the heavy CT2/transformers import in the background so the first query
+# doesn't pay for it. Must run after the HF offline env vars above are set.
+warm_encoder_runtime_async()
 
 
 # Ensure all loggers propagate properly
@@ -722,33 +727,6 @@ def display_last_results():
             # Add separator between results
             if i < result_count:
                 st.markdown("---")
-
-
-def render_citation_legend(answer: str, results: list[dict[str, Any]]) -> None:
-    """Render a simple legend for inline [S1]-style citations."""
-    if not answer or not results:
-        return
-
-    citation_numbers = []
-    seen = set()
-    for match in re.findall(r"\[S(\d+)\]", answer):
-        number = int(match)
-        if number not in seen:
-            citation_numbers.append(number)
-            seen.add(number)
-
-    if not citation_numbers:
-        return
-
-    st.markdown("**Sources cited**")
-    for number in citation_numbers:
-        if number < 1 or number > len(results):
-            continue
-        result = results[number - 1]
-        metadata = result.get("metadata", {}) or {}
-        key = result.get("key") or metadata.get("key") or "Unknown"
-        namespace = result.get("namespace", "__default__")
-        st.caption(f"[S{number}] {key} ({namespace})")
 
 
 def update_conversation_summary():

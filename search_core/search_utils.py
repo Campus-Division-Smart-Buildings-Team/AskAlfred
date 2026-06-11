@@ -7,9 +7,10 @@ Search utils
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Optional
 
-from access_control import filter_authorized_matches
+from access_control import combine_pinecone_filters, filter_authorized_matches
 from building.utils import (
     create_building_metadata_filter,
     filter_results_by_building,
@@ -17,6 +18,7 @@ from building.utils import (
 )
 from config import SEARCH_ALL_NAMESPACES, TARGET_INDEXES, get_index_config
 from pinecone_utils import (
+    embed_texts,
     list_namespaces_for_index,
     normalise_matches,
     open_index,
@@ -87,20 +89,35 @@ OCCUPANCY_BOOST_FACTOR = 1.35
 # ============================================================================
 
 
-def _namespaces_to_search(idx) -> list[Optional[str]]:
+# Namespace lists change only when ingest creates a namespace, so a short TTL
+# saves a describe_index_stats round-trip on every query without risking
+# meaningful staleness.
+_NAMESPACE_CACHE_TTL_SECONDS = 300.0
+_namespace_cache: dict[str, tuple[float, list[Optional[str]]]] = {}
+
+
+def _namespaces_to_search(idx, idx_name: str) -> list[Optional[str]]:
     """
     Get namespaces to search for given index.
     Returns list that may contain None for default namespace.
+    Results are cached per index name for _NAMESPACE_CACHE_TTL_SECONDS.
     """
     if not SEARCH_ALL_NAMESPACES:
         # Return list with None to indicate default namespace
-        logging.debug("Using default namespace for index %s", idx)
+        logging.debug("Using default namespace for index %s", idx_name)
         return [None]
+
+    now = time.monotonic()
+    cached = _namespace_cache.get(idx_name)
+    if cached is not None and now - cached[0] < _NAMESPACE_CACHE_TTL_SECONDS:
+        return cached[1]
+
     try:
         namespaces: list[Optional[str]] = list_namespaces_for_index(idx)
         # If no namespaces found, use default
         if not namespaces:
-            return [None]
+            namespaces = [None]
+        _namespace_cache[idx_name] = (now, namespaces)
         return namespaces
     except RuntimeError:
         return [None]
@@ -149,7 +166,7 @@ def search_one_index(
         embed_model is not None
     ), f"No embedding model configured for index {idx_name}"
 
-    namespaces = _namespaces_to_search(idx)
+    namespaces = _namespaces_to_search(idx, idx_name)
     all_hits = []
 
     # Create building filter if specified
@@ -158,9 +175,16 @@ def search_one_index(
         building_metadata_filter = create_building_metadata_filter(building_filter)
         logging.info("🏢 Created metadata filter for building: %s", building_filter)
 
-    metadata_filter = _combine_metadata_filters(access_filter, building_metadata_filter)
+    metadata_filter = combine_pinecone_filters(access_filter, building_metadata_filter)
     if access_filter:
         logging.info("Applied retrieval access filter keys: %s", sorted(access_filter))
+
+    # Embed the query once; the same vector is valid for every namespace.
+    try:
+        query_vector = embed_texts([query], embed_model)[0]
+    except Exception as e:  # pylint: disable=broad-except
+        logging.warning("Failed to embed query for index '%s': %s", idx_name, e)
+        return []
 
     for ns in namespaces:
         # ADD LOGGING HERE - BEFORE THE TRY BLOCK
@@ -178,6 +202,7 @@ def search_one_index(
                 k=k,
                 embed_model=embed_model,  # No longer None
                 metadata_filter=metadata_filter,
+                query_vector=query_vector,
             )
 
             hits = normalise_matches(raw)
@@ -206,30 +231,6 @@ def search_one_index(
             )
 
     return all_hits
-
-
-def _combine_metadata_filters(
-    access_filter: Optional[dict[str, Any]],
-    building_filter: Optional[dict[str, Any]],
-) -> Optional[dict[str, Any]]:
-    """Combine independent Pinecone metadata filters with logical AND."""
-    filters = [filter_dict for filter_dict in (access_filter, building_filter) if filter_dict]
-    if not filters:
-        return None
-    if len(filters) == 1:
-        return filters[0]
-
-    clauses: list[dict[str, Any]] = []
-    for filter_dict in filters:
-        if (
-            isinstance(filter_dict, dict)
-            and set(filter_dict.keys()) == {"$and"}
-            and isinstance(filter_dict["$and"], list)
-        ):
-            clauses.extend(filter_dict["$and"])
-        else:
-            clauses.append(filter_dict)
-    return {"$and": clauses}
 
 
 def get_effective_score(result: dict[str, Any]) -> float:

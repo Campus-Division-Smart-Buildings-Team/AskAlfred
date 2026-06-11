@@ -159,7 +159,7 @@ class BatchIngestConfig:
     health_check_interval: int = 30
     upsert_strategy: str = "worker"
 
-    max_file_mb: float = 10.0
+    max_file_mb: float = 25.0
     skip_existing: bool = True
     skip_successful_only: bool = True
     ext_whitelist: set[str] = field(
@@ -327,6 +327,9 @@ class BatchIngestConfig:
         if self.chunk_tokens < 100:
             raise ConfigError("chunk_tokens too small (<100)")
 
+        if self.chunk_overlap < 0:
+            raise ConfigError("chunk_overlap must not be negative")
+
         if self.chunk_overlap >= self.chunk_tokens:
             raise ConfigError("chunk_overlap must be < chunk_tokens")
 
@@ -397,6 +400,14 @@ class BatchIngestConfig:
 
         if self.max_metadata_text_tokens < 50 or self.max_metadata_text_tokens > 4096:
             raise ConfigError("max_metadata_text_tokens out of range (50-4096)")
+        if self.max_metadata_text_tokens < self.chunk_tokens:
+            logging.warning(
+                "max_metadata_text_tokens (%d) < chunk_tokens (%d): stored "
+                "metadata text will be truncated below the embedded chunk, so "
+                "retrieved chunks may be unreadable by the answer model.",
+                self.max_metadata_text_tokens,
+                self.chunk_tokens,
+            )
         if self.max_metadata_size < 1024:
             raise ConfigError("max_metadata_size too small (<1024)")
         if self.max_metadata_size > 262144:

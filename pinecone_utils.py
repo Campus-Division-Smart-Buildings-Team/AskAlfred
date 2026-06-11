@@ -80,6 +80,7 @@ def vector_query(
     k: int,
     embed_model: str,
     metadata_filter: Optional[dict] = None,
+    query_vector: Optional[list[float]] = None,
 ) -> dict[str, Any]:
     """
     Perform vector search using client-side embeddings.
@@ -91,11 +92,17 @@ def vector_query(
         k: Number of results to return
         embed_model: Embedding model to use
         metadata_filter: Optional metadata filter for the query
+        query_vector: Precomputed embedding of `query`; when provided, the
+            embedding API call is skipped. Callers querying multiple
+            namespaces should embed once and pass the vector here.
 
     Returns:
         Query results dictionary
     """
-    vec = embed_texts([query], embed_model)[0]
+    if query_vector is not None:
+        vec = query_vector
+    else:
+        vec = embed_texts([query], embed_model)[0]
 
     # Build query parameters, only include namespace if not None
     query_params = {"vector": vec, "top_k": k, "include_metadata": True}

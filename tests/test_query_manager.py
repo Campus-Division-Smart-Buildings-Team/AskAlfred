@@ -6,6 +6,7 @@ ensuring correct routing of queries to handlers and backward compatibility of re
 import pytest
 
 from query_manager import QueryManager, process_query_unified
+from query_result import QueryResult
 from query_types import QueryType
 
 # Test queries with expected routing
@@ -39,8 +40,23 @@ class TestQueryManager:
         self.manager = QueryManager()
 
     @pytest.mark.parametrize("query,expected_type", TEST_CASES)
-    def test_query_routing(self, query, expected_type):
+    def test_query_routing(self, query, expected_type, monkeypatch):
         """Test that queries route to correct handlers."""
+
+        # Routing tests must not execute the live maintenance path (Pinecone).
+        def fake_maintenance_handle(self, context):
+            return QueryResult(
+                query=context.query,
+                answer="maintenance response",
+                handler_used="MaintenanceHandler",
+                query_type=QueryType.MAINTENANCE.value,
+            )
+
+        monkeypatch.setattr(
+            "query_handlers.maintenance_handler.MaintenanceHandler.handle",
+            fake_maintenance_handle,
+        )
+
         result = self.manager.process_query(query)
 
         assert result.query_type == expected_type.value, (

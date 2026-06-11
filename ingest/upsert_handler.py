@@ -52,14 +52,19 @@ from config import (
 from .document_processor import Writer
 from .helpers import (
     UpsertQueueItem,
-    _estimate_batch_bytes,
-    _estimate_metadata_bytes_per_vector,
     _is_rate_limit_error,
     _summarise_batch_namespaces,
 )
-from .transaction import upsert_vectors_atomic
+from .transaction import (
+    _mark_batch_failed,
+    _mark_batch_state,
+    _record_ingested_files,
+    upsert_vectors_atomic,
+)
 from .utils import (
     IngestionProgressTracker,
+    _estimate_batch_bytes,
+    _estimate_metadata_bytes_per_vector,
 )
 
 if TYPE_CHECKING:
@@ -425,7 +430,7 @@ class Dispatcher:
         if self._upsert_queue is None:
             return
         queue_start = time.perf_counter()
-        self._upsert_queue.put((batch, 0, 0), block=True)
+        self._upsert_queue.put(UpsertQueueItem(batch), block=True)
         queue_wait = time.perf_counter() - queue_start
         self._ctx.stats.observe_timing("upsert_queue_put_wait_seconds", queue_wait)
 
@@ -554,81 +559,6 @@ class VectorWriteCoordinator:
         return self._batcher.drain_all()
 
 
-# Add this function before the UpsertExecutor class (around line 160-170)
-
-
-def _mark_batch_state(
-    ctx: "IngestContext",
-    batch: list[dict[str, Any]],
-    *,
-    status: str,
-    error: str | None = None,
-) -> None:
-    """
-    Record batch state in context stats/logs.
-
-    Args:
-        ctx: Ingest context
-        batch: Batch of vectors
-        status: Status string (e.g., 'success', 'failed', 'retrying')
-        error: Optional error message
-    """
-    ctx.logger.info(
-        "Batch state: status=%s, vectors=%d, namespaces=%s, error=%s",
-        status,
-        len(batch),
-        _summarise_batch_namespaces(batch),
-        error or "none",
-    )
-    ctx.stats.increment(f"batch_state_{status}_total")
-
-
-def _mark_batch_failed(
-    ctx: "IngestContext",
-    batch: list[dict[str, Any]],
-    *,
-    reason: str,
-) -> None:
-    """Mark a batch as failed with specific reason."""
-    _mark_batch_state(ctx, batch, status="failed", error=reason)
-
-
-def _record_ingested_files(
-    ctx: "IngestContext",
-    batch: list[dict[str, Any]],
-    *,
-    status: str,
-    error: str | None = None,
-) -> None:
-    """
-    Record file ingestion status in file registry.
-
-    Args:
-        ctx: Ingest context
-        batch: Batch of vectors
-        status: Status string
-        error: Optional error message
-    """
-    # Extract unique file IDs from batch metadata
-    file_ids = set()
-    for vector in batch:
-        metadata = vector.get("metadata", {})
-        if "file_id" in metadata:
-            file_ids.add(metadata["file_id"])
-
-    # Update file registry if available
-    if hasattr(ctx, "file_registry") and ctx.file_registry:
-        for file_id in file_ids:
-            try:
-                ctx.file_registry.mark_state(
-                    file_id=file_id, processing_token="", status=status, error=error
-                )
-            except Exception as err:  # pylint: disable=broad-except
-                ctx.logger.debug(
-                    "Failed to update file registry for %s: %s", file_id, err
-                )
-
-
 # ---------------------------------------------------------------------------
 # Upsert worker  (Delegates to UpsertPolicy + UpsertExecutor)
 # ---------------------------------------------------------------------------
@@ -656,7 +586,19 @@ def _upsert_worker(
                 # Sentinel received — stop processing
                 return
 
-            batch, retry_index, split_depth = queued
+            batch = queued.batch
+            retry_index = queued.retry_index
+            split_depth = queued.split_depth
+
+            # Honour the retry backoff deadline. The wait is on stop_event so
+            # shutdown interrupts it immediately.
+            remaining = queued.not_before - time.monotonic()
+            if remaining > 0 and stop_event.wait(remaining):
+                ctx.logger.warning(
+                    "Shutdown in progress; failing batch instead of retrying"
+                )
+                _mark_batch_failed(ctx, batch, reason="shutdown_during_retry")
+                continue
 
             # Process all queued batches, even if stop_event is set
             # (they were queued before shutdown)
@@ -734,8 +676,16 @@ def _upsert_worker(
                     ctx.stats.increment("upsert_batch_retries_total")
                     sleep_secs = policy.backoff_seconds(retry_index)
                     ctx.stats.observe_timing("upsert_backoff_sleep_seconds", sleep_secs)
-                    time.sleep(sleep_secs)
-                    upsert_queue.put((batch, retry_index + 1, split_depth))
+                    # Re-queue immediately with a not-before deadline instead
+                    # of sleeping, so this worker stays available
+                    upsert_queue.put(
+                        UpsertQueueItem(
+                            batch,
+                            retry_index + 1,
+                            split_depth,
+                            time.monotonic() + sleep_secs,
+                        )
+                    )
 
             elif isinstance(action, _SplitAction):
                 # Don't split if stop_event is set (shutdown in progress)
@@ -751,8 +701,8 @@ def _upsert_worker(
                     )
                     ctx.stats.increment("upsert_batch_splits_total")
                     mid = len(batch) // 2
-                    upsert_queue.put((batch[:mid], 0, split_depth + 1))
-                    upsert_queue.put((batch[mid:], 0, split_depth + 1))
+                    upsert_queue.put(UpsertQueueItem(batch[:mid], 0, split_depth + 1))
+                    upsert_queue.put(UpsertQueueItem(batch[mid:], 0, split_depth + 1))
 
         finally:
             upsert_queue.task_done()

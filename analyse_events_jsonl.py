@@ -17,6 +17,7 @@ from config import (
     BUILDING_REVIEW_FILENAME_MIN_CONFIDENCE,
     BUILDING_REVIEW_TEXT_MIN_CONFIDENCE,
 )
+from csv_sanitiser import csv_safe_cell
 
 
 def load_events(path: Path):
@@ -46,7 +47,6 @@ def analyse(events: list[dict]) -> dict:
     }
 
     for ev in events:
-        file = ev.get("file")
         building = ev.get("canonical_building_name")
         conf = float(ev.get("confidence", 0))
         src = ev.get("source")
@@ -101,11 +101,11 @@ def export_csv(results: dict, output: str):
             for ev in ev_list:
                 w.writerow(
                     [
-                        ev.get("file"),
-                        ev.get("canonical_building_name"),
-                        ev.get("confidence"),
-                        ev.get("source"),
-                        ev.get("flag_review"),
+                        csv_safe_cell(ev.get("file")),
+                        csv_safe_cell(ev.get("canonical_building_name")),
+                        csv_safe_cell(ev.get("confidence")),
+                        csv_safe_cell(ev.get("source")),
+                        csv_safe_cell(ev.get("flag_review")),
                     ]
                 )
 

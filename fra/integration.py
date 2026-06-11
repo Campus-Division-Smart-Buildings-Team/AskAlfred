@@ -7,7 +7,7 @@ from __future__ import annotations
 import zlib
 from collections.abc import Mapping
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from redis.exceptions import RedisError
 
@@ -300,81 +300,45 @@ def mark_superseded_risk_items(
         ctx.logger.info("No eligible risk items found to supersede")
         return []
 
-    try:
-        # Pinecone's bulk update supports filters without an id, but the type
-        # stubs require `id: str`. Cast to Any to avoid a false-positive.
-        index_any = cast(Any, ctx.index)
-        index_any.update(
-            namespace=FRA_RISK_ITEMS_NAMESPACE,
-            filter=dict(filter_dict),
-            set_metadata={
-                "superseded_by": new_assessment_date,
-                "is_current": False,
-                "supersession_epoch": new_assessment_date_int or new_assessment_date,
-            },
-            id=None,
-        )
+    # Update strictly per verified ID. A filter-based bulk update can race with
+    # concurrent ingest and supersede records that were never verified above.
+    for item_id in eligible_ids:
         try:
-            ctx.stats.increment("fra_supersession_bulk_updates_total")
-        except Exception:
-            pass
-        updated_ids.extend(eligible_ids)
-    except (
-        ExternalServiceError,
-        IngestError,
-        OSError,
-        ValueError,
-        TypeError,
-        ConnectionError,
-        TimeoutError,
-        RuntimeError,
-    ) as e:
-        mapped_error = wrap_exception(e)
-        ctx.logger.warning(
-            "Bulk supersession update failed; falling back to per-item updates: %s",
-            mapped_error,
-        )
-        try:
-            ctx.stats.increment("fra_supersession_bulk_updates_failed_total")
-        except Exception:
-            pass
-        for item_id in eligible_ids:
+            ctx.index.update(
+                id=item_id,
+                namespace=FRA_RISK_ITEMS_NAMESPACE,
+                set_metadata={
+                    "superseded_by": new_assessment_date,
+                    "is_current": False,
+                    "supersession_epoch": new_assessment_date_int
+                    or new_assessment_date,
+                },
+            )
             try:
-                ctx.index.update(
-                    id=item_id,
-                    namespace=FRA_RISK_ITEMS_NAMESPACE,
-                    set_metadata={
-                        "superseded_by": new_assessment_date,
-                        "is_current": False,
-                        "supersession_epoch": new_assessment_date_int
-                        or new_assessment_date,
-                    },
+                ctx.stats.increment("fra_supersession_per_item_updates_total")
+            except Exception:
+                pass
+            updated_ids.append(item_id)
+        except (
+            ExternalServiceError,
+            IngestError,
+            OSError,
+            ValueError,
+            TypeError,
+            ConnectionError,
+            TimeoutError,
+            RuntimeError,
+        ) as per_item_error:
+            mapped_per_item_error = wrap_exception(per_item_error)
+            ctx.logger.error(
+                "Failed to update %s: %s", item_id, mapped_per_item_error
+            )
+            try:
+                ctx.stats.increment(
+                    "fra_supersession_per_item_updates_failed_total"
                 )
-                try:
-                    ctx.stats.increment("fra_supersession_per_item_updates_total")
-                except Exception:
-                    pass
-                updated_ids.append(item_id)
-            except (
-                ExternalServiceError,
-                IngestError,
-                OSError,
-                ValueError,
-                TypeError,
-                ConnectionError,
-                TimeoutError,
-                RuntimeError,
-            ) as per_item_error:
-                mapped_per_item_error = wrap_exception(per_item_error)
-                ctx.logger.error(
-                    "Failed to update %s: %s", item_id, mapped_per_item_error
-                )
-                try:
-                    ctx.stats.increment(
-                        "fra_supersession_per_item_updates_failed_total"
-                    )
-                except Exception:
-                    pass
+            except Exception:
+                pass
 
     ctx.logger.info(f"Marked {len(updated_ids)} risk items as superseded")
     try:

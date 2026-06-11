@@ -13,9 +13,11 @@ Key changes from your current module:
 from __future__ import annotations
 
 import logging
+import csv
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from difflib import SequenceMatcher, get_close_matches
+from pathlib import Path
 from typing import Optional
 
 # First party import
@@ -38,6 +40,9 @@ from config import (
 
 FUZZY_STRONG = BUILDING_FUZZY_STRONG
 FUZZY_WEAK = BUILDING_FUZZY_WEAK
+MANUAL_OVERRIDE_SOURCES = frozenset({"manual", "manual_override", "override"})
+
+ManualOverrideMap = dict[str, tuple[str, float, str]]
 
 # --------------------------------------------------------------------------------------
 # Core filename parsing
@@ -242,6 +247,89 @@ def _fuzzy_to_known(
     return None, 0.0
 
 
+_ADDRESS_PREFIX_RE = re.compile(r"^\s*(\d+(?:-\d+)?[a-z]?)\b", re.IGNORECASE)
+
+
+def _address_prefix(value: str | None) -> str | None:
+    if not value:
+        return None
+    match = _ADDRESS_PREFIX_RE.match(value)
+    return match.group(1).lower() if match else None
+
+
+def _address_prefix_conflicts(extracted_name: str, matched_name: str) -> bool:
+    extracted_prefix = _address_prefix(extracted_name)
+    matched_prefix = _address_prefix(matched_name)
+    return bool(
+        extracted_prefix
+        and matched_prefix
+        and extracted_prefix != matched_prefix
+    )
+
+
+def _has_ambiguous_place_fragment(
+    extracted_norm: str,
+    known_buildings: list[str],
+) -> bool:
+    """Return true when a generic filename fragment names multiple buildings."""
+    if not extracted_norm or any(char.isdigit() for char in extracted_norm):
+        return False
+    if len(extracted_norm.split()) < 2:
+        return False
+
+    candidates = {
+        building
+        for building in known_buildings
+        if normalise_building_name(building).endswith(f" {extracted_norm}")
+    }
+    return len(candidates) > 1
+
+
+def _manual_override_key(filename: str) -> str:
+    return Path(filename).name.strip().lower()
+
+
+def _exact_building_key(value: str | None) -> str:
+    if not value:
+        return ""
+    return re.sub(r"\s+", " ", str(value).strip().lower())
+
+
+def load_manual_building_overrides(path: str | Path) -> ManualOverrideMap:
+    """
+    Load explicit building overrides from a resolved_buildings.csv-style file.
+
+    Only rows whose source is marked manual/override are trusted; generated audit
+    rows stay as diagnostics and cannot silently override resolver decisions.
+    """
+    csv_path = Path(path)
+    if not csv_path.exists():
+        return {}
+
+    overrides: ManualOverrideMap = {}
+    with csv_path.open("r", newline="", encoding="utf-8-sig") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            source = (row.get("source") or "").strip().lower()
+            if source not in MANUAL_OVERRIDE_SOURCES:
+                continue
+            filename = (row.get("file") or "").strip()
+            canonical = (row.get("canonical") or "").strip()
+            if not filename or not canonical:
+                continue
+            try:
+                confidence = float(row.get("confidence") or 0.0)
+            except ValueError:
+                confidence = 0.0 if canonical == "Unknown" else 1.0
+            override_source = "manual_unknown" if canonical == "Unknown" else "manual"
+            overrides[_manual_override_key(filename)] = (
+                canonical,
+                confidence,
+                override_source,
+            )
+    return overrides
+
+
 # --------------------------------------------------------------------------------------
 # Main API
 # --------------------------------------------------------------------------------------
@@ -253,6 +341,7 @@ def get_building_with_confidence(
     known_buildings: list[str],
     name_to_canonical: dict[str, str],
     alias_to_canonical: dict[str, str],
+    manual_overrides: ManualOverrideMap | None = None,
 ) -> tuple[Optional[str], float, str]:
     """
     Resolve a canonical building for a document with a confidence score.
@@ -264,9 +353,14 @@ def get_building_with_confidence(
     3) Text-based fallback (0.60)
     4) Unknown
     """
+    manual = (manual_overrides or {}).get(_manual_override_key(filename))
+    if manual is not None:
+        return manual
+
     extracted_raw = extract_building_from_filename(filename)
 
     if extracted_raw:
+        extracted_exact = _exact_building_key(extracted_raw)
         extracted_norm = normalise_building_name(extracted_raw)
 
         # 1a) Project-level hard overrides
@@ -282,6 +376,12 @@ def get_building_with_confidence(
         except ImportError:
             pass
 
+        # 1b) Exact, non-lossy alias/name lookups before suffix-stripped keys.
+        if extracted_exact in (alias_to_canonical or {}):
+            return alias_to_canonical[extracted_exact], 1.0, "filename"
+        if extracted_exact in (name_to_canonical or {}):
+            return name_to_canonical[extracted_exact], 1.0, "filename"
+
         # Build normalised views of your maps **once**
         alias_norm = {
             normalise_building_name(k): v for k, v in (alias_to_canonical or {}).items()
@@ -290,16 +390,32 @@ def get_building_with_confidence(
             normalise_building_name(k): v for k, v in (name_to_canonical or {}).items()
         }
 
-        # 1b) Exact alias/name lookups on normalised keys
+        # 1c) Exact alias/name lookups on normalised keys
         if extracted_norm in alias_norm:
             return alias_norm[extracted_norm], 1.0, "filename"
         if extracted_norm in name_norm:
             return name_norm[extracted_norm], 1.0, "filename"
 
+        if _has_ambiguous_place_fragment(extracted_norm, known_buildings):
+            logging.warning(
+                "ambiguous building fragment in filename: %s -> %s",
+                filename,
+                extracted_raw,
+            )
+            return "Unknown", 0.0, "ambiguous"
+
         # 2) Fuzzy to known canonicals
         matched, score = _fuzzy_to_known(
             extracted_raw, known_buildings, threshold=BUILDING_FUZZY_STRONG
         )
+        if matched and _address_prefix_conflicts(extracted_raw, matched):
+            logging.warning(
+                "rejecting fuzzy address mismatch: %s -> %s (%.2f)",
+                extracted_raw,
+                matched,
+                score,
+            )
+            return "Unknown", 0.0, "ambiguous"
         if matched and score >= FUZZY_STRONG:
             return matched, score, "filename"
         if matched and score >= FUZZY_WEAK:
@@ -325,6 +441,7 @@ class FilenameBuildingResolver(BuildingResolver):
     name_to_canonical: dict[str, str]
     alias_to_canonical: dict[str, str]
     known_buildings: list[str]
+    manual_overrides: ManualOverrideMap = field(default_factory=dict)
 
     def resolve(self, filename: str, text: str) -> BuildingResolution:
         building, confidence, source = get_building_with_confidence(
@@ -333,6 +450,7 @@ class FilenameBuildingResolver(BuildingResolver):
             known_buildings=self.known_buildings,
             name_to_canonical=self.name_to_canonical,
             alias_to_canonical=self.alias_to_canonical,
+            manual_overrides=self.manual_overrides,
         )
         canonical = building if building else "Unknown"
         return BuildingResolution(
@@ -343,7 +461,7 @@ class FilenameBuildingResolver(BuildingResolver):
 # Convenience for downstream use
 def should_flag_for_review(conf, src):
     return (
-        src == "unknown"
+        src in {"unknown", "ambiguous", "manual_unknown"}
         or (src == "text" and conf < BUILDING_REVIEW_TEXT_MIN_CONFIDENCE)
         or (src == "filename" and conf < BUILDING_REVIEW_FILENAME_MIN_CONFIDENCE)
     )

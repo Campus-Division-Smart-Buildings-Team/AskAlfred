@@ -21,6 +21,8 @@ from typing import Optional
 
 import pandas as pd
 
+from building.normaliser import normalise_building_name
+
 # ============================================================================
 # ALIAS MAPPINGS
 # ============================================================================
@@ -72,6 +74,11 @@ ALIAS_OVERRIDES: dict[str, str] = {
     # 'main library': 'Arts and Social Sciences Library',
 }
 
+_NORMALISED_ALIAS_OVERRIDES = {
+    normalise_building_name(alias): canonical
+    for alias, canonical in ALIAS_OVERRIDES.items()
+}
+
 
 # ============================================================================
 # HELPER FUNCTIONS
@@ -104,10 +111,9 @@ def get_alias_override(extracted_name: str) -> Optional[str]:
     if not extracted_name:
         return None
 
-    # Normalise to lowercase for lookup
-    normalized = extracted_name.lower().strip()
+    normalized = normalise_building_name(extracted_name)
 
-    return ALIAS_OVERRIDES.get(normalized)
+    return _NORMALISED_ALIAS_OVERRIDES.get(normalized)
 
 
 def list_all_overrides() -> dict[str, str]:

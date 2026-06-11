@@ -53,7 +53,6 @@ class ProgressTracker:
     def start_check(self, check_name: str) -> None:
         """Mark the start of a check."""
         self.check_start[check_name] = time.time()
-        elapsed = time.time() - self.start_time
         progress = (
             (self.completed_checks / self.total_checks * 50)
             if self.total_checks > 0

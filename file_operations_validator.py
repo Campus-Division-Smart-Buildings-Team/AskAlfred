@@ -17,6 +17,7 @@ Implements OWASP secure file upload/download best practices.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -183,6 +184,17 @@ def has_suspicious_patterns(path_str: str) -> bool:
         True if suspicious patterns detected
     """
     for pattern in SUSPICIOUS_PATTERNS:
+        if pattern == "&":
+            if (
+                path_str.startswith("&")
+                or path_str.endswith("&")
+                or "&&" in path_str
+                or " &" in path_str
+                or "& " in path_str
+            ):
+                logger.warning("Suspicious pattern '%s' found in path", pattern)
+                return True
+            continue
         if pattern in path_str:
             logger.warning("Suspicious pattern '%s' found in path", pattern)
             return True
@@ -481,7 +493,7 @@ class FileOperationRateLimiter:
 
     def __init__(self):
         self._operation_counts = {}  # dir_path -> [timestamps]
-        self._lock = {}
+        self._lock = threading.Lock()
 
     def is_rate_limited(
         self,
@@ -500,30 +512,31 @@ class FileOperationRateLimiter:
         Returns:
             True if rate limited, False if operation allowed
         """
-        current_time = time.time()
-        window_start = current_time - window_seconds
+        with self._lock:
+            current_time = time.time()
+            window_start = current_time - window_seconds
 
-        if directory not in self._operation_counts:
-            self._operation_counts[directory] = []
+            if directory not in self._operation_counts:
+                self._operation_counts[directory] = []
 
-        # Remove old entries outside the window
-        self._operation_counts[directory] = [
-            ts for ts in self._operation_counts[directory] if ts > window_start
-        ]
+            # Remove old entries outside the window
+            self._operation_counts[directory] = [
+                ts for ts in self._operation_counts[directory] if ts > window_start
+            ]
 
-        # Check if exceeded limit
-        if len(self._operation_counts[directory]) >= max_ops:
-            logger.warning(
-                "Rate limit exceeded for directory %s: %d ops in %d seconds",
-                directory,
-                len(self._operation_counts[directory]),
-                window_seconds,
-            )
-            return True
+            # Check if exceeded limit
+            if len(self._operation_counts[directory]) >= max_ops:
+                logger.warning(
+                    "Rate limit exceeded for directory %s: %d ops in %d seconds",
+                    directory,
+                    len(self._operation_counts[directory]),
+                    window_seconds,
+                )
+                return True
 
-        # Record this operation
-        self._operation_counts[directory].append(current_time)
-        return False
+            # Record this operation
+            self._operation_counts[directory].append(current_time)
+            return False
 
 
 # Global rate limiter instance

@@ -524,8 +524,8 @@ def _query_index_with_batches(
         total_vecs = ns_stats.get("vector_count", 0)
 
         if total_vecs == 0:
-            print(
-                "DEBUG: namespace='%s' raw_stats_keys=%s",
+            logging.debug(
+                "namespace=%r raw_stats_keys=%s",
                 namespace,
                 stats.get("namespaces", {}).keys(),
             )
@@ -539,8 +539,8 @@ def _query_index_with_batches(
             safe_top_k,
             display_namespace,
         )
-        # Use zero vector to fetch all
-        dim = idx.describe_index_stats().get("dimension", 1536)
+        # Use zero vector to fetch all (dimension already in stats from above)
+        dim = stats.get("dimension", 1536)
         zero_vec = [0.0] * dim
 
         combined_filter = combine_pinecone_filters(filter_dict, access_filter)

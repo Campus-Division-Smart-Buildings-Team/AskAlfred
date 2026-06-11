@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import html
 import logging
+import threading
 import time
 import warnings
 from typing import Any
@@ -43,6 +44,11 @@ MICROSOFT_LOGO_SVG = (
 )
 
 
+# Streamlit serves sessions from multiple threads, so all access to the
+# process-wide auth flow cache must hold this lock.
+_AUTH_FLOW_CACHE_LOCK = threading.Lock()
+
+
 @st.cache_resource
 def _get_auth_flow_cache() -> dict[str, tuple[float, dict[str, Any]]]:
     """Return process-wide auth flow cache keyed by OAuth state."""
@@ -50,7 +56,7 @@ def _get_auth_flow_cache() -> dict[str, tuple[float, dict[str, Any]]]:
 
 
 def _prune_auth_flow_cache(cache: dict[str, tuple[float, dict[str, Any]]]) -> None:
-    """Drop expired auth flows from the process-wide cache."""
+    """Drop expired auth flows from the process-wide cache (lock held by caller)."""
     now = time.time()
     expired_states = [
         state
@@ -68,8 +74,9 @@ def _cache_auth_flow(flow: dict[str, Any]) -> None:
         return
 
     cache = _get_auth_flow_cache()
-    _prune_auth_flow_cache(cache)
-    cache[state] = (time.time(), flow)
+    with _AUTH_FLOW_CACHE_LOCK:
+        _prune_auth_flow_cache(cache)
+        cache[state] = (time.time(), flow)
 
 
 def _get_cached_auth_flow(state: str | None) -> dict[str, Any] | None:
@@ -78,8 +85,10 @@ def _get_cached_auth_flow(state: str | None) -> dict[str, Any] | None:
         return None
 
     cache = _get_auth_flow_cache()
-    _prune_auth_flow_cache(cache)
-    cached_entry = cache.get(state)
+    with _AUTH_FLOW_CACHE_LOCK:
+        _prune_auth_flow_cache(cache)
+        cached_entry = cache.get(state)
+
     if not cached_entry:
         return None
 
@@ -91,7 +100,8 @@ def _remove_cached_auth_flow(state: str | None) -> None:
     """Delete cached auth flow for a callback state."""
     if not state:
         return
-    _get_auth_flow_cache().pop(state, None)
+    with _AUTH_FLOW_CACHE_LOCK:
+        _get_auth_flow_cache().pop(state, None)
 
 
 def authentication_required() -> bool:

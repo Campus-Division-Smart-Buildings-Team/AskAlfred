@@ -13,6 +13,7 @@ import time
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from queue import Empty, Queue
 from typing import Any
 
@@ -27,7 +28,10 @@ from file_operations_validator import (
     FileOperationSecurityError,
     validate_directory_safety,
 )
-from filename_building_parser import FilenameBuildingResolver
+from filename_building_parser import (
+    FilenameBuildingResolver,
+    load_manual_building_overrides,
+)
 
 from .context import IngestContext
 from .document_content import (
@@ -36,12 +40,12 @@ from .document_content import (
 from .document_processor import DocumentProcessor, FileIngestOrchestrator, Writer
 from .helpers import UpsertQueueItem
 from .transaction import (
+    _mark_batch_failed,
     extract_fra_risk_items_integration,
     upsert_vectors_atomic,
 )
 from .upsert_handler import (
     VectorWriteCoordinator,
-    _mark_batch_failed,
     _upsert_worker,
 )
 from .utils import (
@@ -139,6 +143,8 @@ def _run_ingest_parallel(
         futures = {executor.submit(orchestrator.process, obj): obj for obj in objs}
         for future in as_completed(futures):
             if upsert_stop_event.is_set():
+                # Drop queued files; only the currently running ones finish.
+                executor.shutdown(wait=False, cancel_futures=True)
                 break
             obj = futures[future]
             filename = obj.get("Key", "")
@@ -254,6 +260,17 @@ def _teardown_worker(
 
     NOTE: Coordinator must be closed BEFORE calling this function.
     """
+    join_timeout = getattr(
+        ctx.config,
+        "upsert_join_timeout_seconds",
+        INGEST_UPSERT_JOIN_TIMEOUT_SECONDS,
+    )
+    poll_seconds = getattr(
+        ctx.config,
+        "upsert_join_poll_seconds",
+        INGEST_UPSERT_JOIN_POLL_SECONDS,
+    )
+
     if upsert_stop_event.is_set():
         # Abort path: drain queue and mark all pending batches as failed
         ctx.logger.warning(
@@ -267,8 +284,7 @@ def _teardown_worker(
                     # Sentinel already queued (unlikely), put it back
                     upsert_queue.put(None)
                     break
-                batch, retry_index, split_depth = queued
-                _mark_batch_failed(ctx, batch, reason="worker_aborted")
+                _mark_batch_failed(ctx, queued.batch, reason="worker_aborted")
                 upsert_queue.task_done()
                 pending_count += 1
             except Empty:
@@ -283,7 +299,7 @@ def _teardown_worker(
         for _ in upsert_threads:
             upsert_queue.put(None)
         for thread in upsert_threads:
-            thread.join(timeout=INGEST_UPSERT_JOIN_TIMEOUT_SECONDS)
+            thread.join(timeout=join_timeout)
 
     else:
         # Normal path: wait for all work to complete, then stop worker
@@ -293,11 +309,12 @@ def _teardown_worker(
         # Poll join with timeout to allow logging
         queue_drained = False
         elapsed = 0.0
-        while elapsed < INGEST_UPSERT_JOIN_TIMEOUT_SECONDS:
+        next_log_at = 10.0
+        while elapsed < join_timeout:
             try:
                 # Try to join with a short timeout so we can log progress
-                remaining = INGEST_UPSERT_JOIN_TIMEOUT_SECONDS - elapsed
-                poll_timeout = min(INGEST_UPSERT_JOIN_POLL_SECONDS, remaining)
+                remaining = join_timeout - elapsed
+                poll_timeout = min(poll_seconds, remaining)
 
                 # Note: queue.join() doesn't take timeout in Python, so we check size
                 if upsert_queue.unfinished_tasks == 0:
@@ -308,7 +325,8 @@ def _teardown_worker(
                 elapsed = time.perf_counter() - queue_join_start
 
                 # Log every 10s after first 10s
-                if elapsed > 10.0 and int(elapsed) % 10 == 0:
+                if elapsed >= next_log_at:
+                    next_log_at = elapsed + 10.0
                     ctx.logger.info(
                         "Still waiting for upsert queue (%.1fs elapsed, %d tasks remaining)...",
                         elapsed,
@@ -324,21 +342,22 @@ def _teardown_worker(
                         if queued is None:
                             upsert_queue.put(None)
                             break
-                        batch, _, _ = queued
-                        _mark_batch_failed(ctx, batch, reason="keyboard_interrupt")
+                        _mark_batch_failed(
+                            ctx, queued.batch, reason="keyboard_interrupt"
+                        )
                         upsert_queue.task_done()
                     except Empty:
                         break
                 for _ in upsert_threads:
                     upsert_queue.put(None)
                 for thread in upsert_threads:
-                    thread.join(timeout=INGEST_UPSERT_JOIN_TIMEOUT_SECONDS)
+                    thread.join(timeout=join_timeout)
                 return
 
         if not queue_drained:
             ctx.logger.warning(
                 "Upsert queue join timed out after %.1fs (%d tasks remaining); sending sentinel anyway",
-                INGEST_UPSERT_JOIN_TIMEOUT_SECONDS,
+                join_timeout,
                 upsert_queue.unfinished_tasks,
             )
             ctx.logger.warning(
@@ -355,7 +374,7 @@ def _teardown_worker(
                         # Sentinel already queued (unlikely), put it back
                         upsert_queue.put(None)
                         break
-                    batch, _, _ = queued
+                    batch = queued.batch
                     _mark_batch_failed(ctx, batch, reason="queue_drain_timeout")
                     for vector in batch:
                         metadata = vector.get("metadata") or {}
@@ -399,14 +418,14 @@ def _teardown_worker(
         ctx.logger.info("Waiting for upsert worker thread to exit...")
         thread_join_start = time.perf_counter()
         for thread in upsert_threads:
-            thread.join(timeout=INGEST_UPSERT_JOIN_TIMEOUT_SECONDS)
+            thread.join(timeout=join_timeout)
         thread_join_elapsed = time.perf_counter() - thread_join_start
 
         still_alive = [t.name for t in upsert_threads if t.is_alive()]
         if still_alive:
             ctx.logger.error(
                 "Upsert worker thread(s) did not exit after %.1fs: %s",
-                INGEST_UPSERT_JOIN_TIMEOUT_SECONDS,
+                join_timeout,
                 ", ".join(still_alive),
             )
         else:
@@ -438,7 +457,7 @@ def _emit_ingest_metrics(
                 dry_run=bool(getattr(ctx.config, "dry_run", False)),
                 upsert_workers=ctx.config.upsert_workers,
             )
-            ctx.logger.info("📊 Exported Prometheus metrics to %s", prom_path)
+            ctx.logger.info("Exported Prometheus metrics to %s", prom_path)
         except IngestError as error:
             ctx.logger.warning("Could not export Prometheus metrics: %s", error)
 
@@ -516,6 +535,11 @@ def ingest_local_directory_with_progress(
         ctx.config.max_file_mb,
         logger=ctx.logger,
     )
+    objs = [
+        obj
+        for obj in objs
+        if Path(str(obj.get("Key", ""))).name.lower() != "resolved_buildings.csv"
+    ]
     ctx.logger.info("Found %d files to process in %s", len(objs), base_path)
 
     if not objs:
@@ -540,10 +564,20 @@ def ingest_local_directory_with_progress(
     else:
         ctx.logger.warning("No property CSV found for building name resolution")
 
+    manual_overrides = load_manual_building_overrides(
+        Path(base_path) / "resolved_buildings.csv"
+    )
+    if manual_overrides:
+        ctx.logger.info(
+            "Loaded %d manual building override(s) from resolved_buildings.csv",
+            len(manual_overrides),
+        )
+
     building_resolver = FilenameBuildingResolver(
         name_to_canonical=name_to_canonical,
         alias_to_canonical=alias_to_canonical,
         known_buildings=known_buildings,
+        manual_overrides=manual_overrides,
     )
 
     processor = DocumentProcessor(
@@ -564,16 +598,14 @@ def ingest_local_directory_with_progress(
     upsert_stop_event = threading.Event()
     ctx.upsert_stop_event = upsert_stop_event
 
-    cpu_pool: ProcessPoolExecutor | None = None
-    parse_pool: ProcessPoolExecutor | None = None
+    worker_pool: ProcessPoolExecutor | None = None
     try:
         if ctx.config.max_parse_workers > 1:
-            cpu_pool = ProcessPoolExecutor(max_workers=ctx.config.max_parse_workers)
-            orchestrator.set_cpu_pool(cpu_pool)
-
-        if ctx.config.max_parse_workers > 1:
-            parse_pool = ProcessPoolExecutor(max_workers=ctx.config.max_parse_workers)
-            orchestrator.set_parse_pool(parse_pool)
+            # One pool shared by extraction/chunking and FRA parsing; both are
+            # CPU-bound and share the same worker budget.
+            worker_pool = ProcessPoolExecutor(max_workers=ctx.config.max_parse_workers)
+            orchestrator.set_cpu_pool(worker_pool)
+            orchestrator.set_parse_pool(worker_pool)
 
         upsert_threads: list[threading.Thread] | None = None
 
@@ -633,10 +665,8 @@ def ingest_local_directory_with_progress(
 
     finally:
         ctx.upsert_stop_event = None
-        if cpu_pool is not None:
-            cpu_pool.shutdown(wait=True)
-        if parse_pool is not None:
-            parse_pool.shutdown(wait=True)
+        if worker_pool is not None:
+            worker_pool.shutdown(wait=True)
 
     _emit_ingest_metrics(ctx, report, base_path)
     _log_ingest_summary(ctx, report)

@@ -291,6 +291,7 @@ def fetch_statuspage_status(url: str) -> dict[str, str]:
     }
 
 
+@st.cache_data(ttl=60)
 def get_redis_status() -> tuple[str, str]:
     """Return (status_text, severity) for Redis availability."""
     if not os.getenv("REDIS_HOST") or not os.getenv("REDIS_PORT"):
@@ -322,6 +323,7 @@ def render_service_status():
 
     if st.button("Refresh Service Status"):
         fetch_statuspage_status.clear()
+        get_redis_status.clear()
         st.session_state.pop("service_status_snapshot", None)
 
     status_endpoints = {
@@ -476,7 +478,7 @@ def display_chat_history():
             if message.get("score_too_low", False):
                 display_safe_low_score_warning()
 
-            _render_citation_legend(
+            render_citation_legend(
                 message.get("content", ""),
                 message.get("results", []),
             )
@@ -486,7 +488,7 @@ def display_chat_history():
                 display_search_results(message["results"])
 
 
-def _render_citation_legend(answer: str, results: list[dict]) -> None:
+def render_citation_legend(answer: str, results: list[dict]) -> None:
     """Render a simple legend for inline [S1]-style answer citations."""
     if not answer or not results:
         return
@@ -510,4 +512,4 @@ def _render_citation_legend(answer: str, results: list[dict]) -> None:
         metadata = result.get("metadata", {}) or {}
         key = result.get("key") or metadata.get("key") or "Unknown"
         namespace = result.get("namespace", "__default__")
-        st.caption(f"[S{number}] {key} ({namespace})")
+        st.caption(f"[S{number}] {escape(str(key))} ({escape(str(namespace))})")

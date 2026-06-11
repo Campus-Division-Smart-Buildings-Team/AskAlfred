@@ -125,9 +125,15 @@ def semantic_search(
 
     # Building-aware answer
     if building and building_groups.get(building):
-        answer, pub_info = generate_building_focused_answer(
+        answer, pub_info, cited_results = generate_building_focused_answer(
             query, top_hits[0], top_hits, building, building_groups, term_context
         )
+        # Reorder so [SN] citation tags resolve against the returned list:
+        # cited sources first (in S-number order), remaining hits after.
+        cited_ids = {id(result) for result in cited_results}
+        top_hits = cited_results + [
+            result for result in top_hits if id(result) not in cited_ids
+        ]
     else:
         answer, pub_info = enhanced_answer_with_source_date(
             query, top_hits[0], top_hits, term_context, target_building=building

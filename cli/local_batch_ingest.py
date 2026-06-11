@@ -6,9 +6,9 @@ CLI entrypoint for AskAlfred local batch ingestion.
 from __future__ import annotations
 
 import argparse
-from datetime import datetime
 import logging
 import sys
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]

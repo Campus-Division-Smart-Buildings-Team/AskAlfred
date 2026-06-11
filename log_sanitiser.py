@@ -191,8 +191,11 @@ class SanitisedFormatter:
                     for arg in record.args
                 )
 
-        # Let base formatter do the formatting
-        return self.formatter.format(record)
+        # Sanitise the fully formatted output as well: the base formatter
+        # appends exception tracebacks (exc_info/stack_info) after the
+        # message, and secrets raised inside exception messages would
+        # otherwise bypass redaction.
+        return sanitise_message(self.formatter.format(record))
 
 
 # =============================================================================

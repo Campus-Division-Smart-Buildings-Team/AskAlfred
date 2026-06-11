@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+import zipfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -40,8 +41,11 @@ from config import (
     INGEST_BACKOFF_CAP,
     INGEST_BACKOFF_JITTER_MIN,
     INGEST_BACKOFF_JITTER_SPAN,
+    INGEST_DOCX_MAX_ARCHIVE_ENTRIES,
+    INGEST_DOCX_MAX_UNCOMPRESSED_MB,
     INGEST_EMBED_BATCH_SIZE,
     INGEST_FETCH_MAX_SIZE_MB,
+    INGEST_PDF_MAX_PAGES,
 )
 from file_operations_validator import (
     ALLOWED_INGEST_EXTENSIONS,
@@ -58,6 +62,81 @@ if TYPE_CHECKING:
 
 def _get_logger(logger: logging.Logger | None) -> logging.Logger:
     return logger or logging.getLogger(__name__)
+
+
+_BARE_ADDRESS_NUMBER_RE = re.compile(r"^\d+(?:-\d+)?[A-Za-z]?$")
+_NUMBERED_STREET_ALIAS_RE = re.compile(
+    r"^(?P<number>\d+(?:-\d+)?[A-Za-z]?)\s+"
+    r"(?P<street>.+\b(?:Road|Rd|Street|St|Avenue|Ave|Lane|Ln|Drive|Dr|"
+    r"Square|Place|Row|Terrace|Parade|Gardens)\b.*)$",
+    re.IGNORECASE,
+)
+
+
+def _expand_compressed_address_aliases(parts: list[str]) -> list[str]:
+    """Expand Planon aliases like "3, 5, 7 Woodland Road"."""
+    expanded: list[str] = []
+    pending_numbers: list[str] = []
+
+    for raw_part in parts:
+        part = raw_part.strip()
+        if not part:
+            continue
+
+        if _BARE_ADDRESS_NUMBER_RE.fullmatch(part):
+            pending_numbers.append(part)
+            continue
+
+        match = _NUMBERED_STREET_ALIAS_RE.match(part)
+        if match and pending_numbers:
+            street = match.group("street").strip()
+            expanded.extend(f"{number} {street}" for number in pending_numbers)
+            pending_numbers = []
+        elif pending_numbers:
+            pending_numbers = []
+
+        expanded.append(part)
+
+    return expanded
+
+
+def split_alias_field(value: str) -> list[str]:
+    """
+    Split a Planon alias field into individual aliases.
+
+    Planon separates aliases with commas (occasionally semicolons), but commas
+    also appear *inside* aliases within parentheses, e.g.
+    "Isambard Park 1.0 (see also 1061, 1171)". Split only on top-level
+    separators and drop fragments that cannot be building names (too short or
+    purely numeric).
+    """
+    parts: list[str] = []
+    current: list[str] = []
+    depth = 0
+    for char in value:
+        if char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth = max(0, depth - 1)
+        if char in ",;" and depth == 0:
+            parts.append("".join(current).strip())
+            current = []
+        else:
+            current.append(char)
+    parts.append("".join(current).strip())
+    parts = _expand_compressed_address_aliases(parts)
+    return [
+        part
+        for part in parts
+        if len(part) >= 3 and not _BARE_ADDRESS_NUMBER_RE.fullmatch(part)
+    ]
+
+
+def exact_building_key(value: str | None) -> str:
+    """Return a non-lossy lowercase key for exact alias/name lookups."""
+    if not value:
+        return ""
+    return re.sub(r"\s+", " ", str(value).strip().lower())
 
 
 def parse_pivot_header(col_str: str, is_requests: bool) -> dict[str, str]:
@@ -188,6 +267,15 @@ def extract_text(
         text = ""
         try:
             reader = PdfReader(io.BytesIO(data))
+            page_count = len(reader.pages)
+            if page_count > INGEST_PDF_MAX_PAGES:
+                log.warning(
+                    "Skipping PDF %s: %d pages exceeds limit of %d",
+                    key,
+                    page_count,
+                    INGEST_PDF_MAX_PAGES,
+                )
+                return ""
             text = "\n".join([p.extract_text() or "" for p in reader.pages])
             if text.strip():
                 return text
@@ -210,6 +298,8 @@ def extract_text(
 
     if extension == "docx":
         try:
+            if not _docx_archive_within_limits(key, data, log):
+                return ""
             doc = DocxDocument(io.BytesIO(data))
             return "\n".join(paragraph.text for paragraph in doc.paragraphs)
         except Exception as ex:  # pylint: disable=broad-except
@@ -220,6 +310,41 @@ def extract_text(
         return _extract_doc_text(key, data, log)
 
     return ""
+
+
+def _docx_archive_within_limits(key: str, data: bytes, log: logging.Logger) -> bool:
+    """
+    Validate a DOCX zip archive before handing it to the XML parser.
+
+    Rejects archives with excessive entry counts or declared decompressed size
+    (zip bombs) so python-docx/lxml never load them.
+    """
+    max_uncompressed_bytes = INGEST_DOCX_MAX_UNCOMPRESSED_MB * 1024 * 1024
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            entries = archive.infolist()
+            if len(entries) > INGEST_DOCX_MAX_ARCHIVE_ENTRIES:
+                log.warning(
+                    "Skipping DOCX %s: %d archive entries exceeds limit of %d",
+                    key,
+                    len(entries),
+                    INGEST_DOCX_MAX_ARCHIVE_ENTRIES,
+                )
+                return False
+            total_uncompressed = sum(entry.file_size for entry in entries)
+            if total_uncompressed > max_uncompressed_bytes:
+                log.warning(
+                    "Skipping DOCX %s: declared decompressed size %d bytes "
+                    "exceeds limit of %d bytes",
+                    key,
+                    total_uncompressed,
+                    max_uncompressed_bytes,
+                )
+                return False
+    except zipfile.BadZipFile as ex:
+        log.warning("Skipping DOCX %s: invalid zip archive (%s)", key, ex)
+        return False
+    return True
 
 
 def _extract_doc_text(key: str, data: bytes, log: logging.Logger) -> str:
@@ -272,6 +397,198 @@ def _extract_doc_text(key: str, data: bytes, log: logging.Logger) -> str:
     return ""
 
 
+# ---------------------------------------------------------------------------
+# Section-aware chunking
+#
+# FRAs and BMS Description-of-Operations PDFs are table-heavy template
+# documents. Blind fixed-size token windows cut across template sections and
+# table rows, burying key facts (e.g. an occupancy figure) in chunks whose
+# embedding is dominated by unrelated text. Splitting on the documents'
+# section headings keeps facts with their section, and the section title is
+# prepended to each chunk so the embedding carries the topic.
+# ---------------------------------------------------------------------------
+
+# FRA template section codes, e.g. "A1", "B2", "2.1.3"-style BMS headings.
+_SECTION_CODE_RE = re.compile(r"^[A-G][0-9](?:\.[0-9]{1,2})?$")
+_NUMBERED_HEADING_RE = re.compile(r"^\d{1,2}(?:\.\d{1,2}){0,3}\.?\s+[A-Z][^\n]{2,70}$")
+_ALL_CAPS_HEADING_RE = re.compile(
+    r"^(?=[^a-z]{6,80}$)[A-Z][A-Z0-9 &/'().,:–—-]*[A-Z0-9).]$"
+)
+# Recurring table-column headers in the FRA templates; never section starts.
+_HEADING_STOPWORDS = frozenset(
+    {
+        "COMMENTARY",
+        "EXISTING CONTROL MEASURES",
+        "FIRE RISK",
+        "YES/NO",
+        "DATE",
+        "SIGNATURE",
+        "ITEMS TO CONSIDER",
+        "LOCATION",
+        "DEFECT",
+        "ACTION",
+    }
+)
+_SECTION_TITLE_MAX_CHARS = 100
+_SECTION_MIN_BODY_CHARS = 80
+_SECTION_SPLIT_MIN_TEXT_CHARS = 2000
+
+
+def _heading_title(stripped: str) -> str | None:
+    """Return a section title if the line looks like a section heading."""
+    if not stripped or stripped in _HEADING_STOPWORDS:
+        return None
+    if _SECTION_CODE_RE.match(stripped):
+        return stripped
+    if _ALL_CAPS_HEADING_RE.match(stripped):
+        return stripped
+    if _NUMBERED_HEADING_RE.match(stripped):
+        return stripped
+    return None
+
+
+def split_text_sections(text: str) -> list[tuple[str | None, str]]:
+    """
+    Split extracted document text into (section_title, section_body) pairs.
+
+    Falls back to a single untitled section when the text is short or no
+    section structure is detected. Content is never dropped: tiny sections
+    are folded (title included) into their predecessor.
+    """
+    if len(text) < _SECTION_SPLIT_MIN_TEXT_CHARS:
+        return [(None, text)]
+
+    lines = text.splitlines()
+    sections: list[tuple[str | None, list[str]]] = []
+    current_title: str | None = None
+    current_lines: list[str] = []
+
+    index = 0
+    while index < len(lines):
+        stripped = lines[index].strip()
+        title = _heading_title(stripped)
+        if title is None:
+            current_lines.append(lines[index])
+            index += 1
+            continue
+
+        consumed = 1
+        # An FRA section code ("A1") is usually followed by its caps title.
+        if _SECTION_CODE_RE.match(stripped):
+            lookahead = index + 1
+            while lookahead < len(lines) and not lines[lookahead].strip():
+                lookahead += 1
+            if lookahead < len(lines):
+                follower = lines[lookahead].strip()
+                if (
+                    follower not in _HEADING_STOPWORDS
+                    and _ALL_CAPS_HEADING_RE.match(follower)
+                ):
+                    title = f"{stripped} {follower}"
+                    consumed = lookahead - index + 1
+
+        sections.append((current_title, current_lines))
+        current_title = title[:_SECTION_TITLE_MAX_CHARS]
+        current_lines = []
+        index += consumed
+
+    sections.append((current_title, current_lines))
+
+    # Fold sections with negligible bodies into their predecessor so that
+    # stray heading-like lines do not fragment the document.
+    merged: list[tuple[str | None, str]] = []
+    for title, body_lines in sections:
+        body = "\n".join(body_lines).strip()
+        if not body and title is None:
+            continue
+        if len(body) < _SECTION_MIN_BODY_CHARS and merged:
+            prev_title, prev_body = merged[-1]
+            tail = f"{title}\n{body}" if title else body
+            merged[-1] = (prev_title, f"{prev_body}\n{tail}".strip())
+            continue
+        merged.append((title, body))
+
+    if len(merged) < 2:
+        return [(None, text)]
+    return merged
+
+
+def _window_token_chunks(
+    tokens: list[int],
+    decode,
+    chunk_tokens: int,
+    chunk_overlap: int,
+):
+    """Yield cleaned, overlapping token-window chunks."""
+    start = 0
+    while start < len(tokens):
+        end = min(start + chunk_tokens, len(tokens))
+        chunk = decode(tokens[start:end])
+        chunk = re.sub(r"\s+\n", "\n", chunk).strip()
+        if chunk:
+            yield chunk
+        start = max(0, end - chunk_overlap)
+        if end == len(tokens):
+            break
+
+
+def chunk_text_with_sections(
+    encoder,
+    text: str,
+    *,
+    chunk_tokens: int,
+    chunk_overlap: int,
+) -> list[str]:
+    """
+    Chunk text section-by-section, prefixing each chunk with its section title.
+    """
+    chunks: list[str] = []
+    for title, body in split_text_sections(text):
+        tokens = encoder.encode(body)
+        prefix = f"Section: {title}\n" if title else ""
+        for chunk in _window_token_chunks(
+            tokens, encoder.decode, chunk_tokens, chunk_overlap
+        ):
+            chunks.append(f"{prefix}{chunk}" if prefix else chunk)
+    return chunks
+
+
+_DOC_TYPE_HEADER_LABELS = {
+    "fire_risk_assessment": "Fire Risk Assessment",
+    "operational_doc": "Operational/BMS document",
+    "planon_data": "Planon property data",
+    "maintenance_job": "Maintenance jobs summary",
+    "maintenance_request": "Maintenance requests summary",
+}
+
+
+def build_chunk_context_header(
+    *,
+    source_key: str,
+    canonical: str | None = None,
+    doc_type: str | None = None,
+) -> str:
+    """
+    Build a one-line context header for a chunk.
+
+    Embedded with (and stored alongside) every chunk of an unstructured
+    document so that both retrieval and answering know which building and
+    document the chunk came from.
+    """
+    parts: list[str] = []
+    if canonical and canonical != "Unknown":
+        parts.append(f"Building: {canonical}")
+    if doc_type and doc_type != "unknown":
+        label = _DOC_TYPE_HEADER_LABELS.get(doc_type, doc_type.replace("_", " "))
+        parts.append(f"Document: {label}")
+    name = Path(source_key).name if source_key else ""
+    if name:
+        parts.append(f"Source: {name}")
+    if not parts:
+        return ""
+    return "[" + " | ".join(parts) + "]"
+
+
 def extract_text_and_chunk_in_process(
     key: str,
     data: bytes,
@@ -281,7 +598,7 @@ def extract_text_and_chunk_in_process(
     chunk_overlap: int,
 ) -> tuple[str, list[str]]:
     """
-    Extract text and chunk it using a local encoder.
+    Extract text and chunk it (section-aware) using a local encoder.
 
     This is designed to run in a process pool to avoid GIL bottlenecks.
     """
@@ -294,21 +611,23 @@ def extract_text_and_chunk_in_process(
     except KeyError:
         encoder = tiktoken.get_encoding("cl100k_base")
 
-    tokens = encoder.encode(text)
-    chunks: list[str] = []
-    start = 0
-
-    while start < len(tokens):
-        end = min(start + chunk_tokens, len(tokens))
-        chunk = encoder.decode(tokens[start:end])
-        chunk = re.sub(r"\s+\n", "\n", chunk).strip()
-        if chunk:
-            chunks.append(chunk)
-        start = max(0, end - chunk_overlap)
-        if end == len(tokens):
-            break
-
+    chunks = chunk_text_with_sections(
+        encoder,
+        text,
+        chunk_tokens=chunk_tokens,
+        chunk_overlap=chunk_overlap,
+    )
     return text, chunks
+
+
+def chunk_document_text(ctx: "IngestContext", text: str) -> list[str]:
+    """Section-aware chunking for whole-document text (inline path)."""
+    return chunk_text_with_sections(
+        ctx.encoder,
+        text,
+        chunk_tokens=ctx.config.chunk_tokens,
+        chunk_overlap=ctx.config.chunk_overlap,
+    )
 
 
 def chunk_text(ctx: "IngestContext", text: str) -> list[str]:
@@ -420,6 +739,49 @@ def load_building_names_with_aliases(
         name_to_canonical: dict[str, str] = {}
         alias_to_canonical: dict[str, str] = {}
         metadata_cache: dict[str, dict[str, Any]] = {}
+        duplicate_mapping_count = 0
+        duplicate_mapping_examples: list[str] = []
+
+        def record_duplicate(raw_name: str, existing: str, ignored: str) -> None:
+            nonlocal duplicate_mapping_count
+            duplicate_mapping_count += 1
+            if len(duplicate_mapping_examples) < 5:
+                duplicate_mapping_examples.append(
+                    f"{raw_name}: kept {existing}, ignored {ignored}"
+                )
+
+        def add_name_mapping(raw_name: str, canonical_name: str) -> None:
+            keys = [
+                key
+                for key in (
+                    exact_building_key(raw_name),
+                    normalise_building_name(raw_name),
+                )
+                if key
+            ]
+            for key in dict.fromkeys(keys):
+                existing = name_to_canonical.get(key)
+                if existing and existing != canonical_name:
+                    record_duplicate(raw_name, existing, canonical_name)
+                    continue
+                name_to_canonical[key] = canonical_name
+
+        def add_alias_mapping(raw_alias: str, canonical_name: str) -> None:
+            add_name_mapping(raw_alias, canonical_name)
+            keys = [
+                key
+                for key in (
+                    exact_building_key(raw_alias),
+                    normalise_building_name(raw_alias),
+                )
+                if key
+            ]
+            for key in dict.fromkeys(keys):
+                existing = alias_to_canonical.get(key)
+                if existing and existing != canonical_name:
+                    record_duplicate(raw_alias, existing, canonical_name)
+                    continue
+                alias_to_canonical[key] = canonical_name
 
         for _, row in df.iterrows():
             prop_name = row.get("Property name")
@@ -427,36 +789,30 @@ def load_building_names_with_aliases(
                 continue
 
             canonical = str(prop_name).strip()
+            if not canonical:
+                continue
             canonical_names.append(canonical)
             aliases = set()
 
-            name_to_canonical[canonical.lower()] = canonical
+            add_name_mapping(canonical, canonical)
             aliases.add(canonical)
 
             if pd.notna(row.get("Property names")):
-                for name in str(row["Property names"]).split(";"):
-                    name = name.strip()
-                    if name:
-                        norm = normalise_building_name(name)
-                        name_to_canonical[norm] = canonical
-                        alias_to_canonical[norm] = canonical
-                        aliases.add(name)
+                for name in split_alias_field(str(row["Property names"])):
+                    add_alias_mapping(name, canonical)
+                    aliases.add(name)
 
             if pd.notna(row.get("Property alternative names")):
-                for name in str(row["Property alternative names"]).split(";"):
-                    name = name.strip()
-                    if name:
-                        norm = normalise_building_name(name)
-                        name_to_canonical[norm] = canonical
-                        alias_to_canonical[norm] = canonical
-                        aliases.add(name)
+                for name in split_alias_field(
+                    str(row["Property alternative names"])
+                ):
+                    add_alias_mapping(name, canonical)
+                    aliases.add(name)
 
             if pd.notna(row.get("UsrFRACondensedPropertyName")):
                 condensed = str(row["UsrFRACondensedPropertyName"]).strip()
                 if condensed:
-                    norm = normalise_building_name(condensed)
-                    name_to_canonical[norm] = canonical
-                    alias_to_canonical[norm] = canonical
+                    add_alias_mapping(condensed, canonical)
                     aliases.add(condensed)
 
             building_metadata = {
@@ -482,6 +838,13 @@ def load_building_names_with_aliases(
 
         ctx.cache.update_from_csv(name_to_canonical, alias_to_canonical, metadata_cache)
 
+        if duplicate_mapping_count:
+            ctx.logger.warning(
+                "Kept first canonical for %d duplicate building aliases/names. Examples: %s",
+                duplicate_mapping_count,
+                "; ".join(duplicate_mapping_examples),
+            )
+
         ctx.logger.info(
             "Loaded %d canonical building names with %d total name variations",
             len(canonical_names),
@@ -502,7 +865,6 @@ def is_fire_risk_assessment(key: str, text: str = "") -> bool:
         r"fire[\s_-]?risk[\s_-]?assessment",
         r"fire_risk",
         r"firerisk",
-        r"risk[\s_-]?assessment",
         r"\boas\b",
     ]
 
@@ -592,16 +954,11 @@ def extract_text_csv_by_building_enhanced(
             aliases = [raw_prop, canonical_name]
 
             if pd.notna(row.get("Property names")):
-                aliases.extend(
-                    [n.strip() for n in str(row["Property names"]).split(";")]
-                )
+                aliases.extend(split_alias_field(str(row["Property names"])))
 
             if pd.notna(row.get("Property alternative names")):
                 aliases.extend(
-                    [
-                        n.strip()
-                        for n in str(row["Property alternative names"]).split(";")
-                    ]
+                    split_alias_field(str(row["Property alternative names"]))
                 )
 
             if pd.notna(row.get("UsrFRACondensedPropertyName")):
@@ -707,6 +1064,33 @@ def extract_maintenance_csv(
         data_type = "Maintenance Requests" if is_requests else "Maintenance Jobs"
         log.info("Processing %s with %d rows", data_type, len(df))
 
+        # Pivot headers are identical for every row, so parse and normalise
+        # them once up front instead of once per cell.
+        parsed_headers: dict[Any, dict[str, str]] = {}
+        for col in df.columns:
+            if col == building_col:
+                continue
+            col_str = str(col)
+            col_lower = col_str.lower()
+            if is_requests:
+                if "request" not in col_lower:
+                    continue
+            elif not any(token in col_lower for token in ("job", "work order")):
+                continue
+
+            try:
+                parsed = parse_pivot_header(col_str, is_requests)
+                status = (str(parsed.get("status") or "").strip()) or "unknown"
+                parsed["status"] = status[:1].upper() + status[1:].lower()
+                parsed["priority"] = normalise_priority(parsed.get("priority") or "")
+                parsed_headers[col] = parsed
+            except Exception as error:
+                log.warning(
+                    "Could not parse column header '%s': %s",
+                    col,
+                    error,
+                )
+
         building_docs: list[tuple[str, str | None, str, dict[str, Any]]] = []
 
         for _, row in df.iterrows():
@@ -715,10 +1099,15 @@ def extract_maintenance_csv(
                 continue
 
             raw = str(building_name).strip()
+            if not raw:
+                continue
             canonical_name = alias_to_canonical.get(normalise_building_name(raw), raw)
 
-            building_text = f"Building: {canonical_name}\n"
-            building_text += f"Data Type: {data_type}\n\n"
+            text_parts = [
+                f"Building: {canonical_name}",
+                f"Data Type: {data_type}",
+                "",
+            ]
 
             doc_type = "maintenance_request" if is_requests else "maintenance_job"
             extra_metadata: dict[str, Any] = {
@@ -731,24 +1120,15 @@ def extract_maintenance_csv(
             maintenance_metrics: dict[str, Any] = {}
             total_items = 0
 
-            for col, val in row.items():
-                if col == building_col or pd.isna(val) or val == 0:
-                    continue
-
-                col_str = str(col)
-                col_lower = col_str.lower()
-                if is_requests:
-                    if "request" not in col_lower:
-                        continue
-                elif not any(token in col_lower for token in ("job", "work order")):
+            for col, parsed in parsed_headers.items():
+                val = row[col]
+                if pd.isna(val) or val == 0:
                     continue
 
                 try:
-                    parsed = parse_pivot_header(col_str, is_requests)
                     category = parsed["category"]
-                    status = (str(parsed.get("status") or "").strip()) or "unknown"
-                    status = status[:1].upper() + status[1:].lower()
-                    priority_label = normalise_priority(parsed.get("priority") or "")
+                    status = parsed["status"]
+                    priority_label = parsed["priority"]
                     count = int(float(val))
 
                     if is_requests:
@@ -756,15 +1136,15 @@ def extract_maintenance_csv(
                         maintenance_metrics[category].setdefault(priority_label, {})
                         leaf = maintenance_metrics[category][priority_label]
                         leaf[status] = leaf.get(status, 0) + count
-                        building_text += (
-                            f"{category} - {priority_label} - {status}: {count}\n"
+                        text_parts.append(
+                            f"{category} - {priority_label} - {status}: {count}"
                         )
                     else:
                         maintenance_metrics.setdefault(category, {})
                         maintenance_metrics[category][status] = (
                             maintenance_metrics[category].get(status, 0) + count
                         )
-                        building_text += f"{category} - {status}: {count}\n"
+                        text_parts.append(f"{category} - {status}: {count}")
 
                     total_items += count
                 except Exception as error:
@@ -796,19 +1176,20 @@ def extract_maintenance_csv(
                         "categories": list(maintenance_metrics.keys()),
                     }
                 )
-                building_text += "\n=== Summary ===\n"
-                building_text += f"Total {data_type}: {total_items}\n"
-                building_text += (
-                    f"Categories with activity: {len(maintenance_metrics)}\n"
+                text_parts.append("")
+                text_parts.append("=== Summary ===")
+                text_parts.append(f"Total {data_type}: {total_items}")
+                text_parts.append(
+                    f"Categories with activity: {len(maintenance_metrics)}"
                 )
-                building_text += (
+                text_parts.append(
                     "Active categories: "
                     + ", ".join(sorted(maintenance_metrics.keys()))
-                    + "\n"
                 )
             else:
                 extra_metadata["maintenance_metrics"] = metrics_json
 
+            building_text = "\n".join(text_parts) + "\n"
             doc_key = f"{data_type} - {canonical_name}"
             building_docs.append(
                 (doc_key, canonical_name, building_text, extra_metadata)

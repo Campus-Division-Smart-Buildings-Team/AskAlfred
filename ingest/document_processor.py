@@ -38,7 +38,8 @@ from filename_building_parser import should_flag_for_review
 from fra import FraVectorExtractResult, extract_fra_metadata
 
 from .document_content import (
-    chunk_text,
+    build_chunk_context_header,
+    chunk_document_text,
     chunk_text_generator,
     embed_texts_batch,
     ext,
@@ -196,8 +197,14 @@ class DocumentProcessor:
             text_sample=text_sample,
         )
 
-    def handle_dry_run(self, key: str, docs: list[DocTuple], file_id: str) -> bool:
-        return self._handle_dry_run(key, docs, file_id)
+    def handle_dry_run(
+        self,
+        key: str,
+        docs: list[DocTuple],
+        file_id: str,
+        precomputed_chunks: dict[str, list[str]] | None = None,
+    ) -> bool:
+        return self._handle_dry_run(key, docs, file_id, precomputed_chunks)
 
     def maybe_extract_fra_vectors(
         self,
@@ -275,7 +282,7 @@ class DocumentProcessor:
             data,
             logger=self.ctx.logger,
         )
-        chunks = chunk_text(self.ctx, text_sample)
+        chunks = chunk_document_text(self.ctx, text_sample)
         elapsed = time.perf_counter() - start
         self.ctx.logger.debug(
             "Extract+chunk (thread) %s: %.3fs (%d chunks)",
@@ -370,11 +377,11 @@ class DocumentProcessor:
         :rtype: tuple[list[DocTuple], str, str | None, bool]
         """
         docs: list[DocTuple]
-        text_sample = ""
         building: str | None = "Unknown"
         is_fra_candidate = False
 
         if extension in ("csv", "xlsx", "xls"):
+            text_sample = ""
             if "maintenance" in key.lower():
                 docs = extract_maintenance_csv(
                     key,
@@ -418,6 +425,14 @@ class DocumentProcessor:
                     source,
                 )
 
+            if flag_review:
+                self.ctx.stats.increment("building_resolution_quarantined")
+                raise IngestError(
+                    "Quarantined file due to unresolved/ambiguous building: "
+                    f"{key} -> {building} (confidence: {confidence:.2f}, "
+                    f"source: {source})"
+                )
+
             docs = [(key, building, text_sample, building_metadata)]
             is_fra_candidate = _is_fra_candidate_policy(key, text_sample)
             if is_fra_candidate:
@@ -436,28 +451,29 @@ class DocumentProcessor:
         return docs, text_sample, building, is_fra_candidate
 
     def _handle_dry_run(
-        self, key: str, docs: list[DocTuple], file_id: str
+        self,
+        key: str,
+        docs: list[DocTuple],
+        file_id: str,
+        precomputed_chunks: dict[str, list[str]] | None = None,
     ) -> bool:  # pylint: disable=unused-argument
         if not _is_dry_run(self.ctx.config):
             return False
 
         planned_vectors = 0
-        extension = ext(key)
 
         for doc_key, canonical, text, extra_metadata in docs:
-            # Resolve doc_type + namespace for prefix check
-            doc_type = self._resolve_document_type(
-                extension=extension,
-                key=key,
-                text=text,
-                extra_metadata=extra_metadata,
-            )
-            resolved_namespace = self._route_namespace(doc_type)
-            # No prefix checks: FileRegistry is the sole authority.
-
             doc_planned_vectors = 0
             first_chunk: str | None = None
-            for chunk in chunk_text_generator(self.ctx, text):
+            chunks_override = (
+                precomputed_chunks.get(doc_key) if precomputed_chunks else None
+            )
+            chunk_iter = (
+                iter(chunks_override)
+                if chunks_override is not None
+                else chunk_text_generator(self.ctx, text)
+            )
+            for chunk in chunk_iter:
                 if first_chunk is None:
                     first_chunk = chunk
                 doc_planned_vectors += 1
@@ -681,6 +697,24 @@ class DocumentProcessor:
             if not valid:
                 raise RoutingError(f"Invalid namespace routing: {reason}")
 
+            self.ctx.logger.info(
+                "File %s -> doc_type=%s -> namespace=%s",
+                key,
+                doc_type,
+                resolved_namespace,
+            )
+
+            # Tabular docs (one doc per CSV row) already self-describe; whole
+            # document text (PDF/DOCX) gets a context header on every chunk so
+            # the embedding and the answer model both know building + source.
+            context_header = ""
+            if extension not in ("csv", "xlsx", "xls"):
+                context_header = build_chunk_context_header(
+                    source_key=key,
+                    canonical=canonical,
+                    doc_type=doc_type,
+                )
+
             batch_size = INGEST_EMBED_BATCH_SIZE
             batch_chunks: list[str] = []
             batch_indices: list[int] = []
@@ -838,13 +872,6 @@ class DocumentProcessor:
                             resolved_namespace=current_resolved_namespace,
                         )
 
-                    self.ctx.logger.info(
-                        "File %s -> doc_type=%s -> namespace=%s",
-                        key,
-                        current_doc_type,
-                        current_resolved_namespace,
-                    )
-
                     vectors_to_upsert.append(
                         {
                             "id": vector_id,
@@ -863,6 +890,8 @@ class DocumentProcessor:
             )
             if chunks_override is not None:
                 for chunk in chunks_override:
+                    if context_header:
+                        chunk = f"{context_header}\n{chunk}"
                     batch_chunks.append(chunk)
                     batch_indices.append(chunk_idx)
                     chunk_idx += 1
@@ -876,6 +905,8 @@ class DocumentProcessor:
                         )
             else:
                 for chunk in chunk_text_generator(self.ctx, text):
+                    if context_header:
+                        chunk = f"{context_header}\n{chunk}"
                     batch_chunks.append(chunk)
                     batch_indices.append(chunk_idx)
                     chunk_idx += 1
@@ -980,7 +1011,9 @@ class Vectoriser:
         is_fra_candidate: bool,
         precomputed_chunks: dict[str, list[str]] | None,
     ) -> list[dict[str, Any]]:
-        if self._processor.handle_dry_run(key, docs, file_id):
+        if self._processor.handle_dry_run(
+            key, docs, file_id, precomputed_chunks=precomputed_chunks
+        ):
             return []
 
         vectors_to_upsert: list[dict[str, Any]] = []
