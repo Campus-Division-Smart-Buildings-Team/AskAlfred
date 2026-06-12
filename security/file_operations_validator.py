@@ -230,20 +230,42 @@ def validate_path_safety(
         FileOperationSecurityError: For other security violations
     """
     # Validate base path
-    base = Path(base_path).resolve()
+    try:
+        base = Path(base_path).resolve()
 
-    if not base.exists():
-        raise DirectoryAccessError(f"Base directory not found: {base_path}")
+        if not base.exists():
+            raise DirectoryAccessError(f"Base directory not found: {base_path}")
 
-    if not base.is_dir():
-        raise DirectoryAccessError(f"Base path is not a directory: {base_path}")
+        if not base.is_dir():
+            raise DirectoryAccessError(f"Base path is not a directory: {base_path}")
+    except OSError as e:
+        raise DirectoryAccessError(f"Cannot access base directory: {base_path}") from e
 
     # Check for suspicious patterns in relative path
     if has_suspicious_patterns(relative_path):
         raise PathTraversalError(f"Suspicious patterns in path: {relative_path}")
 
-    # Resolve the target path
-    target = (base / relative_path).resolve()
+    unresolved_target = base / relative_path
+
+    # Reject lexical escapes before inspecting path components. This also keeps
+    # absolute paths classified as traversal attempts.
+    try:
+        relative_target = unresolved_target.relative_to(base)
+    except ValueError as e:
+        logger.warning("Path traversal detected: %s", relative_path)
+        raise PathTraversalError(f"Path escapes base directory: {relative_path}") from e
+
+    # Check the unresolved path so resolve() cannot hide a symlink by following it.
+    try:
+        current = base
+        for part in relative_target.parts:
+            current /= part
+            if current.is_symlink():
+                raise SymlinkError(f"Symlinks not allowed: {relative_path}")
+
+        target = unresolved_target.resolve()
+    except OSError as e:
+        raise FileOperationSecurityError(f"Cannot inspect path: {relative_path}") from e
 
     # Verify target is within base directory
     try:
@@ -252,23 +274,18 @@ def validate_path_safety(
         logger.warning("Path traversal detected: %s -> %s", relative_path, target)
         raise PathTraversalError(f"Path escapes base directory: {relative_path}") from e
 
-    # Check for symlinks
-    if target.is_symlink():
-        raise SymlinkError(f"Symlinks not allowed: {relative_path}")
+    try:
+        # Check if path exists
+        if not target.exists():
+            raise FileOperationSecurityError(f"Path does not exist: {relative_path}")
 
-    # Check if path exists
-    if not target.exists():
-        raise FileOperationSecurityError(f"Path does not exist: {relative_path}")
-
-    # Check type: directory or file
-    if target.is_dir() and not allow_directories:
-        raise FileOperationSecurityError(
-            f"Expected file, got directory: {relative_path}"
-        )
-
-    if target.is_file() and allow_directories:
-        # This is OK - we allow files when directories are allowed
-        pass
+        # Check type: directory or file
+        if target.is_dir() and not allow_directories:
+            raise FileOperationSecurityError(
+                f"Expected file, got directory: {relative_path}"
+            )
+    except OSError as e:
+        raise FileOperationSecurityError(f"Cannot inspect path: {relative_path}") from e
 
     return target
 

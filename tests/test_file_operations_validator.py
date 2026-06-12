@@ -194,6 +194,22 @@ class TestSymlinkPrevention:
             with pytest.raises(SymlinkError):
                 validate_file_safety(tmpdir, symlink_path.name)
 
+    def test_symlinked_parent_directory_rejected(self):
+        """Test that symlinks in intermediate path components are rejected."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            real_dir = Path(tmpdir) / "real"
+            real_dir.mkdir()
+            (real_dir / "document.pdf").write_text("content")
+
+            symlink_dir = Path(tmpdir) / "linked"
+            try:
+                symlink_dir.symlink_to(real_dir, target_is_directory=True)
+            except OSError:
+                pytest.skip("OS doesn't support symlinks")
+
+            with pytest.raises(SymlinkError):
+                validate_file_safety(tmpdir, "linked/document.pdf")
+
     def test_regular_files_not_rejected_as_symlinks(self):
         """Test that regular files are not rejected as symlinks."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -486,11 +502,8 @@ class TestEdgeCases:
         """Test handling of very long filenames."""
         with tempfile.TemporaryDirectory() as tmpdir:
             long_name = "a" * 1000 + ".pdf"
-            # Should either succeed (if path is safe) or fail for length
-            try:
+            with pytest.raises(FileOperationSecurityError):
                 validate_file_safety(tmpdir, long_name)
-            except (PathTraversalError, ValueError, FileOperationSecurityError):
-                pass  # All acceptable
 
     def test_unicode_in_filename(self):
         """Test handling of unicode characters."""
