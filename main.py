@@ -77,9 +77,20 @@ os.environ["HF_HUB_OFFLINE"] = "1"
 MODEL_ZIP = Path("models/all-MiniLM-L6-v2.zip")
 MODEL_DIR = Path("models/all-MiniLM-L6-v2")
 
+
+def _safe_extract_zip(zip_path: Path, dest_dir: Path) -> None:
+    """Extract a zip, rejecting any member that would escape dest_dir (zip-slip)."""
+    dest_root = dest_dir.resolve()
+    with zipfile.ZipFile(zip_path, "r") as z:
+        for member in z.namelist():
+            target = (dest_dir / member).resolve()
+            if target != dest_root and dest_root not in target.parents:
+                raise ValueError(f"Unsafe path in archive {zip_path}: {member!r}")
+        z.extractall(dest_dir)
+
+
 if MODEL_ZIP.exists() and not MODEL_DIR.exists():
-    with zipfile.ZipFile(MODEL_ZIP, "r") as z:
-        z.extractall(MODEL_DIR)
+    _safe_extract_zip(MODEL_ZIP, MODEL_DIR)
 
 
 os.environ["STREAMLIT_LOG_LEVEL"] = "info"  # ensure Streamlit honours INFO

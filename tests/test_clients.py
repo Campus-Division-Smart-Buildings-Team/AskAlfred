@@ -34,4 +34,6 @@ def test_get_redis_uses_bounded_timeouts_and_ssl(monkeypatch):
     assert captured_kwargs["socket_timeout"] == 1.5
     assert captured_kwargs["socket_connect_timeout"] == 2.5
     assert captured_kwargs["health_check_interval"] == 10
-    assert captured_kwargs["retry_on_timeout"] is False
+    # retry_on_timeout was removed (deprecated in redis-py 6.0); the default
+    # client performs no timeout retries, preserving the previous behaviour.
+    assert "retry_on_timeout" not in captured_kwargs

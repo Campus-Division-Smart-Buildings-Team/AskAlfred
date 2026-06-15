@@ -164,7 +164,6 @@ class ClientManager:
                 socket_timeout=socket_timeout,
                 socket_connect_timeout=socket_connect_timeout,
                 health_check_interval=health_check_interval,
-                retry_on_timeout=False,
             )
             return cls._redis
         except Exception as e:

@@ -116,13 +116,18 @@ INGEST_METADATA_CACHE_SIZE = 2048
 INGEST_METADATA_MAX_TEXT_TOKENS = 600
 INGEST_VECTOR_BUFFER_MAX_SIZE = 10000
 INGEST_PROGRESS_LOG_INTERVAL = 10
-INGEST_PROCESSING_LEASE_SECONDS = 10 * 60  # Previously 900
+# The processing lease MUST exceed the per-file wall-clock cap
+# (INGEST_MAX_FILE_SECONDS = 900s below); otherwise a slow-but-healthy file can
+# have its lease expire mid-run and be re-acquired by another worker, causing
+# duplicate ingestion. Headroom covers the final upsert/verify after parsing.
+INGEST_PROCESSING_LEASE_SECONDS = 20 * 60  # 1200s > INGEST_MAX_FILE_SECONDS (900s)
 INGEST_UPSERT_FLUSH_SECONDS = 2.0
 INGEST_UPSERT_JOIN_TIMEOUT_SECONDS = 1800.0
 INGEST_UPSERT_JOIN_POLL_SECONDS = 2.0
 INGEST_FILE_TTL_SUCCESS_SECONDS = 30 * 60  # Previously 30 * 24 * 60 * 60
 INGEST_FILE_TTL_FAILED_SECONDS = 10 * 60  # Previously 7 * 24 * 60 * 60
-INGEST_FILE_TTL_PROCESSING_SECONDS = 10 * 60  # Previously 24 * 60 * 60
+# Keep the Redis key alive at least as long as the processing lease.
+INGEST_FILE_TTL_PROCESSING_SECONDS = 20 * 60  # >= INGEST_PROCESSING_LEASE_SECONDS
 INGEST_JOB_TTL_DEFAULT_SECONDS = 15 * 60  # Previously 7 * 24 * 60 * 60
 INGEST_JOB_TTL_SUPERSEDE_SECONDS = 15 * 60  # Previously 30 * 24 * 60 * 60
 OPENAI_TIMEOUT_DEFAULT_S = 60.0

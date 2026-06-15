@@ -6,71 +6,83 @@ It provides **multi-domain, building-aware search** across:
 - Building Management Systems (BMS)
 - Fire Risk Assessments and Fire Risk Action Items (FRAs)
 - Planon property data (conditions, areas, metadata)
-- Maintenance requests and job records  
+- Maintenance requests and job records
 - General RAG / semantic search across documentation
 
 Powered by:
-✅ OpenAI embeddings  
-✅ Pinecone vector search  
-✅ A hybrid **rule-based + ML intent classifier** pipeline  
+- ✅ OpenAI embeddings and answer generation
+- ✅ Pinecone vector search
+- ✅ A hybrid **rule-based + ML intent classifier** pipeline
+- ✅ MSAL (Microsoft Entra ID) authentication and role-based access control
 
 ---
 
-## 🧠 Features 
+## 🧠 Features
 
-Alfred V3 is a modular, transactional, and concurrency-safe ingestion pipeline with:
+Alfred V3 pairs a hybrid query-routing front end with a transactional,
+concurrency-safe ingestion pipeline:
 
-- Secure local file ingestion
-- FRA action plan parsing with structured extraction
-- Deterministic triage scoring & prioritisation
-- Atomic supersession handling for FRA updates
-- Vector storage via Pinecone
-- Embedding via OpenAI
-- Redis-backed job registry, locks & file registry
-- Thread-safe stats, cache & vector buffering
+**Query side**
+- Hybrid rule-based + ML intent routing via the `NLPIntentClassifier`
+- Building / business-term extraction and spell checking in preprocessing
+- Chain-of-responsibility handlers, one per intent
+- Unified structured + semantic retrieval through the `search_core` package
+- OpenAI-backed answer summarisation for semantic and maintenance results
+
+**Ingestion side**
+- Secure local file ingestion (`security/file_operations_validator.py`)
+- FRA action-plan parsing with structured extraction and triage scoring
+- Atomic supersession handling when newer FRAs replace older ones
+- Vector storage via Pinecone, embedding via OpenAI
+- Redis-backed job registry, locks, and file registry
+- Thread-safe stats, caching, and vector buffering
 - Dry-run mode for safe validation
-- Metrics instrumentation
-- Parallel IO + parsing workers
-- Batched and retry-aware upsert coordination
+- Parallel IO + parsing workers with batched, retry-aware upserts
+- Prometheus (`.prom`) metric files and a JSONL event sink for observability
 
-Alfred V3 uses a **Hybrid Intent Routing System** with the `NLPIntentClassifier`:
+### `query_core/intent_classifier.py` — NLPIntentClassifier
 
-### ✅ `intent_classifier.py` - NLPIntentClassifier
-A sophisticated, context-aware intent classifier using a **quantized all-MiniLM-L6-v2 CT2 encoder** (`michaelfeil/ct2fast-all-MiniLM-L6-v2`) that:
+A context-aware intent classifier using a **quantized all-MiniLM-L6-v2 CT2 encoder**
+(`michaelfeil/ct2fast-all-MiniLM-L6-v2`) that:
 
-**Core Features:**
-- Loads pre-trained model from local `models/all-MiniLM-L6-v2/` directory or auto-downloads from Hugging Face
-- Auto-extracts zipped models at startup for convenience
-- Generates and caches intent embeddings for all query types (saved as JSON + NPZ in `intent_embeddings_cache.json` and `intent_embeddings_cache.npz`)
+**Core behaviour**
+- Loads a pre-trained model from local `models/all-MiniLM-L6-v2/` or auto-downloads
+  from Hugging Face (with offline flags set in `main.py`)
+- Auto-extracts a zipped model at startup if present
+- Generates and caches intent embeddings (`intent_embeddings_cache.json` /
+  `intent_embeddings_cache.npz`, regenerated on first run)
 - Returns calibrated confidence scores using **softmax normalisation**
 - Provides both semantic and pattern-based classification with automatic fallback
 
-**Advanced Capabilities:**
-- **Context-aware biasing**: Adjusts confidence scores based on `QueryContext` (detected buildings, business terms)
-- **Hybrid classification**: Combines semantic similarity (70% mean + 30% max example) with pattern matching
-- **Confidence threshold**: Default 0.65 threshold triggers pattern fallback for low-confidence predictions
-- **Graceful degradation**: Falls back to pattern-only mode if CT2 encoder unavailable
+**Advanced capabilities**
+- **Context-aware biasing**: adjusts confidence based on `QueryContext`
+  (detected buildings, business terms)
+- **Hybrid classification**: combines semantic similarity (70% mean + 30% max
+  example) with pattern matching
+- **Confidence threshold**: `INTENT_CONFIDENCE_THRESHOLD` (default `0.65`) triggers
+  pattern fallback for low-confidence predictions
+- **Graceful degradation**: falls back to pattern-only mode if the CT2 encoder is
+  unavailable
 
-**Intent Training Examples:**
-The classifier is trained on domain-specific examples across 6 query types:
+**Intent types** (see `query_core/query_types.py`):
 - `CONVERSATIONAL` (greetings, help requests)
 - `MAINTENANCE` (PPM, jobs, requests)
 - `RANKING` (largest, top N, comparisons)
-- `PROPERTY_CONDITION` (derelict, condition A-D)
+- `PROPERTY_CONDITION` (derelict, condition A–D)
 - `COUNTING` (how many, count)
 - `SEMANTIC_SEARCH` (BMS config, FRA process, HVAC systems)
 
-### ✅ Classification Behavior:
-- If semantic confidence ≥ 0.65 → Uses semantic classification with context biasing
-- If semantic confidence < 0.65 → Falls back to pattern-based classification
-- Context biasing adjusts scores by up to 5% based on detected buildings and business terms
-- If a handler declines during negotiation, QueryManager escalates automatically
+**Classification behaviour**
+- Semantic confidence ≥ threshold → semantic classification with context biasing
+- Semantic confidence < threshold → pattern-based classification fallback
+- Context biasing nudges scores based on detected buildings and business terms
+- If a handler declines during routing, the `QueryManager` escalates automatically
 
 ---
 
 ## 🧠 Core Architecture Overview
 
-Alfred's architecture follows a **modular, layered design**:
+Alfred's query architecture follows a **modular, layered design**:
 
 ```
             ┌────────────────────────┐
@@ -83,16 +95,16 @@ Alfred's architecture follows a **modular, layered design**:
             └──────────┬─────────────┘
                        │
        ┌───────────────┼────────────────────┐
-       │ Rule Layer → Regex/Keyword Matching│
-       │ ML Layer → NLPIntentClassifier     │
+       │ Rule Layer → Regex/Keyword Matching │
+       │ ML Layer  → NLPIntentClassifier     │
        └───────────────┬────────────────────┘
                        │
     ┌──────────────────▼────────────────────┐
-    │         Handlers Layer                │
-    │ (Conversational / Property /          │
-    │  Maintenance / Counting / Ranking /   │
-    │  SemanticSearch)                      │
-    └───────────────────────────────────────┘
+    │           Handlers Layer               │
+    │ (Conversational / Property /           │
+    │  Maintenance / Counting / Ranking /    │
+    │  SemanticSearch)                       │
+    └───────────────────┬────────────────────┘
                        │
                        ▼
             ┌────────────────────────┐
@@ -101,9 +113,10 @@ Alfred's architecture follows a **modular, layered design**:
 ```
 
 ---
+
 ## 🧠 Ingestion Architecture Overview
 
-Alfred's ingestion architecture is mainly determined by **document-type** and the upsert strategy:
+Alfred's ingestion path is driven by **document type** and the chosen upsert strategy:
 
 ```
             ┌────────────────────────┐
@@ -111,7 +124,7 @@ Alfred's ingestion architecture is mainly determined by **document-type** and th
             └──────────┬─────────────┘
                        │
             ┌──────────▼─────────────┐
-            │ list_local_files_secure│
+            │ secure file listing    │
             └──────────┬─────────────┘
                        │
             ┌──────────▼─────────────┐
@@ -120,23 +133,23 @@ Alfred's ingestion architecture is mainly determined by **document-type** and th
             └──────────┬─────────────┘
                        │
             ┌──────────▼─────────────┐
-            │   DocumentProcessor    │
+            │  DocumentProcessor     │
             │  (extract + chunk +    │
             │   FRA vector path)     │
             └──────────┬─────────────┘
                        │
             ┌──────────▼─────────────┐
-            │ FileIngestOrchestrator │
+            │   ingest orchestration │
             │    (IO/parse pools)    │
             └──────────┬─────────────┘
                        │
             ┌──────────▼─────────────┐
-            │ VectorWriteCoordinator │
+            │  upsert coordination   │
             │ (batch + flush policy) │
             └──────────┬─────────────┘
                        │
             ┌──────────▼─────────────┐
-            │ Upsert:worker or inline│
+            │ Upsert: worker or inline│
             └──────────┬─────────────┘
                        │
                        ▼
@@ -145,38 +158,12 @@ Alfred's ingestion architecture is mainly determined by **document-type** and th
             └────────────────────────┘
 ```
 
-Files are processed by `DocumentProcessor`, which extracts text, chunks, and (for FRA candidates) routes through the FRA vector extraction path before returning vectors. `VectorWriteCoordinator` then batches and flushes vectors either **inline** (direct upsert in the main thread) or via **worker** threads (queue + `_upsert_worker`) depending on `upsert_strategy`, with both paths ultimately writing to Pinecone.
-
----
-
-## ⚙️ Key Components
-
-| Module | Purpose |
-|--------|----------|
-| **`main.py`** | Streamlit entry point. Initialises cache, handles UI, logging, and session state. |
-| **`intent_classifier.py`** | NLPIntentClassifier - CT2 encoder (hf-hub-ctranslate2) with context-aware biasing and calibrated confidence |
-| **`query_manager.py`** | Routes user input to the appropriate handler using a priority-based system. Integrates NLPIntentClassifier for hybrid intent pipeline |
-| **`query_context.py`** | Encapsulates query metadata (buildings, business terms, complexity) used for context-aware classification |
-| **`query_types.py`** | Enum defining all supported query intents (CONVERSATIONAL, MAINTENANCE, RANKING, etc.) |
-| **`base_handler.py`** | Abstract base class for all query handlers with consistent logging and metadata extraction. |
-| **Handlers Layer** | Specialised query processors implementing `can_handle()` and `handle()` methods: |
-| → `conversational_handler.py` | Responds to greetings, about queries, and small talk. |
-| → `counting_handler.py` | Handles counting queries ("How many buildings have FRAs?"). |
-| → `maintenance_handler.py` | Handles maintenance requests, jobs, and categories. |
-| → `property_handler.py` | Handles property condition and derelict building queries. |
-| → `ranking_handler.py` | Handles "largest/smallest/top" building queries. |
-| → `semantic_search_handler.py` | Fallback search handler for all remaining queries using Pinecone semantic vector retrieval + OpenAI summarisation. |
-| **`search_core` package** | Unified structured + semantic retrieval engine |
-| → `search_router.py` | Unified entry point for structured and semantic searches. |
-| **`search_instructions.py`** | Defines `SearchInstructions` dataclass to pass structured search intent (lives in `search_core`). |
-| **`search_core` package (cont.)** |  |
-| → `planon_search.py` | Handles property and Planon-related structured queries. |
-| → `maintenance_search.py` | Handles structured maintenance vector lookups. |
-| → `search_utils.py` | Core utilities for boosting, deduplication, and building filters. |
-| **`building/utils.py`** | Comprehensive building cache, alias, and fuzzy matching utilities (centralised). |
-| **`structured_queries.py`** | Rule-based structured detection for counting, ranking, maintenance, and property queries. |
-| **`config/constant.py`** | Constants for environment, models, and routing configuration. |
-| **`config/settings.py`** | Environment, API keys, and Pinecone/OpenAI configuration. |
+Files are processed by `ingest/document_processor.py`, which extracts text, chunks
+it, and (for FRA candidates) routes through the FRA vector extraction path before
+returning vectors. The upsert layer then batches and flushes vectors either
+**inline** (direct upsert in the main thread) or via **worker** threads
+(queue + worker), selected by the `UPSERT_STRATEGY` setting, with both paths
+ultimately writing to Pinecone.
 
 ---
 
@@ -189,18 +176,19 @@ AskAlfred/
 │                         #   Redis locks, Pinecone utils, date utils, exceptions
 ├── auth/                 # Authentication & authorisation: MSAL, credential manager,
 │                         #   auth context, access control
-├── security/             # Input/file validation, log & CSV sanitisation, rate limiting
+├── security/             # Input/file validation, log & CSV sanitisation,
+│                         #   context sanitisation, rate limiting
 ├── query_core/           # Query engine: QueryManager, intent classifier, query
 │                         #   context/result/route/types
 ├── query_handlers/       # Chain-of-responsibility handlers, one per intent
 ├── query_preprocessors/  # Building/business-term extraction, spell check, complexity
 ├── search_core/          # Structured + semantic retrieval, answer generation,
-│                         #   search instructions
+│                         #   search instructions, structured-query detection
 ├── domain/               # Business terminology and maintenance-data helpers
 ├── building/             # Building cache, normalisation, resolution, filename parsing
 ├── fra/                  # Fire Risk Assessment parsing, triage and enrichment
-├── ingest/               # Document ingestion pipeline
-├── interfaces/           # Abstract interfaces (embedder, vector store, registries)
+├── ingest/               # Document ingestion pipeline (orchestration, transactions)
+├── interfaces/           # Abstract ports (embedder, vector store, registries, sink)
 ├── ui/                   # Streamlit UI components and emoji constants
 ├── config/               # Settings and constants
 ├── cli/                  # Batch ingest / building resolution entry points
@@ -209,26 +197,62 @@ AskAlfred/
 └── tests/                # Pytest suite
 ```
 
+> `Alfred/`, `data/`, `logs/`, `models/`, `*.prom` metric files, and the intent
+> embedding caches are local/runtime artefacts and are git-ignored.
+
+---
+
+## ⚙️ Key Components
+
+| Module | Purpose |
+|--------|---------|
+| `main.py` | Streamlit entry point. Initialises caches, handles UI, logging, and session state. |
+| `query_core/intent_classifier.py` | `NLPIntentClassifier` — CT2 encoder with context-aware biasing and calibrated confidence. |
+| `query_core/query_manager.py` | Routes user input to the appropriate handler using a priority-based system; integrates the intent classifier. |
+| `query_core/query_context.py` | Encapsulates query metadata (buildings, business terms, complexity). |
+| `query_core/query_types.py` | Enum of supported query intents (CONVERSATIONAL, MAINTENANCE, RANKING, …). |
+| `query_core/query_result.py` / `query_route.py` | Standard result schema and routing record. |
+| `query_handlers/base_handler.py` | Abstract base for all handlers with consistent logging and metadata extraction. |
+| `query_handlers/conversational_handler.py` | Greetings, about queries, and small talk. |
+| `query_handlers/counting_handler.py` | Counting queries ("How many buildings have FRAs?"). |
+| `query_handlers/maintenance_handler.py` | Maintenance requests, jobs, and categories. |
+| `query_handlers/property_handler.py` | Property condition and derelict-building queries. |
+| `query_handlers/ranking_handler.py` | "Largest/smallest/top" building queries. |
+| `query_handlers/semantic_search_handler.py` | Fallback handler — Pinecone semantic retrieval + OpenAI summarisation. |
+| `query_preprocessors/` | Building/business-term extraction, spell checking, complexity analysis. |
+| `search_core/search_router.py` | Unified entry point for structured and semantic searches. |
+| `search_core/search_instructions.py` | `SearchInstructions` dataclass carrying structured search intent. |
+| `search_core/planon_search.py` | Property / Planon structured queries. |
+| `search_core/maintenance_search.py` | Structured maintenance vector lookups. |
+| `search_core/semantic_search.py` | Semantic vector retrieval. |
+| `search_core/generate_semantic_answer.py` / `generate_maintenance_answers.py` | OpenAI answer generation. |
+| `search_core/structured_queries.py` | Rule-based detection for counting, ranking, maintenance, and property queries. |
+| `search_core/search_utils.py` | Boosting, deduplication, and building-filter utilities. |
+| `building/utils.py` (+ `cache.py`, `resolver.py`, `normaliser.py`) | Building cache, alias and fuzzy matching, metadata filters. |
+| `core/clients.py` | Centralised OpenAI / Redis client management. |
+| `config/constant.py` | Constants for environment, models, and routing configuration. |
+| `config/settings.py` | Environment-driven API keys and Pinecone/OpenAI/Redis configuration. |
+
 ---
 
 ## 🧩 Smart Query Routing
 
 Alfred uses a **Chain of Responsibility pattern** via the `QueryManager`:
 
-1. **Preprocessing**: Extracts buildings, business terms, and analyses query complexity
-2. **Intent Classification**: NLPIntentClassifier predicts intent with confidence score
-3. **Handler Selection**: Each handler declares a `priority` (lower number = higher priority)
-4. **Execution**: The `QueryManager` sequentially checks each handler's `can_handle()` method
+1. **Preprocessing**: extracts buildings, business terms, and analyses query complexity
+2. **Intent classification**: `NLPIntentClassifier` predicts intent with a confidence score
+3. **Handler selection**: each handler declares a `priority` (lower number = higher priority)
+4. **Execution**: the `QueryManager` checks each handler's `can_handle()` method in order
 5. **Fallback**: `SemanticSearchHandler` handles all remaining unclassified queries
 
 Example:
 ```text
-"Hi Alfred" → ConversationalHandler (priority: 1)
-"Which buildings have maintenance requests?" → MaintenanceHandler (priority: 2)
-"Top 10 largest buildings" → RankingHandler (priority: 3)
-"Which buildings are derelict?" → PropertyHandler (priority: 4)
-"How many buildings have FRAs?" → CountingHandler (priority: 5)
-"Describe frost protection in Berkeley Square" → SemanticSearchHandler (priority: 99)
+"Hi Alfred"                                    → ConversationalHandler  (priority: 1)
+"Which buildings have maintenance requests?"   → MaintenanceHandler     (priority: 2)
+"Top 10 largest buildings"                     → RankingHandler         (priority: 3)
+"Which buildings are derelict?"                → PropertyHandler        (priority: 4)
+"How many buildings have FRAs?"                → CountingHandler        (priority: 5)
+"Describe frost protection in Berkeley Square" → SemanticSearchHandler  (priority: 99)
 ```
 
 ---
@@ -237,7 +261,7 @@ Example:
 
 The `search_core` package provides a **unified structured + semantic retrieval system**.
 
-### 🔍 `SearchInstructions`
+### `SearchInstructions`
 ```python
 @dataclass
 class SearchInstructions:
@@ -248,15 +272,16 @@ class SearchInstructions:
     document_type: str | None = None
 ```
 
-All handlers construct a `SearchInstructions` object when a search is needed.  
-The router then calls the correct backend automatically:
+Handlers construct a `SearchInstructions` object when a search is needed, and the
+router dispatches to the correct backend automatically:
 
 ```python
 from search_core.search_router import execute
+
 results, answer, pub_date, score_flag = execute(SearchInstructions(
     type="semantic",
     query="Fire Risk Assessment for Senate House",
-    top_k=5
+    top_k=5,
 ))
 ```
 
@@ -264,117 +289,284 @@ results, answer, pub_date, score_flag = execute(SearchInstructions(
 
 ## 🗝️ Building Cache & Matching
 
-`building/utils.py` serves as the single source of truth for:
+The `building/` package is the single source of truth for building identity:
 
-- Alias and canonical name mapping  
-- Multi-index cache population  
-- Fuzzy matching and validation  
-- Building-specific result filtering  
+- Alias and canonical name mapping (`building/alias_override.py`, `normaliser.py`)
+- Multi-index cache population (`building/cache.py`)
+- Fuzzy matching and validation (`building/utils.py`, `validation.py`)
+- Building resolution and filename parsing (`resolver.py`, `filename_building_parser.py`)
 - Metadata filter generation for Pinecone
 
-Building cache initialisation runs at app startup, ensuring that all fuzzy and alias-based matches are available to every handler.
+The building cache is initialised at app startup so fuzzy and alias-based matches
+are available to every handler.
 
 ---
 
-## 🚀 Features Summary
+## 🔧 Ingestion Pipeline (V3)
 
-- **NLP Intent Classification**: CT2 encoder (hf-hub-ctranslate2) with context-aware biasing
-- **Modular Handlers**: Each query type handled by a specialised module  
-- **Unified Router**: `search_core` dispatches structured vs. semantic searches
-- **Session Manager**: `session_manager` Persists building context for previous user query  
-- **Smart Building Cache**: Fuzzy and alias matching across multiple metadata fields  
-- **OpenAI + Pinecone Integration**: RAG-style search and summarisation  
-- **Logging Pipeline**: Standardised, color-coded INFO logs across all modules  
-- **Error Isolation**: Each handler logs and fails gracefully without blocking others  
+The V3 ingestion pipeline focuses on reliability, idempotency, and observability.
 
----
-
-## 🔧 Ingestion Updates (V3)
-
-Recent ingestion changes focus on reliability, idempotency, and observability:
-
-**Core changes**
-- **Interfaces layer** for ingestion ports (`VectorStore`, `Embedder`, `EventSink`, `IngestFileRegistry`, `JobRegistry`).
-- **Redis-backed registries** for files and jobs, with status/TTL handling and atomic lease semantics.
-- **File state machine** with explicit states: discovered → processing → upserted → verified → success/failed.
-- **Tokenised processing**: each file run gets a `processing_token` enforced in registry state transitions.
+**Core design**
+- **Interfaces layer** (`interfaces/`) defines ingestion ports: `VectorStore`,
+  `Embedder`, `EventSink`, `IngestFileRegistry`, `JobRegistry`.
+- **Redis-backed registries** for files and jobs, with status/TTL handling and
+  atomic lease semantics.
+- **File state machine** with explicit states (discovered → processing → upserted
+  → verified → success/failed) and a per-run `processing_token` enforced on state
+  transitions.
 - **VectorStore abstraction** wraps Pinecone calls and normalises error handling.
-- **Embedder wrapper** owns retries/backoff/batch splitting and returns explicit index → embedding/error mappings.
-- **Unified upsert scheduling** via `VectorWriteCoordinator` (inline or worker strategy).
-- **Verification paths** use the VectorStore abstraction; failures emit structured events.
+- **Embedder wrapper** owns retries/backoff/batch splitting and returns explicit
+  index → embedding/error mappings.
+- **Upsert scheduling** runs inline or via worker threads (`UPSERT_STRATEGY`).
+- **Verification** uses the VectorStore abstraction; failures emit structured events.
 
-**Metrics & events**
-- Prometheus counters for embedding retries, batch reductions, rate limits, upsert timing, lock contention, rollback failures, and FRA supersession update outcomes (bulk vs per-item success/failure).
-- JSONL event sink for ingestion summaries and verification alerts.
-
-**Timeouts & safety**
-- Configurable OpenAI timeouts (total + connect/read/write/pool) and per-file max wall-clock.
-- Queue draining and failed-state recording on worker stop events.
+**FRA supersession**
+- Supersession is handled atomically across `ingest/transaction.py`
+  (`FraSupersessionTxnLog`) and `fra/integration.py` (`mark_superseded_risk_items`,
+  `restore_superseded_items`), with SETNX-style job semantics to avoid duplicate runs.
 
 **Redis**
-- File records stored as **hashes** (not JSON blobs) with TTLs based on status.
-- Job records use SETNX-style semantics to avoid duplicate supersession runs.
+- File records are stored as **hashes** (not JSON blobs) with status-based TTLs.
+
+---
+
+## 🔥 FRA (Fire Risk Assessment) Module
+
+The `fra/` package provides structured extraction and prioritisation for FRAs.
+
+| Component (file) | Purpose |
+|------------------|---------|
+| `FRAActionPlanParser` (`parser.py`) | Extracts risk items from FRA PDFs using regex and structure analysis. |
+| `parse_helpers/` (`parse_row.py`, `parse_section.py`, `parse_table.py`) | Low-level table/section/row parsing helpers. |
+| `FRATriageComputer` (`triage.py`) | Computes a deterministic numeric risk score for ranking. |
+| `FRATriageReporter` (`triage.py`) | Summarises triage outcomes for logging/reporting. |
+| `FRAEnricher` (`enrichment.py`) | Enriches extracted items with computed fields (scores, flags, normalised values). |
+| `FRAMetadata` (`doc_metadata.py`) | Document-level FRA metadata (building, dates, source). |
+| `ParsingConfidence` (`types.py`) | Tracks extraction reliability per field and per document. |
+
+### Triage scoring
+
+`FRATriageComputer` produces a numeric **risk score (0–100), where higher = more
+urgent**, used for ranking risk items. The base score is derived from the item's
+risk level via `FRA_RISK_BASE_SCORES` (an escalating scale, roughly
+1→10, 2→20, 3→40, 4→70, 5→100), and is reduced for completed/closed items. Items
+without a job reference are adjusted by `NO_JOB_REF_SCORE_MULTIPLIER`. The exact
+weights live in `config/constant.py` (`FRA_RISK_BASE_SCORES`, `FRA_RISK_SCORE_MAX`,
+`FRA_PRIORITY_HIGH_RISK_LEVEL`, `FRA_PRIORITY_MEDIUM_RISK_LEVEL`).
+
+Each FRA risk item is embedded and upserted to Pinecone as a vector with
+`document_type = "fra_action_item"` metadata (building, risk level, category,
+action required, location, dates, and a `superseded` flag), in the FRA risk-items
+namespace.
+
+---
+
+## 🔒 Security & Auth
+
+Alfred applies defence-in-depth across the `security/` and `auth/` packages.
+
+### Authentication & access control (`auth/`)
+- **MSAL / Microsoft Entra ID** sign-in (`msal_auth.py`, `auth_manager.py`)
+- **Auth context** and **role-based access control** (`auth_context.py`, `access_control.py`)
+- **Credential manager** for secure, lazily-loaded secrets (`credential_manager.py`)
+- Behaviour is driven by `REQUIRE_AUTH`, `ALLOW_ANONYMOUS_DEV`, `AUTH_STRICT_TENANT`,
+  `AZURE_TENANT_ID`, `AUTH_REDIRECT_URI`, and `AUTH_SCOPES`.
+
+### Input validation (`security/input_validator.py`)
+- Prompt-injection pattern detection, length limits, and ratio-based special-/
+  suspicious-character and repeated-character (DoS) checks. It also sanitises
+  Pinecone metadata filters (allowed operators only; dangerous keys/values stripped).
+
+```python
+from security.input_validator import validate_query_security, get_validation_summary
+
+result = validate_query_security(user_query)
+if not result.is_valid:
+    logger.warning(f"Blocked query: {result.rejection_reason}")
+```
+
+### File operations security (`security/file_operations_validator.py`)
+- Path-traversal prevention, symlink protection, extension allow-listing, size
+  limits, and filename sanitisation.
+
+```python
+from security.file_operations_validator import (
+    validate_path_safety,
+    is_safe_extension,
+    read_file_safe,
+    validate_file_safety,
+)
+
+safe_path = validate_path_safety(base_directory, user_provided_path)
+if is_safe_extension(filename):
+    content = read_file_safe(base_directory, relative_path)
+```
+
+### Other security layers
+- **Rate limiting** (`security/rate_limiter.py`) — Redis-backed request limits.
+- **Log sanitisation** (`security/log_sanitiser.py`) — redacts PII/credentials from logs.
+- **CSV sanitisation** (`security/csv_sanitiser.py`) — neutralises CSV-injection (formula) payloads.
+- **Context sanitisation** (`security/sanitise_context.py`) — safe rendering of search results in the UI.
+
+---
+
+## 📊 Metrics & Observability
+
+- **Prometheus text-file metrics** are written by the ingestion pipeline
+  (`ingest/utils.py`) using the `askalfred_ingest_*` namespace, e.g.
+  `askalfred_ingest_files_processed`, `askalfred_ingest_files_failed`,
+  `askalfred_ingest_total_vectors`, `askalfred_ingest_duration_seconds`,
+  `askalfred_ingest_vectors_per_second`. Output files use the `.prom` extension
+  (git-ignored) and can be picked up by the Prometheus node-exporter textfile
+  collector.
+- **JSONL event sink** (`interfaces/event_sink.py`) records structured ingestion
+  and verification events; analyse them with `tools/analyse_events_jsonl.py`.
+  Event export is gated by `EXPORT_EVENTS`.
 
 ---
 
 ## 🧰 Developer Guide
 
-### Environment Setup
+### Environment setup
 
 ```bash
 poetry install
 poetry run streamlit run main.py
 ```
 
-If a `requirements.txt` is needed for external tooling, generate it via `poetry export -f requirements.txt -o requirements.txt --without-hashes` rather than editing it manually.
+A pinned `requirements.txt` is committed for external tooling; regenerate it with
+`poetry export -f requirements.txt -o requirements.txt --without-hashes` rather
+than editing it by hand. Python 3.10–3.12 is supported.
 
-### Required Environment Variables
+### Required environment variables
 
-```
+At minimum, Alfred needs OpenAI, Pinecone, and Redis configuration:
+
+```bash
 OPENAI_API_KEY=your_openai_key
 PINECONE_API_KEY=your_pinecone_key
+
 REDIS_HOST=localhost
 REDIS_PORT=6379
 REDIS_USERNAME=optional
 REDIS_PASSWORD=optional
-ANSWER_MODEL=gpt-4o-mini
+
+ANSWER_MODEL=gpt-4o-mini             # OpenAI answer/summarisation model
 DEFAULT_EMBED_MODEL=text-embedding-3-small
+INDEX_NAME=your_pinecone_index
 LOG_LEVEL=INFO
-OPENAI_TIMEOUT=120
-OPENAI_CONNECT_TIMEOUT=10
-OPENAI_READ_TIMEOUT=60
-OPENAI_WRITE_TIMEOUT=60
-OPENAI_POOL_TIMEOUT=30
-MAX_FILE_SECONDS=900
 ```
 
-### Key Dependencies
+### Optional / advanced settings
 
-Managed in `pyproject.toml` and locked in `poetry.lock`.
+| Group | Variables |
+|-------|-----------|
+| Environment & local `.env` | `ENVIRONMENT`, `ALLOW_LOCAL_ENV` |
+| Auth (MSAL / Entra) | `REQUIRE_AUTH`, `ALLOW_ANONYMOUS_DEV`, `AUTH_STRICT_TENANT`, `AZURE_TENANT_ID`, `AUTH_REDIRECT_URI`, `AUTH_SCOPES` |
+| Ingest access defaults | `INGEST_DEFAULT_ACCESS_LEVEL`, `INGEST_DEFAULT_ALLOWED_ROLES` |
+| Ingest tuning | `LOCAL_PATH`, `EMBED_MODEL`, `DIMENSION`, `CHUNK_TOKENS`, `CHUNK_OVERLAP`, `EMBED_BATCH`, `UPSERT_BATCH`, `DEDUP_FETCH_BATCH`, `MAX_FILE_MB`, `SKIP_EXISTING`, `SKIP_SUCCESSFUL_ONLY`, `UPSERT_STRATEGY` |
+| Concurrency | `MAX_IO_WORKERS`, `MAX_PARSE_WORKERS`, `UPSERT_WORKERS`, `MAX_PENDING_VECTORS`, `UPSERT_FLUSH_SECONDS` |
+| OpenAI timeouts | `OPENAI_TIMEOUT`, `OPENAI_CONNECT_TIMEOUT`, `OPENAI_READ_TIMEOUT`, `OPENAI_WRITE_TIMEOUT`, `OPENAI_POOL_TIMEOUT` |
+| Safety limits | `MAX_FILE_SECONDS`, `MAX_MEMORY_MB`, `MAX_METADATA_SIZE`, `DRY_RUN` |
+| Redis behaviour | `DECODE_RESPONSES`, `HEALTH_CHECK_INTERVAL`, `REDIS_DB`, `REDIS_SSL`, `REDIS_SOCKET_TIMEOUT`, `REDIS_SOCKET_CONNECT_TIMEOUT`, `REDIS_HEALTH_CHECK_INTERVAL` |
+| Observability | `EXPORT_EVENTS`, `PROGRESS_LOG_INTERVAL` |
+| Feature flags | `ENABLE_SERVICE_STATUS`, `VALIDATE_BUSINESS_TERMS` |
 
-### Model Files
+**Local `.env` loading**
+- Repository `.env` loading is **disabled by default**.
+- `.env` is only loaded when `ALLOW_LOCAL_ENV=true` **and** `ENVIRONMENT=development`.
+- `.env` is ignored in `staging` and `production`, even with `ALLOW_LOCAL_ENV=true`.
+- Real environment variables always take precedence over values in `.env`.
 
-The NLPIntentClassifier expects:
-- **Local model**: `models/all-MiniLM-L6-v2/` (auto-extracted from .zip if present)
-- **Cache**: `intent_embeddings_cache.json` and `intent_embeddings_cache.npz` (auto-generated on first run)
-- **Fallback**: Auto-downloads from Hugging Face if local model not found
+### Model files
 
-### Generated files
+The `NLPIntentClassifier` expects:
+- **Local model**: `models/all-MiniLM-L6-v2/` (auto-extracted from a `.zip` if present)
+- **Cache**: `intent_embeddings_cache.json` / `.npz` (auto-generated on first run; not committed)
+- **Fallback**: auto-downloads from Hugging Face if the local model is not found
 
-- intent_embeddings_cache.json and intent_embeddings_cache.npz are generated at runtime and should not be committed
+### Client management (`core/clients.py`)
+
+```python
+from core.clients import ClientManager, get_oai, get_redis
+
+openai = get_oai()                 # OpenAI client with configured timeouts
+redis = ClientManager.get_redis()  # Redis client with connection pooling
+```
 
 ### Logging
+- Configured globally in `main.py` via `logging.basicConfig()`.
+- All handlers inherit their logger from `BaseQueryHandler`.
+- The Streamlit log level is forced to INFO via `STREAMLIT_LOG_LEVEL=info`.
 
-- Configured globally in `main.py` using `logging.basicConfig()`
-- All handlers inherit logger from `BaseQueryHandler`
-- Streamlit environment forced to INFO level with `STREAMLIT_LOG_LEVEL=info`
+---
+
+## 🧪 Testing
+
+```bash
+# Run all tests
+poetry run pytest
+
+# Run with coverage
+poetry run pytest --cov=. --cov-report=html
+
+# Run a specific module
+poetry run pytest tests/test_fra_triage.py -v
+
+# Security-focused tests
+poetry run pytest tests/test_file_operations_validator.py tests/test_input_validator.py -v
+```
+
+Test discovery is configured in `pyproject.toml` (`testpaths = ["tests"]`). The
+suite covers auth, the FRA parser/triage, ingestion, building parsing, the query
+manager, and the security/sanitisation layers, with shared fixtures in
+`tests/conftest.py`.
+
+---
+
+## 🔐 Security Scanning
+
+```bash
+# Full security scan (poetry script defined in pyproject.toml)
+poetry run security-scan --json --strict
+# Equivalent: poetry run python scripts/security_scan.py --json --strict
+
+# Individual tools
+poetry run safety scan --target . --policy-file .safety-policy.json
+poetry run pip-audit
+poetry run bandit -r . -ll
+```
+
+The `.github/workflows/security-scan.yml` workflow runs on pull requests and
+combines dependency scanning (`safety`, `pip-audit`), static analysis (`bandit`),
+and Poetry lock validation.
+
+---
+
+## 🛠️ Tools Directory
+
+Developer and debugging utilities live in `tools/`:
+
+| Tool | Purpose |
+|------|---------|
+| `extract_pdf_text.py` | Extract raw text from a PDF for debugging. |
+| `extract_index_tocsv.py` | Export Pinecone index contents to CSV. |
+| `profile_intent.py` | Profile intent-classifier performance. |
+| `analyse_events_jsonl.py` | Summarise the JSONL ingestion event log. |
+| `parse_goldneyhall_action_plan_from_full_text.py` | Exercise FRA parsing on a sample document. |
+| `word_to_pdf.py` | Convert Word documents to PDF. |
+| `readme_to_pdf.py` | Render this README to PDF. |
+| `redis_test.py` | Quick Redis connectivity check. |
+
+The `cli/` package provides operational entry points: `cli/local_batch_ingest.py`
+(batch ingestion) and `cli/resolve_buildings.py` (building resolution).
 
 ---
 
 ## 🧪 Example Queries
 
-| Query | Predicted Intent | Handler |
-|--------|------------------|----------|
+| Query | Predicted intent | Handler |
+|-------|------------------|---------|
 | "Hi Alfred" | CONVERSATIONAL | ConversationalHandler |
 | "Which buildings have FRAs?" | COUNTING | CountingHandler |
 | "Show maintenance for Senate House" | MAINTENANCE | MaintenanceHandler |
@@ -386,496 +578,16 @@ The NLPIntentClassifier expects:
 
 ## 🧩 Design Principles
 
-- **Separation of Concerns** — Handlers only decide *what* to do; search_core decides *how*.  
-- **Extensibility** — Add new query handlers (e.g., "EnergyHandler") without touching core logic.  
-- **Transparency** — Every query logs its route and detection path.  
-- **Consistency** — All results conform to `QueryResult` schema.
-- **Context Awareness** — Intent classification considers extracted buildings and business terms.
-- **Graceful Degradation** — Falls back to pattern matching if ML model unavailable.
+- **Separation of concerns** — handlers decide *what* to do; `search_core` decides *how*.
+- **Extensibility** — add new handlers (e.g. an `EnergyHandler`) without touching core logic.
+- **Transparency** — every query logs its route and detection path.
+- **Consistency** — all results conform to the `QueryResult` schema.
+- **Context awareness** — intent classification considers extracted buildings and business terms.
+- **Graceful degradation** — falls back to pattern matching when the ML model is unavailable.
 
 ---
 
-## 🔒 Security Features
-
-Alfred implements defence-in-depth security across multiple layers:
-
-### Input Validation (`input_validator.py`)
-
-Comprehensive query validation with:
-- **Prompt injection detection**: Blocks attempts to manipulate AI behaviour via malicious inputs
-- **DoS protection**: Query length limits and complexity analysis
-- **SQL/NoSQL injection patterns**: Detects common injection vectors
-- **Unicode normalisation**: Prevents homoglyph attacks
-- **Whitelist validation**: Ensures queries contain only permitted characters
-
-```python
-from input_validator import validate_query_security, get_validation_summary
-
-result = validate_query_security(user_query)
-if not result.is_valid:
-    logger.warning(f"Blocked query: {result.rejection_reason}")
-```
-
-### File Operations Security (`file_operations_validator.py`)
-
-OWASP-compliant file handling with:
-- **Path traversal prevention**: Blocks `../` and absolute path escapes
-- **Symlink protection**: Detects and blocks symbolic link attacks
-- **File type whitelisting**: Only permits known-safe extensions (`.pdf`, `.docx`, `.xlsx`, etc.)
-- **Size limits**: Configurable maximum file sizes
-- **Filename sanitisation**: Removes dangerous characters and sequences
-
-```python
-from file_operations_validator import (
-    validate_path_safety,
-    is_safe_extension,
-    read_file_safe,
-    validate_file_safety
-)
-
-# Validate path safety
-safe_path = validate_path_safety(base_directory, user_provided_path)
-
-# Check file extension
-if is_safe_extension(filename):
-    content = read_file_safe(base_directory, relative_path)
-```
-
-### Rate Limiting (`rate_limiter.py`)
-
-Redis-backed rate limiting with:
-- **Per-user query limits**: Prevents abuse from individual sessions
-- **Global rate caps**: Protects against coordinated attacks
-- **Sliding window algorithm**: Fair burst handling
-- **Configurable thresholds**: Separate limits for queries vs file operations
-
-### Credential Management (`credential_manager.py`)
-
-Secure credential handling:
-- **Environment variable isolation**: No hardcoded secrets
-- **Lazy loading**: Credentials fetched only when needed
-- **Validation on access**: Ensures credentials meet format requirements
-
-### Log Sanitisation (`log_sanitiser.py`)
-
-Prevents sensitive data leakage:
-- **PII redaction**: Removes email addresses, phone numbers
-- **Credential masking**: Hides API keys and tokens in logs
-- **Path normalisation**: Removes user-specific path components
-
----
-
-## 🔥 FRA (Fire Risk Assessment) Module
-
-The `fra/` package provides structured extraction and prioritisation for Fire Risk Assessments:
-
-### Components
-
-| Component | Purpose |
-|-----------|---------|
-| `FRAActionPlanParser` | Extracts risk items from FRA PDF documents using regex and structure analysis |
-| `FRATriageComputer` | Calculates deterministic priority scores based on risk level, timescale, and category |
-| `FRAEnricher` | Enriches extracted items with computed fields (scores, flags, normalised values) |
-| `ParsingConfidence` | Tracks extraction reliability per-field and per-document |
-| `FRASupersessionHandler` | Manages version control when newer FRAs replace older ones |
-
-### Triage Scoring Algorithm
-
-```python
-# Priority score calculation (lower = more urgent)
-base_score = RISK_WEIGHTS[risk_level]  # Intolerable=1, Substantial=2, Moderate=3, Tolerable=4
-time_modifier = TIMESCALE_WEIGHTS[timescale]  # Immediate=0, 3months=1, 6months=2, 12months=3
-category_modifier = CATEGORY_WEIGHTS[category]  # Life safety=0, Compliance=1, Advisory=2
-
-final_score = base_score + (time_modifier * 0.3) + (category_modifier * 0.2)
-```
-
-### FRA Vector Structure
-
-Each FRA risk item generates a vector with metadata:
-```python
-{
-    "id": "fra_{building}_{item_number}_{hash}",
-    "values": [...],  # 1536-dim embedding
-    "metadata": {
-        "document_type": "fra_action_item",
-        "building": "Senate House",
-        "risk_level": "Substantial",
-        "timescale": "3 months",
-        "category": "Fire doors",
-        "priority_score": 2.5,
-        "action_required": "Replace fire door seals...",
-        "location_detail": "Level 2, Room 2.15",
-        "fra_date": "2024-01-15",
-        "superseded": false
-    }
-}
-```
-
----
-
-## 🛠️ Utility Modules
-
-### Session Management (`session_manager.py`)
-
-Persists conversation context across queries:
-- **Building context carry-over**: "Tell me more" queries inherit previous building
-- **Query history tracking**: Maintains recent query list for context
-- **State serialisation**: Streamlit session state management
-
-### Date Utilities (`date_utils.py`)
-
-Intelligent date parsing for document searches:
-- **Natural language dates**: "last month", "Q3 2024", "before January"
-- **Publication date filtering**: Find documents by date range
-- **ISO normalisation**: Consistent date format handling
-
-### Business Terms (`business_terms.py`)
-
-Domain-specific terminology definitions:
-```python
-BUSINESS_TERMS = {
-    "hvac": ["heating", "ventilation", "air conditioning", "ahu", "fcu"],
-    "bms": ["building management", "controls", "trend", "bacnet"],
-    "fra": ["fire risk", "assessment", "action plan", "risk item"],
-    "ppm": ["planned preventive maintenance", "scheduled maintenance"],
-    ...
-}
-```
-
-### Context Sanitisation (`sanitise_context.py`)
-
-Safe rendering for UI output:
-- **Markdown escaping**: Prevents injection via search results
-- **HTML sanitisation**: Removes potentially dangerous tags
-- **Length truncation**: Prevents UI overflow
-
-### Client Management (`clients.py`)
-
-Centralised API client initialisation:
-```python
-from clients import  ClientManager, get_oai
-
-openai = get_oai()                    # OpenAI client with configured timeouts
-redis = ClientManager.get_redis()     # Redis client with connection pooling
-
-```
-
----
-
-## 🧪 Testing
-
-### Running Tests
-
-```bash
-# Run all tests
-pytest tests/
-
-# Run with coverage
-pytest tests/ --cov=. --cov-report=html
-
-# Run specific test module
-pytest tests/test_fra_triage.py -v
-
-# Run security tests only
-pytest tests/test_file_operations_validator.py tests/test_input_validator.py -v
-```
-
-### Test Structure
-
-```
-tests/
-├── conftest.py                      # Shared fixtures (mock clients, test data)
-├── test_file_operations_validator.py # File security validation tests
-├── test_fra_triage.py               # FRA triage scoring tests
-├── test_intent_classifier.py        # Intent classification tests
-├── test_building_utils.py           # Building cache and matching tests
-├── test_input_validator.py          # Query validation tests
-└── test_search_core.py              # Search router tests
-```
-
-### Key Fixtures
-
-```python
-@pytest.fixture
-def mock_pinecone_index():
-    """Returns a mock Pinecone index for testing searches."""
-    ...
-
-@pytest.fixture
-def sample_fra_document():
-    """Returns a sample FRA PDF content for parsing tests."""
-    ...
-
-@pytest.fixture
-def building_cache():
-    """Pre-populated building cache for matching tests."""
-    ...
-```
-
----
-
-## 🔐 Security Scanning
-
-### Automated Security Checks
-
-```bash
-# Run full security scan
-poetry run python scripts/security_scan.py --json --strict
-
-# Individual tools
-poetry run safety scan --target . --policy-file .safety-policy.json
-poetry run pip-audit
-poetry run bandit -r . -ll
-```
-
-### CI/CD Integration
-
-The `.github/workflows/security-scan.yml` workflow runs on every PR:
-
-1. **Dependency scanning**: `safety` and `pip-audit` check for known vulnerabilities
-2. **Static analysis**: `bandit` scans for common security issues
-3. **Secret detection**: Checks for accidentally committed credentials
-4. **Poetry lock**: Validates resolved, pinned dependencies
-
-### Security Scan Output
-
-```json
-{
-    "scan_date": "2025-03-04T10:30:00Z",
-    "vulnerabilities_found": 0,
-    "warnings": [],
-    "checks_passed": ["safety", "pip-audit", "bandit", "pin-check"],
-    "recommendations": []
-}
-```
-
----
-
-## 🛠️ Tools Directory
-
-Development and debugging utilities in `tools/`:
-
-| Tool | Purpose | Usage |
-|------|---------|-------|
-| `extract_pdf_text.py` | Extract raw text from PDF files | `python tools/extract_pdf_text.py input.pdf` |
-| `parse_goldneyhall_action_plan_from_full_text.py` | Test FRA parsing on sample document | `python tools/parse_goldneyhall_action_plan_from_full_text.py` |
-| `profile_intent.py` | Profile intent classifier performance | `python tools/profile_intent.py --queries 1000` |
-
-### PDF Text Extraction
-
-```bash
-# Extract text for debugging
-python tools/extract_pdf_text.py "path/to/document.pdf" --output extracted.txt
-
-# Extract with page markers
-python tools/extract_pdf_text.py "path/to/document.pdf" --page-markers
-```
-
-### Intent Profiling
-
-```bash
-# Profile classification speed
-python tools/profile_intent.py --queries 1000 --warmup 100
-
-# Output:
-# Average latency: 2.3ms
-# P95 latency: 4.1ms
-# Throughput: 435 queries/sec
-```
-
----
-
-## ⚙️ Additional Environment Variables
-
-Beyond the core variables, these optional settings provide fine-grained control:
-
-```bash
-# Environment mode
-ENVIRONMENT=development          # development | staging | production
-IS_PRODUCTION=false             # Enables stricter validation in production
-ALLOW_LOCAL_ENV=true            # Local dev only: opt in to loading repository .env
-
-# Feature flags
-ENABLE_SERVICE_STATUS=true      # Show service health in UI
-ENABLE_RATE_LIMITING=true       # Enable query rate limits
-ENABLE_INPUT_VALIDATION=true    # Enable prompt injection detection
-
-# Security settings
-MAX_QUERY_LENGTH=2000           # Maximum characters per query
-MAX_FILE_SIZE_MB=50             # Maximum upload file size
-ALLOWED_FILE_EXTENSIONS=.pdf,.docx,.xlsx,.csv
-
-# Redis settings (optional - falls back to in-memory if unavailable)
-REDIS_DB=0                      # Redis database number
-REDIS_SSL=false                 # Enable SSL for Redis connection
-REDIS_MAX_CONNECTIONS=10        # Connection pool size
-REDIS_SOCKET_TIMEOUT=5          # Max seconds for Redis commands
-REDIS_SOCKET_CONNECT_TIMEOUT=5  # Max seconds to establish Redis connection
-REDIS_HEALTH_CHECK_INTERVAL=30  # Seconds between Redis connection health checks
-
-# Pinecone settings
-PINECONE_ENVIRONMENT=us-east-1  # Pinecone region
-PINECONE_INDEX_NAME=alfred-v3   # Index name
-PINECONE_NAMESPACE=production   # Namespace for vectors
-
-# Logging
-LOG_FORMAT=json                 # json | text
-LOG_FILE=/var/log/alfred.log    # Optional file logging
-SENSITIVE_LOG_FIELDS=api_key,password,token  # Fields to redact
-```
-
-Notes:
-- Repository `.env` loading is disabled by default.
-- `.env` is only loaded when `ALLOW_LOCAL_ENV=true` and `ENVIRONMENT=development`.
-- `.env` is ignored in `staging` and `production`, even if `ALLOW_LOCAL_ENV=true`.
-- Real environment variables always take precedence over values in `.env`.
-
----
-
-## 📊 Metrics & Observability
-
-### Prometheus Metrics
-
-Alfred exposes Prometheus-compatible metrics:
-
-```python
-# Ingestion metrics
-alfred_embedding_retries_total          # Count of embedding API retries
-alfred_embedding_batch_reductions_total # Count of batch size reductions
-alfred_rate_limit_hits_total            # OpenAI rate limit encounters
-alfred_upsert_duration_seconds          # Histogram of upsert latencies
-alfred_lock_contention_total            # Redis lock contention events
-alfred_rollback_failures_total          # Failed rollback attempts
-
-# FRA-specific metrics
-alfred_fra_supersession_bulk_success    # Successful bulk supersession updates
-alfred_fra_supersession_bulk_failure    # Failed bulk supersession updates
-alfred_fra_supersession_item_success    # Individual item update successes
-alfred_fra_supersession_item_failure    # Individual item update failures
-
-# Query metrics
-alfred_query_latency_seconds            # End-to-end query latency
-alfred_intent_classification_seconds    # Intent classifier latency
-alfred_handler_invocations_total        # Count by handler type
-```
-
-### Event Sink (JSONL)
-
-Structured events for audit and debugging:
-
-```json
-{"event": "ingestion_complete", "timestamp": "2025-03-04T10:30:00Z", "files_processed": 150, "vectors_upserted": 4523, "errors": 2}
-{"event": "verification_alert", "timestamp": "2025-03-04T10:31:00Z", "file": "fra_senate_house.pdf", "expected_vectors": 45, "found_vectors": 43}
-{"event": "fra_supersession", "timestamp": "2025-03-04T10:32:00Z", "building": "Senate House", "old_fra_date": "2023-01-15", "new_fra_date": "2024-01-15", "items_superseded": 38}
-```
-
----
-
-## 🗂️ Project Structure
-
-```
-Alfred-V3/
-├── main.py                     # Streamlit entry point
-├── intent_classifier.py        # NLP intent classification
-├── query_manager.py            # Query routing orchestrator
-├── query_context.py            # Query metadata container
-├── query_types.py              # Intent enum definitions
-├── search_instructions.py      # Search request dataclass
-├── structured_queries.py       # Rule-based query detection
-│
-├── # Security modules (root level)
-├── input_validator.py          # Query validation & injection detection
-├── file_operations_validator.py # Path traversal & file safety
-├── rate_limiter.py             # Redis-backed rate limiting
-├── log_sanitiser.py            # PII redaction in logs
-├── credential_manager.py       # Secure credential handling
-│
-├── # Additional utilities (root level)
-├── alfred_exceptions.py        # Custom exception classes
-├── pinecone_utils.py           # Pinecone helper functions
-├── sanitise_context.py         # Context sanitisation for UI
-├── session_manager.py          # Streamlit session management
-├── clients.py                  # API client management
-├── emojis.py                   # Emoji constants
-├── word_to_pdf.py              # Document conversion utility
-├── date_utils.py               # Date parsing utilities
-├── business_terms.py           # Domain terminology
-├── analyse_events_jsonl.py     # Event log analysis
-│
-├── query_handlers/             # Handler implementations
-│   ├── __init__.py
-│   ├── base_handler.py
-│   ├── conversational_handler.py
-│   ├── counting_handler.py
-│   ├── maintenance_handler.py
-│   ├── property_handler.py
-│   ├── ranking_handler.py
-│   └── semantic_search_handler.py
-│
-├── search_core/                # Search engine layer
-│   ├── __init__.py
-│   ├── search_router.py
-│   ├── planon_search.py
-│   ├── maintenance_search.py
-│   └── search_utils.py
-│
-├── building/                   # Building data management
-│   ├── __init__.py
-│   ├── utils.py
-│   ├── path_inventory.py
-│   ├── path_inventory_summary.py
-│   └── alias_override.py
-│
-├── fra/                        # FRA processing
-│   ├── __init__.py
-│   ├── parser.py
-│   ├── triage.py
-│   ├── enricher.py
-│   └── supersession.py
-│
-├── ingest/                     # Ingestion pipeline
-│   ├── __init__.py
-│   ├── interfaces.py
-│   ├── orchestrator.py
-│   ├── coordinator.py
-│   ├── document_processor.py
-│   └── registries.py
-│
-├── interfaces/                 # Abstract interfaces
-│   └── __init__.py             # VectorStore, Embedder, EventSink, etc.
-│
-├── config/                     # Configuration
-│   ├── __init__.py
-│   ├── constant.py
-│   └── settings.py
-│
-├── tests/                      # Test suite
-│   ├── conftest.py
-│   └── test_*.py
-│
-├── tools/                      # Development utilities
-│   ├── extract_pdf_text.py
-│   ├── profile_intent.py
-│   └── parse_goldneyhall_action_plan_from_full_text.py
-│
-├── scripts/                    # Operational scripts
-│   └── security_scan.py
-│
-├── models/                     # ML model files
-│   └── all-MiniLM-L6-v2/
-│
-├── .github/
-│   └── workflows/
-│       └── security-scan.yml
-│
-├── pyproject.toml
-├── poetry.lock
-├── requirements.txt           # Generated via Poetry if needed
-├── README.md
-└── .gitignore
-```
 ## 📝 License
 
-Internal use only — University of Bristol Smart Buildings Team  
+Internal use only — University of Bristol Smart Buildings Team
 © 2025 University of Bristol

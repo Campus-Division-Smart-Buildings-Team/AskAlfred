@@ -46,9 +46,6 @@ INJECTION_PATTERNS = [
 # Special characters that are suspicious when overrepresented
 SUSPICIOUS_SPECIAL_CHARS = set("{}[]|<>\\`$;:")
 
-# Characters allowed in normal queries
-ALLOWED_SPECIAL_CHARS = set(",.!?'\"()-&@#%+=/~*")
-
 # Query complexity limits
 QUERY_COMPLEXITY_LIMIT = 500  # tokens (rough estimation)
 SPECIAL_CHAR_RATIO_LIMIT = 0.3  # Max 30% special characters

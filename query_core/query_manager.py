@@ -184,7 +184,15 @@ class QueryManager:
         """
         handlers = []
 
+        # Routing thresholds may share this dict (top-level keys or a "routing"
+        # sub-dict); skip them so they aren't mistaken for handler class names.
+        reserved_keys = {"routing", *self.DEFAULT_CONFIG.keys()}
+
         for handler_cls_name, settings in config.items():
+            if handler_cls_name in reserved_keys:
+                continue
+            if not isinstance(settings, dict):
+                continue
             if not settings.get("enabled", True):
                 continue
 
@@ -201,7 +209,7 @@ class QueryManager:
 
     @staticmethod
     def is_followup_query(
-        q: str, prev_context: dict | None, *, previous_intent, ml_intent_confidence
+        q: str, prev_context: dict | None, *, previous_intent, prev_intent_confidence
     ) -> bool:
         if not q:
             return False
@@ -228,13 +236,16 @@ class QueryManager:
         # 5️⃣ Ultra-short continuation ("more", "next", "continue")
         if len(tokens) <= QUERY_FOLLOWUP_MAX_TOKENS and prev_context:
             return True
-        # 6️⃣ ML uncertainty + previous intent → assume follow-up
+        # 6️⃣ Previous turn was classified with low confidence + we have a prior
+        # intent → treat a scope-less query as a continuation of it. (Follow-up
+        # detection runs before this turn's classifier, so we key off the
+        # *previous* turn's confidence, not the current one.)
         if (
             previous_intent
             and prev_context
             and not prev_context.get("building")
-            and ml_intent_confidence is not None
-            and ml_intent_confidence < QUERY_FOLLOWUP_ML_CONF_THRESHOLD
+            and prev_intent_confidence is not None
+            and prev_intent_confidence < QUERY_FOLLOWUP_ML_CONF_THRESHOLD
         ):
             return True
         return False
@@ -252,7 +263,7 @@ class QueryManager:
             q,
             prev,
             previous_intent=context.previous_intent,
-            ml_intent_confidence=context.ml_intent_confidence,
+            prev_intent_confidence=context.previous_intent_confidence,
         ):
             return
 
@@ -490,36 +501,6 @@ class QueryManager:
     # =========================================================================
     # Query routing
     # =========================================================================
-
-    def _route_query(self, context: QueryContext) -> QueryRoute:
-        """
-        Select the best handler using a priority-first strategy.
-        """
-        best_handler = None
-        best_priority = float("inf")
-
-        for h in self.handlers:
-            try:
-                if h.can_handle(context):
-                    if h.priority < best_priority:
-                        best_priority = h.priority
-                        best_handler = h
-            except Exception as e:
-                self.logger.error(
-                    "Handler %s failed during can_handle(): %s",
-                    h.__class__.__name__,
-                    sanitise_error(e),
-                    exc_info=False,
-                )
-
-        # Fallback
-        if best_handler is None:
-            for h in self.handlers:
-                if isinstance(h, SemanticSearchHandler):
-                    best_handler = h
-                    break
-
-        return QueryRoute(handler=best_handler, metadata={})
 
     def _route_query_hybrid(self, context: QueryContext) -> QueryRoute:
         """
@@ -865,6 +846,17 @@ class QueryManager:
 # CONVENIENCE FUNCTION FOR EXISTING CODE
 # ============================================================================
 
+# Module-level QueryManager reused across process_query_unified() calls so the
+# CT2 encoder and intent embeddings are loaded once, not per call.
+_DEFAULT_MANAGER: Optional["QueryManager"] = None
+
+
+def _get_default_manager() -> "QueryManager":
+    global _DEFAULT_MANAGER
+    if _DEFAULT_MANAGER is None:
+        _DEFAULT_MANAGER = QueryManager()
+    return _DEFAULT_MANAGER
+
 
 def process_query_unified(
     user_query: str, top_k: int = 10, **kwargs
@@ -887,7 +879,7 @@ def process_query_unified(
     Returns:
         tuple of (results, answer, publication_date_info, score_too_low)
     """
-    query_mgr = QueryManager()
+    query_mgr = _get_default_manager()
     query_result = query_mgr.process_query(user_query, top_k=top_k, **kwargs)
 
     return (
