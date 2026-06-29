@@ -139,7 +139,14 @@ def _get_query_params() -> dict[str, str]:
 def _clear_auth_query_params() -> None:
     """Clear auth-related callback parameters from the URL."""
     if hasattr(st, "query_params"):
-        for key in ("code", "state", "session_state", "error", "error_description"):
+        for key in (
+            "code",
+            "state",
+            "session_state",
+            "error",
+            "error_description",
+            "client_info",
+        ):
             if key in st.query_params:
                 del st.query_params[key]
         return
