@@ -68,7 +68,7 @@ class ConversationalHandler(BaseQueryHandler):
         self.responses = {
             "greeting": [
                 f"Hello! I'm Alfred {EMOJI_GORILLA}, your helpful assistant at the University of Bristol. I can help you find information about:\n\n {EMOJI_BUILDING} Building Management Systems (BMS)\n {EMOJI_FIRE} Fire Risk Assessments (FRAs)\n {EMOJI_MAINTENANCE} Maintenance Requests and Jobs\n\nWhat would you like to know today?",
-                f"Hi there! I'm Alfred {EMOJI_GORILLA}, ready to help you search through our knowledge bases. Feel free to ask me about BMS {EMOJI_BUILDING}, FRAs {EMOJI_FIRE} and maintenance requests and jobs {EMOJI_MAINTENANCE}. How can I assist you?",
+                f"Hi there! I'm Alfred {EMOJI_GORILLA}, ready to help you find information. Feel free to ask me about BMS {EMOJI_BUILDING}, FRAs {EMOJI_FIRE} and maintenance requests and jobs {EMOJI_MAINTENANCE}. How can I assist you?",
                 f"Hello! Alfred here {EMOJI_GORILLA}, your University of Bristol assistant. I have access to information about Building Management Systems and Fire Risk Assessments and maintenance requests and jobs. What can I help you with?",
             ],
             "gratitude": [

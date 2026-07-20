@@ -19,9 +19,15 @@ from config import (
     QUERY_MANAGER_CONFIG,
     QUERY_RULE_OVERRIDE_THRESHOLD,
 )
+from core.outcomes import OutcomeStatus
 from core.session_manager import SessionManager
 from query_core.intent_classifier import NLPIntentClassifier
-from query_core.query_context import QueryContext, build_access_filter
+from query_core.query_context import (
+    ACCESS_CONTROL_COMPONENT,
+    QueryContext,
+    build_access_filter,
+    validate_access_context,
+)
 from query_core.query_result import QueryResult
 from query_core.query_route import QueryRoute
 from query_core.query_types import QueryType
@@ -327,6 +333,34 @@ class QueryManager:
 
         # Create context
         context = QueryContext(query=query, **kwargs)
+
+        # Fail closed before retrieval when an authenticated session has no
+        # usable access context. Otherwise the deny-all filter below yields
+        # zero matches that are indistinguishable from a genuine empty result.
+        access_failure = validate_access_context(
+            authenticated=context.authenticated,
+            tenant_id=context.tenant_id,
+            user_roles=context.user_roles,
+        )
+        if access_failure is not None:
+            self.logger.warning(
+                "access_context_rejected code=%s correlation_id=%s component=%s",
+                access_failure.code.value,
+                access_failure.correlation_id,
+                access_failure.component,
+            )
+            elapsed_ms = (time.time() - start_time) * 1000
+            return QueryResult(
+                query=query,
+                answer=None,
+                results=[],
+                handler_used=ACCESS_CONTROL_COMPONENT,
+                query_type=ACCESS_CONTROL_COMPONENT,
+                status=OutcomeStatus.REJECTED,
+                failure=access_failure,
+                processing_time_ms=elapsed_ms,
+            )
+
         if context.access_filter is None:
             context.access_filter = build_access_filter(
                 tenant_id=context.tenant_id,

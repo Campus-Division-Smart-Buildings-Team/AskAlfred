@@ -151,13 +151,16 @@ class SemanticSearchHandler(BaseQueryHandler):
 
             return QueryResult(
                 query=query_text,
-                answer="Sorry — something went wrong during semantic search.",
+                answer=(
+                    "I couldn't complete that search right now. "
+                    "Please try again in a few minutes."
+                ),
                 results=[],
                 success=False,
                 handler_used="SemanticSearchHandler",
                 query_type=self.query_type.value,
                 metadata={
-                    "error": str(e),
+                    "error": "semantic_search_error",
                     "elapsed_seconds": elapsed,
                     "fallback": True,
                 },
@@ -220,14 +223,17 @@ class SemanticSearchHandler(BaseQueryHandler):
 
             return QueryResult(
                 query=context.query,
-                answer="Sorry, something went wrong while retrieving the data.",
+                answer=(
+                    "I couldn't complete that search right now. "
+                    "Please try again in a few minutes."
+                ),
                 results=[],
                 success=False,
                 handler_used="SemanticSearchHandler",
                 query_type=self.query_type.value,
                 metadata={
                     "instruction_type": instr.type if instr else None,
-                    "error": str(e),
+                    "error": "search_instruction_error",
                     "elapsed_seconds": elapsed,
                     "fallback": True,
                 },

@@ -128,5 +128,5 @@ class PropertyHandler(BaseQueryHandler):
                 success=False,
                 handler_used="PropertyHandler",
                 query_type=self.query_type.value,
-                metadata={"error": str(e)},
+                metadata={"error": "property_handler_error"},
             )

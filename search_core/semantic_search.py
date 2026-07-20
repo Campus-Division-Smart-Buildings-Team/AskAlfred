@@ -126,8 +126,8 @@ def semantic_search(
             return (
                 top_hits,
                 (
-                    f"I found results, but the top match scored {top_score:.3f}, "
-                    "which is below the threshold. Try rephrasing."
+                    "I found a few possible matches, but they may not answer your "
+                    "question. Try rephrasing or adding more detail."
                 ),
                 "",
                 True,
@@ -135,7 +135,13 @@ def semantic_search(
 
     # ===== Answer generation =====
     if not top_hits:
-        return [], "I couldn't find any matching documents.", "", True
+        return (
+            [],
+            "I couldn't find matching information. Try rephrasing your question "
+            "or adding a building name, document type, or date.",
+            "",
+            False,
+        )
 
     answer, pub_info = "", ""
     building_groups = group_results_by_building(top_hits)

@@ -142,27 +142,39 @@ def has_excessive_special_chars(query: str) -> tuple[bool, Optional[str]]:
 
     # Check special character ratio
     if special_count > query_len * SPECIAL_CHAR_RATIO_LIMIT:
-        error = (
-            f"Query contains too many special characters "
-            f"({special_count}/{query_len} = {100*special_count/query_len:.1f}%)"
+        logger.warning(
+            "Query rejected for special-character ratio: %d/%d (%.1f%%)",
+            special_count,
+            query_len,
+            100 * special_count / query_len,
         )
-        logger.warning("Query rejected: %s", error)
-        return True, error
+        return (
+            True,
+            "I couldn't read that question. Please use more words and fewer symbols.",
+        )
 
     # Check suspicious character ratio
     if suspicious_count > query_len * SUSPICIOUS_CHAR_RATIO_LIMIT:
-        error = (
-            f"Query contains suspicious character patterns "
-            f"({suspicious_count} dangerous chars)"
+        logger.warning(
+            "Query rejected for suspicious-character ratio: %d/%d",
+            suspicious_count,
+            query_len,
         )
-        logger.warning("Query rejected: %s", error)
-        return True, error
+        return (
+            True,
+            "I couldn't process that wording. Please rewrite your question using plain text.",
+        )
 
     # Check for repeated characters (potential DoS)
     if max_repeated > REPEATED_CHAR_LIMIT:
-        error = f"Query has too many repeated characters (max {max_repeated})"
-        logger.warning("Query rejected: %s", error)
-        return True, error
+        logger.warning(
+            "Query rejected for repeated characters: maximum run %d",
+            max_repeated,
+        )
+        return (
+            True,
+            "I couldn't read that question. Please remove the repeated characters and try again.",
+        )
 
     return False, None
 
@@ -204,14 +216,21 @@ def validate_query_security(
 
     # Check length constraints
     if len(query) < min_length:
-        return False, f"Query too short (minimum {min_length} characters)."
+        return False, "Please add a little more detail to your question."
 
     if len(query) > max_length:
-        return False, f"Query too long (maximum {max_length} characters)."
+        return (
+            False,
+            "That question is too long. Please shorten it and try again.",
+        )
 
     # Check for prompt injection attempts
     if is_injection_attempt(query):
-        return False, "Query contains invalid patterns. Please rephrase your question."
+        return (
+            False,
+            "I can't process that wording. Please ask a direct question about buildings, "
+            "fire risk assessments, BMS information, or maintenance.",
+        )
 
     # Check for excessive special characters
     is_invalid, error_msg = has_excessive_special_chars(query)
@@ -346,17 +365,17 @@ def validate_building_name(building_name: str) -> tuple[bool, Optional[str]]:
         Tuple of (is_valid, error_message)
     """
     if not building_name or not building_name.strip():
-        return False, "Building name cannot be empty"
+        return False, "Please enter a building name."
 
     name = building_name.strip()
 
     # Check length
     if len(name) > 500:
-        return False, "Building name too long (max 500 chars)"
+        return False, "That building name is too long. Please shorten it."
 
     # Check for injection patterns (building names should be simple)
     if is_injection_attempt(name):
-        return False, "Building name contains invalid patterns"
+        return False, "Please enter the building name using plain text."
 
     # Check for excessive special characters
     is_invalid, error_msg = has_excessive_special_chars(name)

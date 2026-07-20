@@ -10,8 +10,10 @@ from auth.auth_manager import (
     _build_auth_context_from_claims,
     _get_or_create_auth_flow,
     _normalise_query_params,
+    authentication_required,
 )
 from core.alfred_exceptions import ConfigError
+from core.failure_codes import FailureCode
 
 
 def test_normalise_query_params_flattens_lists():
@@ -25,6 +27,22 @@ def test_normalise_query_params_flattens_lists():
         "code": "latest",
         "state": "xyz",
     }
+
+
+def test_authentication_is_always_required_in_production(monkeypatch):
+    monkeypatch.setattr(auth_manager, "IS_PRODUCTION", True)
+    monkeypatch.setattr(auth_manager, "REQUIRE_AUTH", False)
+    monkeypatch.setattr(auth_manager, "ALLOW_ANONYMOUS_DEV", True)
+
+    assert authentication_required() is True
+
+
+def test_anonymous_access_remains_available_only_in_development(monkeypatch):
+    monkeypatch.setattr(auth_manager, "IS_PRODUCTION", False)
+    monkeypatch.setattr(auth_manager, "REQUIRE_AUTH", False)
+    monkeypatch.setattr(auth_manager, "ALLOW_ANONYMOUS_DEV", True)
+
+    assert authentication_required() is False
 
 
 def test_build_auth_context_from_claims_prefers_preferred_username_and_roles():
@@ -123,4 +141,83 @@ def test_auth_callback_error_is_not_exposed_to_ui(monkeypatch, caplog):
         fake_streamlit.session_state[auth_manager.AUTH_ERROR_SESSION_KEY]
         == auth_manager.AUTH_PROVIDER_ERROR_MESSAGE
     )
+    failure = fake_streamlit.session_state[auth_manager.AUTH_FAILURE_SESSION_KEY]
+    assert failure["code"] == FailureCode.AUTH_PROVIDER_RESPONSE_INVALID.value
+    assert failure["component"] == auth_manager.AUTH_COMPONENT
+    assert failure["correlation_id"].startswith("alf-")
+    assert "auth_failure code=auth.provider_response_invalid" in caplog.text
+    assert "correlation_id=alf-" in caplog.text
     assert "super-secret" not in caplog.text
+
+
+def test_invalid_token_claims_are_replaced_with_safe_ui_message(monkeypatch):
+    fake_streamlit = SimpleNamespace(
+        session_state={
+            auth_manager.AUTH_FLOW_SESSION_KEY: {
+                "auth_uri": "https://example.test/sign-in"
+            }
+        }
+    )
+
+    class FakeMsalApp:
+        def acquire_token_by_auth_code_flow(self, flow, auth_response):
+            return {"id_token_claims": {"name": "No stable identifier"}}
+
+    monkeypatch.setattr(auth_manager, "st", fake_streamlit)
+    monkeypatch.setattr(
+        auth_manager,
+        "_get_query_params",
+        lambda: {"code": "code", "state": "state"},
+    )
+    monkeypatch.setattr(auth_manager, "_clear_auth_query_params", lambda: None)
+    monkeypatch.setattr(auth_manager, "_remove_cached_auth_flow", lambda state: None)
+    monkeypatch.setattr(
+        auth_manager,
+        "build_msal_app",
+        lambda **kwargs: FakeMsalApp(),
+    )
+
+    assert auth_manager._try_complete_authentication() is None
+    assert (
+        fake_streamlit.session_state[auth_manager.AUTH_ERROR_SESSION_KEY]
+        == auth_manager.AUTH_INVALID_ACCOUNT_MESSAGE
+    )
+    failure = fake_streamlit.session_state[auth_manager.AUTH_FAILURE_SESSION_KEY]
+    assert failure["code"] == FailureCode.AUTH_CLAIMS_INVALID.value
+    assert failure["retryable"] is False
+    assert failure["correlation_id"].startswith("alf-")
+
+
+def test_token_exchange_exception_has_structured_retryable_failure(
+    monkeypatch, caplog
+):
+    fake_streamlit = SimpleNamespace(
+        session_state={
+            auth_manager.AUTH_FLOW_SESSION_KEY: {
+                "auth_uri": "https://example.test/sign-in"
+            }
+        }
+    )
+
+    class FakeMsalApp:
+        def acquire_token_by_auth_code_flow(self, flow, auth_response):
+            raise RuntimeError("secret-token=super-secret-value-123456789")
+
+    monkeypatch.setattr(auth_manager, "st", fake_streamlit)
+    monkeypatch.setattr(
+        auth_manager,
+        "_get_query_params",
+        lambda: {"code": "code", "state": "state"},
+    )
+    monkeypatch.setattr(auth_manager, "_clear_auth_query_params", lambda: None)
+    monkeypatch.setattr(auth_manager, "build_msal_app", lambda **kwargs: FakeMsalApp())
+
+    assert auth_manager._try_complete_authentication() is None
+
+    failure = fake_streamlit.session_state[auth_manager.AUTH_FAILURE_SESSION_KEY]
+    assert failure["code"] == FailureCode.AUTH_PROVIDER_UNAVAILABLE.value
+    assert failure["retryable"] is True
+    assert failure["correlation_id"].startswith("alf-")
+    assert "auth_failure code=auth.provider_unavailable" in caplog.text
+    assert "correlation_id=alf-" in caplog.text
+    assert "super-secret-value-123456789" not in caplog.text

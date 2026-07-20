@@ -152,5 +152,5 @@ class RankingHandler(BaseQueryHandler):
                 success=False,
                 handler_used="RankingHandler",
                 query_type=self.query_type.value,
-                metadata={"error": str(e)},
+                metadata={"error": "ranking_handler_error"},
             )

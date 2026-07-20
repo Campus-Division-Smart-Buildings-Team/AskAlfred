@@ -198,7 +198,8 @@ class TestLowScoreWarning:
 
         # Should contain warning emoji and message
         assert "⚠️" in call_args
-        assert "relevance threshold" in call_args.lower()
+        assert "may not closely match" in call_args.lower()
+        assert "threshold" not in call_args.lower()
 
     @patch("security.sanitise_context.st.markdown")
     def test_warning_uses_safe_markdown(self, mock_markdown):

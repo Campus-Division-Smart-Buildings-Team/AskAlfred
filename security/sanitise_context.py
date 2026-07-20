@@ -80,4 +80,7 @@ def display_safe_low_score_warning() -> None:
 
     Uses plain markdown instead of HTML to prevent injection attacks.
     """
-    st.markdown("⚠️ **Results below relevance threshold**")
+    st.markdown(
+        "⚠️ **These results may not closely match your question.** "
+        "Try adding a building name, document type, or date."
+    )

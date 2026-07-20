@@ -13,6 +13,7 @@ from typing import Any
 
 import streamlit as st
 
+from auth.access_control import is_operator
 from auth.auth_context import ANONYMOUS_AUTH_CONTEXT, AuthContext
 from auth.credential_manager import SecureCredentialManager
 from auth.msal_auth import build_msal_app, get_login_scopes
@@ -22,7 +23,10 @@ from config import (
     AUTH_STRICT_TENANT,
     REQUIRE_AUTH,
 )
+from config.constant import IS_PRODUCTION
 from core.alfred_exceptions import ConfigError
+from core.failure_codes import FailureCode
+from core.outcomes import FailureInfo
 from security.log_sanitiser import sanitise_error
 
 logger = logging.getLogger(__name__)
@@ -30,7 +34,15 @@ logger = logging.getLogger(__name__)
 AUTH_CONTEXT_SESSION_KEY = "auth_context"
 AUTH_FLOW_SESSION_KEY = "auth_code_flow"
 AUTH_ERROR_SESSION_KEY = "auth_error"
+AUTH_FAILURE_SESSION_KEY = "auth_failure"
+AUTH_COMPONENT = "authentication"
 AUTH_PROVIDER_ERROR_MESSAGE = "Microsoft sign-in was not completed. Please try again."
+AUTH_UNAVAILABLE_MESSAGE = (
+    "Sign-in is temporarily unavailable. Please try again later."
+)
+AUTH_INVALID_ACCOUNT_MESSAGE = (
+    "We couldn't verify the details returned for your account. Please try signing in again."
+)
 AUTH_FLOW_CACHE_TTL_SECONDS = 900
 MICROSOFT_SIGN_IN_BUTTON_MAX_WIDTH_PX = 360
 MICROSOFT_LOGO_SVG = (
@@ -50,7 +62,59 @@ MICROSOFT_LOGO_SVG = (
 _AUTH_FLOW_CACHE_LOCK = threading.Lock()
 
 
-@st.cache_resource
+def _record_auth_failure(
+    code: FailureCode,
+    user_message: str,
+    *,
+    error: Exception | None = None,
+    level: int = logging.ERROR,
+) -> FailureInfo:
+    """Store and log one safe, structured authentication failure."""
+
+    failure = FailureInfo.from_code(code, AUTH_COMPONENT)
+    st.session_state[AUTH_ERROR_SESSION_KEY] = user_message
+    st.session_state[AUTH_FAILURE_SESSION_KEY] = failure.to_dict()
+    if error is None:
+        logger.log(
+            level,
+            "auth_failure code=%s correlation_id=%s component=%s",
+            failure.code.value,
+            failure.correlation_id,
+            failure.component,
+        )
+    else:
+        logger.log(
+            level,
+            "auth_failure code=%s correlation_id=%s component=%s detail=%s",
+            failure.code.value,
+            failure.correlation_id,
+            failure.component,
+            sanitise_error(error),
+        )
+    return failure
+
+
+def _get_auth_failure_reference() -> str | None:
+    """Return the current opaque auth support reference, if one was recorded."""
+
+    raw_failure = st.session_state.get(AUTH_FAILURE_SESSION_KEY)
+    if not isinstance(raw_failure, dict):
+        return None
+    reference = raw_failure.get("correlation_id")
+    if not isinstance(reference, str) or not reference.startswith("alf-"):
+        return None
+    return reference
+
+
+def _render_auth_failure_reference(reference: str | None = None) -> None:
+    """Render only the opaque reference from a structured auth failure."""
+
+    resolved_reference = reference or _get_auth_failure_reference()
+    if resolved_reference:
+        st.caption(f"Reference: {resolved_reference}")
+
+
+@st.cache_resource(show_spinner=False)
 def _get_auth_flow_cache() -> dict[str, tuple[float, dict[str, Any]]]:
     """Return process-wide auth flow cache keyed by OAuth state."""
     return {}
@@ -107,7 +171,7 @@ def _remove_cached_auth_flow(state: str | None) -> None:
 
 def authentication_required() -> bool:
     """Return True when the current environment must block anonymous access."""
-    return REQUIRE_AUTH or not ALLOW_ANONYMOUS_DEV
+    return IS_PRODUCTION or REQUIRE_AUTH or not ALLOW_ANONYMOUS_DEV
 
 
 def _normalise_query_params(params: dict[str, Any]) -> dict[str, str]:
@@ -172,6 +236,18 @@ def _store_auth_context(auth_context: AuthContext) -> AuthContext:
     st.session_state.tenant_id = auth_context.tenant_id
     st.session_state.user_roles = list(auth_context.roles)
     st.session_state.authenticated = auth_context.authenticated
+    # On a real sign-in, log once at INFO so operators can confirm the Entra
+    # `roles` claim surfaced and whether it grants operator access (role values
+    # are not secrets). The anonymous context is re-stored on every rerun, so
+    # keep that at DEBUG to avoid log spam.
+    if auth_context.authenticated:
+        logger.debug(
+            "Authenticated session resolved: roles=%s, operator=%s",
+            list(auth_context.roles),
+            is_operator(auth_context),
+        )
+    else:
+        logger.debug("Stored anonymous auth context (operator=False)")
     return auth_context
 
 
@@ -181,6 +257,7 @@ def _clear_auth_context() -> None:
         AUTH_CONTEXT_SESSION_KEY,
         AUTH_FLOW_SESSION_KEY,
         AUTH_ERROR_SESSION_KEY,
+        AUTH_FAILURE_SESSION_KEY,
         "user_id",
         "user_name",
         "tenant_id",
@@ -205,6 +282,11 @@ def get_auth_context() -> AuthContext:
         authenticated=bool(raw_context.get("authenticated", False)),
         auth_source=str(raw_context.get("auth_source") or "anonymous"),
     )
+
+
+def current_user_is_operator() -> bool:
+    """Return True when the current session holds an operator app role."""
+    return is_operator(get_auth_context())
 
 
 def _build_auth_context_from_claims(claims: dict[str, Any]) -> AuthContext:
@@ -289,10 +371,10 @@ def _try_complete_authentication() -> AuthContext | None:
         return None
 
     if params.get("error"):
-        st.session_state[AUTH_ERROR_SESSION_KEY] = AUTH_PROVIDER_ERROR_MESSAGE
-        logger.warning(
-            "Authentication callback returned error code: %s",
-            params["error"],
+        _record_auth_failure(
+            FailureCode.AUTH_PROVIDER_RESPONSE_INVALID,
+            AUTH_PROVIDER_ERROR_MESSAGE,
+            level=logging.WARNING,
         )
         _clear_auth_query_params()
         return None
@@ -306,9 +388,11 @@ def _try_complete_authentication() -> AuthContext | None:
             st.session_state[AUTH_FLOW_SESSION_KEY] = flow
 
     if not isinstance(flow, dict):
-        st.session_state[AUTH_ERROR_SESSION_KEY] = (
+        _record_auth_failure(
+            FailureCode.AUTH_PROVIDER_UNAVAILABLE,
             "Authentication session expired before callback completed. "
-            "Please try again."
+            "Please try again.",
+            level=logging.WARNING,
         )
         _clear_auth_query_params()
         return None
@@ -317,9 +401,10 @@ def _try_complete_authentication() -> AuthContext | None:
         app = build_msal_app(allow_common_fallback=not AUTH_STRICT_TENANT)
         result = app.acquire_token_by_auth_code_flow(flow, auth_response=params)
     except Exception as error:  # pylint: disable=broad-except
-        logger.error("Failed to complete Microsoft login: %s", sanitise_error(error))
-        st.session_state[AUTH_ERROR_SESSION_KEY] = (
-            "Authentication could not be completed. Please try again."
+        _record_auth_failure(
+            FailureCode.AUTH_PROVIDER_UNAVAILABLE,
+            "Authentication could not be completed. Please try again.",
+            error=error,
         )
         _clear_auth_query_params()
         return None
@@ -329,22 +414,33 @@ def _try_complete_authentication() -> AuthContext | None:
     _remove_cached_auth_flow(callback_state)
 
     if not isinstance(result, dict):
-        st.session_state[AUTH_ERROR_SESSION_KEY] = (
-            "Authentication returned an invalid response."
+        _record_auth_failure(
+            FailureCode.AUTH_PROVIDER_RESPONSE_INVALID,
+            AUTH_PROVIDER_ERROR_MESSAGE,
         )
         return None
 
     if result.get("error"):
-        st.session_state[AUTH_ERROR_SESSION_KEY] = AUTH_PROVIDER_ERROR_MESSAGE
-        logger.warning(
-            "Authentication failed with error code: %s",
-            result["error"],
+        _record_auth_failure(
+            FailureCode.AUTH_PROVIDER_RESPONSE_INVALID,
+            AUTH_PROVIDER_ERROR_MESSAGE,
+            level=logging.WARNING,
         )
         return None
 
     id_token_claims = result.get("id_token_claims") or {}
-    auth_context = _build_auth_context_from_claims(id_token_claims)
+    try:
+        auth_context = _build_auth_context_from_claims(id_token_claims)
+    except ConfigError as error:
+        _clear_auth_context()
+        _record_auth_failure(
+            FailureCode.AUTH_CLAIMS_INVALID,
+            AUTH_INVALID_ACCOUNT_MESSAGE,
+            error=error,
+        )
+        return None
     st.session_state.pop(AUTH_ERROR_SESSION_KEY, None)
+    st.session_state.pop(AUTH_FAILURE_SESSION_KEY, None)
     return _store_auth_context(auth_context)
 
 
@@ -393,22 +489,26 @@ def render_auth_sidebar() -> None:
             st.success(f"Signed in as {auth_context.display_name}")
             if auth_context.email:
                 st.caption(auth_context.email)
-            if auth_context.roles:
-                st.caption(f"Roles: {', '.join(auth_context.roles)}")
 
             if st.button("Sign out", key="logout_button", use_container_width=True):
                 logout()
             return
 
         if ALLOW_ANONYMOUS_DEV and not REQUIRE_AUTH:
-            st.info("Running without sign-in")
+            st.info("Using guest access")
         else:
-            st.warning("Authentication required")
+            st.warning("Please sign in")
 
         try:
             flow = _get_or_create_auth_flow()
         except ConfigError as error:
-            st.caption(str(error))
+            failure = _record_auth_failure(
+                FailureCode.AUTH_CONFIGURATION_INVALID,
+                AUTH_UNAVAILABLE_MESSAGE,
+                error=error,
+            )
+            st.caption(AUTH_UNAVAILABLE_MESSAGE)
+            _render_auth_failure_reference(failure.correlation_id)
             return
 
         _render_microsoft_sign_in_button(
@@ -454,19 +554,29 @@ def ensure_authentication() -> AuthContext:
         )
         st.markdown(
             "<p style='text-align: center; margin-bottom: 1.5rem;'>"
-            "This application now requires Microsoft Entra ID authentication "
-            "before data access is allowed."
+            "Sign in with your University account to use AskAlfred."
             "</p>",
             unsafe_allow_html=True,
         )
 
         if auth_error:
-            st.error(str(auth_error))
+            st.error(
+                auth_error
+                if isinstance(auth_error, str)
+                else AUTH_PROVIDER_ERROR_MESSAGE
+            )
+            _render_auth_failure_reference()
 
         try:
             flow = _get_or_create_auth_flow()
         except ConfigError as error:
-            st.error(str(error))
+            failure = _record_auth_failure(
+                FailureCode.AUTH_CONFIGURATION_INVALID,
+                AUTH_UNAVAILABLE_MESSAGE,
+                error=error,
+            )
+            st.error(AUTH_UNAVAILABLE_MESSAGE)
+            _render_auth_failure_reference(failure.correlation_id)
             st.stop()
 
         _render_microsoft_sign_in_button(

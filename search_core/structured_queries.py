@@ -162,10 +162,10 @@ DOC_TYPE_MAPPINGS = {
 DOC_TYPE_NAMES_SIMPLE = {
     "fire_risk_assessment": "Fire Risk Assessments",
     "operational_doc": "BMS/Operational",
-    "planon_data": "Planon property data",
+    "planon_data": "Property records",
     "maintenance_request": "Maintenance Requests",
     "maintenance_job": "Maintenance Jobs",
-    "unknown": "Unknown document types",
+    "unknown": "Other records",
 }
 
 DEFAULT_BATCH_TOP_K = 1000
@@ -970,7 +970,10 @@ def generate_property_condition_answer(
                 break
 
         if not prop_condition:
-            return f"I couldn't find a property condition for **{building}** in Planon data."
+            return (
+                f"I couldn't find a property condition for **{building}** "
+                "in the available property records."
+            )
 
         return f"The property condition of **{building}** is **{prop_condition}**."
     # ------------------------------------------------------------------
@@ -1277,4 +1280,4 @@ def generate_counting_answer(
     if building:
         return f"**{building}** appears in **{count} buildings in the system.**"
 
-    return f"**{count} unique buildings** are indexed in the system."
+    return f"**{count} unique buildings** are available in the property records."

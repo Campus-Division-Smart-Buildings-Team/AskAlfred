@@ -103,5 +103,5 @@ class CountingHandler(BaseQueryHandler):
                 success=False,
                 handler_used="CountingHandler",
                 query_type=self.query_type.value,
-                metadata={"error": str(e)},
+                metadata={"error": "counting_handler_error"},
             )

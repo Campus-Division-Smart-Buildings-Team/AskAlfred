@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Any, Optional
 
 import streamlit as st
-from markupsafe import escape
 
 from auth.auth_manager import (
     authentication_required,
@@ -38,8 +37,9 @@ from config import (
 )
 from config.constant import IS_PRODUCTION
 from core.clients import ClientManager
+from core.outcomes import OutcomeStatus
 from query_core.intent_classifier import NLPIntentClassifier, warm_encoder_runtime_async
-from query_core.query_context import build_access_filter
+from query_core.query_context import build_access_filter, validate_access_context
 from query_core.query_manager import QueryManager
 from search_core.search_instructions import SearchInstructions
 from search_core.search_router import execute
@@ -56,8 +56,14 @@ from security.sanitise_context import (
     safe_markdown,
 )
 from ui.emojis import EMOJI_BOOKS, EMOJI_CAUTION, EMOJI_GORILLA, EMOJI_TIME
+from ui.error_presenter import (
+    present_outcome,
+    present_query_failure,
+    render_query_failure,
+)
 from ui.ui_components import (
     display_chat_history,
+    get_source_label,
     initialise_chat_history,
     render_citation_legend,
     render_custom_css,
@@ -157,9 +163,14 @@ warm_encoder_runtime_async()
 # ============================================================================
 
 # UI text
-NO_RESULTS_MESSAGE = "I couldn't find any relevant information in our knowledge bases. Regan has told me to say I don't know."
-ERROR_MESSAGE_TEMPLATE = "Sorry, I encountered an error while searching: {error}"
-SEARCH_SPINNER_TEXT = "Searching across indexes and analysing document dates..."
+NO_RESULTS_MESSAGE = (
+    "I couldn't find matching information. Try rephrasing your question or adding "
+    "a building name, document type, or date."
+)
+SEARCH_UNAVAILABLE_MESSAGE = (
+    "I can't complete that search right now. Please try again in a few minutes."
+)
+SEARCH_SPINNER_TEXT = "Looking through the available information..."
 
 # Input validation
 MAX_QUERY_LENGTH = QUERY_MAX_LENGTH
@@ -171,7 +182,30 @@ MIN_QUERY_LENGTH = QUERY_MIN_LENGTH
 # ============================================================================
 
 
-@st.cache_resource
+@st.cache_resource(show_spinner=False)
+def initialise_rate_limiter_once() -> bool:
+    """Initialise the process-wide rate limiter exactly once.
+
+    Wrapped in ``st.cache_resource`` so it runs on first load rather than on
+    every Streamlit rerun; the underlying manager is idempotent, but this also
+    stops the init log line repeating each rerun. Returns whether the Redis
+    backend was used.
+    """
+    try:
+        redis_client = ClientManager.get_redis()
+        initialise_rate_limiter(redis_client)
+        logging.info("Rate limiter initialised with Redis backend")
+        return True
+    except Exception as e:  # pylint: disable=broad-except
+        logging.warning(
+            "Could not initialise Redis-backed rate limiter: %s - using in-memory",
+            sanitise_error(e),
+        )
+        initialise_rate_limiter(None)  # Falls back to in-memory
+        return False
+
+
+@st.cache_resource(show_spinner="Getting Alfred ready…")
 def get_intent_classifier() -> NLPIntentClassifier:
     """
     Process-wide intent classifier. The CT2 model load and intent embedding
@@ -180,7 +214,7 @@ def get_intent_classifier() -> NLPIntentClassifier:
     return NLPIntentClassifier()
 
 
-@st.cache_resource
+@st.cache_resource(show_spinner="Loading building information…")
 def initialise_building_cache():
     """
     Initialise building name cache from ALL Pinecone indexes.
@@ -304,7 +338,7 @@ def handle_query_with_manager(query: str, top_k: int):
     manager = st.session_state.manager
 
     with st.chat_message("assistant", avatar=EMOJI_GORILLA):
-        with st.spinner("Processing your query..."):
+        with st.spinner("Working on your question..."):
             try:
                 # Building extraction is left to the manager's BuildingExtractor
                 # preprocessor; extracting here as well doubled the work.
@@ -328,47 +362,43 @@ def handle_query_with_manager(query: str, top_k: int):
                 # Store results
                 st.session_state.last_results = result.results
 
-                # Display answer
-                if result.answer:
-                    safe_markdown(result.answer)
-                    render_citation_legend(result.answer, result.results)
+                if not result.success:
+                    history_content = render_query_failure(
+                        present_query_failure(result)
+                    )
+                else:
+                    if result.answer:
+                        history_content = result.answer
+                        safe_markdown(result.answer)
+                        render_citation_legend(result.answer, result.results)
+                    elif result.results:
+                        history_content = (
+                            f"I found {len(result.results)} relevant "
+                            f"{'result' if len(result.results) == 1 else 'results'}."
+                        )
+                        st.markdown(history_content)
+                    else:
+                        history_content = NO_RESULTS_MESSAGE
+                        st.markdown(NO_RESULTS_MESSAGE)
 
-                # Optional UI elements
-                if getattr(result, "publication_date_info", None):
-                    display_safe_publication_date_info(result.publication_date_info)
+                    if getattr(result, "publication_date_info", None):
+                        display_safe_publication_date_info(result.publication_date_info)
 
-                if getattr(result, "score_too_low", False):
-                    display_safe_low_score_warning()
+                    if getattr(result, "score_too_low", False):
+                        display_safe_low_score_warning()
 
                 # Store in chat history
                 st.session_state.messages.append(
                     {
                         "role": "assistant",
-                        "content": result.answer or "No answer provided",
-                        "results": result.results,
-                        "metadata": result.metadata,
-                        "query_type": result.query_type or "Unknown",
-                        "handler_used": result.handler_used or "Unknown",
+                        "content": history_content,
+                        "results": result.results if result.success else [],
                     }
                 )
 
                 # Keep the rolling summary current so follow-up turns get
                 # conversational context (it feeds process_query above).
                 update_conversation_summary()
-
-                # Debug info - Only show in development mode to prevent information disclosure
-                # Shows system architecture details that could aid attackers
-                if not IS_PRODUCTION and st.session_state.get("debug_mode", False):
-                    with st.expander("🔍 Debug Info"):
-                        st.json(
-                            {
-                                "query_type": result.query_type,
-                                "handler": result.handler_used,
-                                "processing_time_ms": result.processing_time_ms,
-                                "num_results": len(result.results),
-                                "success": result.success,
-                            }
-                        )
 
             except Exception as e:
                 handle_search_error(e)
@@ -403,8 +433,8 @@ def validate_query(query: str) -> tuple[bool, Optional[str]]:
             retry_after = max(0, int(reset_time - time.time()))
 
             error_msg = (
-                f"Rate limit exceeded. You have made too many queries. "
-                f"Please wait {retry_after} seconds before trying again."
+                "You've asked several questions in a short time. "
+                f"Please try again in {retry_after} seconds."
             )
             logging.warning(
                 "Rate limit exceeded for user %s. Reset in %d seconds",
@@ -434,36 +464,13 @@ def render_result_item(
         # Display top result indicator safely
         st.markdown("📍 **TOP RESULT**")
 
-    # Format score and metadata
-    score = result.get("score", 0.0)
-    boosted_score = result.get("boosted_score")
-    boost_reason = result.get("boost_reason")
-    key = result.get("key", "Unknown")
-    index_name = result.get("index", "?")
-    namespace = result.get("namespace", "__default__")
-
-    score_text = f"**{index}. Score:** {score:.3f}"
-    if isinstance(boosted_score, (int, float)):
-        score_text += f" (boosted: {boosted_score:.3f})"
-    if boost_reason:
-        score_text += f"  \n_Boost:_ `{escape(str(boost_reason))}`"
-
-    # Display metadata safely (escaping key value which could contain user input)
-    st.markdown(
-        f"{score_text}  \n"
-        f"_Document:_ `{escape(str(key))}`  •  _Index:_ `{escape(str(index_name))}`  •  _Namespace:_ `{escape(str(namespace))}`"
-    )
+    st.write(f"{index}. {get_source_label(result, index)}")
 
     # Display text snippet
-    snippet = result.get("text") or "_(no text in metadata)_"
+    snippet = result.get("text") or "_Preview unavailable._"
     if len(snippet) > max_snippet_length:
         snippet = snippet[:max_snippet_length] + "..."
     st.write(snippet)
-
-    # Display ID as caption
-    result_id = result.get("id") or "—"
-    st.caption(f"ID: {result_id}")
-
 
 # ============================================================================
 # MAIN APPLICATION
@@ -477,16 +484,8 @@ def main():
 
     auth_context = ensure_authentication()
 
-    # Initialise rate limiter with Redis client if available
-    try:
-        redis_client = ClientManager.get_redis()
-        initialise_rate_limiter(redis_client)
-        logging.info("Rate limiter initialised with Redis backend")
-    except Exception as e:
-        logging.warning(
-            "Could not initialise Redis-backed rate limiter: %s - using in-memory", e
-        )
-        initialise_rate_limiter(None)  # Falls back to in-memory
+    # Initialise rate limiter once per process (cached across reruns).
+    initialise_rate_limiter_once()
 
     st.session_state.user_id = auth_context.user_id
     st.session_state.user_name = auth_context.display_name
@@ -504,17 +503,9 @@ def main():
         # degraded until the process restarts (e.g. transient Pinecone outage).
         initialise_building_cache.clear()
         st.warning(
-            f"{EMOJI_CAUTION} Building name cache could not be initialised. "
-            "Building name detection may be limited to pattern matching."
+            f"{EMOJI_CAUTION} Building-name recognition is temporarily limited. "
+            "For the best results, use the full building name in your question."
         )
-    elif not st.session_state.get("building_cache_banner_shown"):
-        indexes_with_buildings = cache_status.get("indexes_with_buildings", [])
-        if indexes_with_buildings:
-            st.success(
-                f"✅ Building data loaded from {len(indexes_with_buildings)} index: "
-                f"{', '.join(indexes_with_buildings)}"
-            )
-        st.session_state.building_cache_banner_shown = True
 
     render_header()
 
@@ -568,6 +559,28 @@ def safe_execute(
 def handle_search_query(query: str, top_k: int):
     """Handle search queries via unified search_core router."""
     with st.chat_message("assistant", avatar=EMOJI_GORILLA):
+        # Fail closed before retrieval when an authenticated session has no
+        # usable access context, rather than returning a fake empty result.
+        access_failure = validate_access_context(
+            authenticated=bool(st.session_state.get("authenticated", False)),
+            tenant_id=st.session_state.get("tenant_id"),
+            user_roles=tuple(st.session_state.get("user_roles", [])),
+        )
+        if access_failure is not None:
+            logging.warning(
+                "access_context_rejected code=%s correlation_id=%s component=%s",
+                access_failure.code.value,
+                access_failure.correlation_id,
+                access_failure.component,
+            )
+            history_content = render_query_failure(
+                present_outcome(OutcomeStatus.REJECTED, access_failure)
+            )
+            st.session_state.messages.append(
+                {"role": "assistant", "content": history_content}
+            )
+            return
+
         with st.spinner(SEARCH_SPINNER_TEXT):
             try:
                 instr = SearchInstructions(
@@ -653,25 +666,15 @@ def handle_successful_results(
 
 
 def handle_search_error(error: Exception):  # pylint: disable=broad-except
-    """Handle errors during search with environment-aware messages.
-
-    In production: Shows generic messages to prevent information disclosure.
-    In development: Shows error details for debugging.
-    """
+    """Log search details and show stable, user-safe recovery guidance."""
     # Log sanitized error server-side (always sanitized for security)
     logging.error("Search error: %s", sanitise_error(error))
 
-    # Show appropriate error message based on environment
-    if IS_PRODUCTION:
-        # Generic message in production to prevent information disclosure
-        error_msg = ERROR_MESSAGE_TEMPLATE.format(error="search service")
-    else:
-        # Detailed message in development for debugging
-        error_msg = f"Error during search: {sanitise_error(error)}"
+    st.error(SEARCH_UNAVAILABLE_MESSAGE)
 
-    st.error(error_msg)
-
-    st.session_state.messages.append({"role": "assistant", "content": error_msg})
+    st.session_state.messages.append(
+        {"role": "assistant", "content": SEARCH_UNAVAILABLE_MESSAGE}
+    )
 
 
 def display_direct_results(results: list[dict[str, Any]], publication_date_info: str):

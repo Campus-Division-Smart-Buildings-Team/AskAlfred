@@ -19,14 +19,14 @@ def test_build_access_filter_is_empty_for_anonymous_sessions():
     assert access_filter == {}
 
 
-def test_build_access_filter_scopes_authenticated_user_to_tenant():
+def test_build_access_filter_denies_authenticated_user_without_roles():
     access_filter = build_access_filter(
         tenant_id="tenant-123",
         user_roles=(),
         authenticated=True,
     )
 
-    assert access_filter == {"tenant_id": {"$eq": "tenant-123"}}
+    assert access_filter == {"tenant_id": {"$eq": DENY_ALL_TENANT_ID}}
 
 
 def test_build_access_filter_adds_role_constraint_when_roles_present():

@@ -38,6 +38,14 @@ AUTH_STRICT_TENANT = os.getenv("AUTH_STRICT_TENANT", "true").strip().lower() in 
     "yes",
     "on",
 }
+# Entra ID app-role value(s) that grant access to operator/diagnostics surfaces.
+# Assigned to users/groups in Azure and delivered in the ID token `roles` claim;
+# comma-separated env override, matched case-sensitively against the claim.
+OPERATOR_ROLES = frozenset(
+    role.strip()
+    for role in os.getenv("OPERATOR_ROLES", "data_steward").split(",")
+    if role.strip()
+)
 AUTH_REDIRECT_URI = os.getenv("AUTH_REDIRECT_URI", "http://localhost:8501")
 INGEST_DEFAULT_TENANT_ID = (
     os.getenv(
@@ -362,6 +370,7 @@ __all__ = [
     "ALLOW_ANONYMOUS_DEV",
     "AUTH_STRICT_TENANT",
     "AUTH_REDIRECT_URI",
+    "OPERATOR_ROLES",
     "INGEST_DEFAULT_TENANT_ID",
     "INGEST_DEFAULT_ACCESS_LEVEL",
     "INGEST_DEFAULT_ALLOWED_ROLES",

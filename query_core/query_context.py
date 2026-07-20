@@ -16,9 +16,50 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from core.failure_codes import FailureCode
+from core.outcomes import FailureInfo
 from query_core.query_types import QueryType
 
 DENY_ALL_TENANT_ID = "__deny_access__"
+
+ACCESS_CONTROL_COMPONENT = "access_control"
+
+
+def validate_access_context(
+    *,
+    authenticated: bool,
+    tenant_id: Optional[str],
+    user_roles: tuple[str, ...],
+) -> Optional[FailureInfo]:
+    """Check whether a session has enough access context to run retrieval.
+
+    Returns ``None`` when retrieval may proceed, or a :class:`FailureInfo`
+    describing a stable access-context rejection that must be surfaced
+    *before* retrieval. This prevents an authenticated session with no usable
+    tenant or app roles from producing misleading or over-broad retrieval.
+
+    Anonymous/dev sessions are intentionally not rejected here: their posture
+    (AUTH-13) is a deployment decision handled separately. Production always
+    requires authentication, so this exception is limited to the explicit
+    development-only guest posture.
+    """
+    if not authenticated:
+        return None
+
+    if not tenant_id or not str(tenant_id).strip():
+        return FailureInfo.from_code(
+            FailureCode.ACCESS_CONTEXT_INVALID,
+            ACCESS_CONTROL_COMPONENT,
+        )
+
+    roles = tuple(str(role).strip() for role in user_roles if str(role).strip())
+    if not roles:
+        return FailureInfo.from_code(
+            FailureCode.ACCESS_ROLE_CONTEXT_INVALID,
+            ACCESS_CONTROL_COMPONENT,
+        )
+
+    return None
 
 
 def build_access_filter(
@@ -30,35 +71,26 @@ def build_access_filter(
     """
     Build the first-pass retrieval access filter from the current auth context.
 
-    This initial enforcement is intentionally narrow: authenticated users are
-    constrained to their tenant (and to documents allowing one of their roles,
-    when roles are present), while anonymous/dev sessions keep the current
-    unfiltered behaviour until the wider authz rollout is complete.
-
-    WARNING (rollout semantics): an authenticated user WITHOUT roles is only
-    tenant-scoped and therefore sees role-restricted documents that a user
-    WITH non-matching roles cannot — i.e. holding a role can only narrow
-    access. This is a deliberate transitional posture (locked in by
-    tests/test_access_filter_threading.py) so tenants whose tokens carry no
-    app-role claims are not locked out mid-rollout. Once role assignment is
-    universal, roleless authenticated users should fail closed instead.
+    Authenticated users are constrained to their tenant and at least one
+    asserted app role. Missing tenant or role context receives a defence-in-
+    depth deny-all filter even if a caller accidentally skips
+    :func:`validate_access_context`. Anonymous sessions remain deliberately
+    unfiltered only for the explicitly enabled development guest posture.
     """
     if not authenticated:
         return {}
 
-    if not tenant_id:
+    roles = [str(role).strip() for role in user_roles if str(role).strip()]
+    if not tenant_id or not str(tenant_id).strip() or not roles:
         return {"tenant_id": {"$eq": DENY_ALL_TENANT_ID}}
 
     access_filter: dict[str, Any] = {"tenant_id": {"$eq": str(tenant_id)}}
-    roles = [str(role) for role in user_roles if role]
-    if roles:
-        access_filter = {
-            "$and": [
-                access_filter,
-                {"allowed_roles": {"$in": roles}},
-            ]
-        }
-    return access_filter
+    return {
+        "$and": [
+            access_filter,
+            {"allowed_roles": {"$in": roles}},
+        ]
+    }
 
 
 @dataclass

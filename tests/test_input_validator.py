@@ -192,13 +192,15 @@ class TestQueryValidation:
 
     def test_query_too_short_fails(self):
         """Test that too-short queries fail."""
-        is_valid, _ = validate_query_security("A")
+        is_valid, message = validate_query_security("A")
         assert is_valid is False
+        assert message == "Please add a little more detail to your question."
 
     def test_query_too_long_fails(self):
         """Test that extremely long queries fail."""
-        is_valid, _ = validate_query_security("A" * 2000)
+        is_valid, message = validate_query_security("A" * 2000)
         assert is_valid is False
+        assert message == "That question is too long. Please shorten it and try again."
 
 
 class TestQuerySecurityValidation:
@@ -211,6 +213,7 @@ class TestQuerySecurityValidation:
         )
         assert is_valid is False
         assert error_msg is not None
+        assert "invalid pattern" not in error_msg.lower()
 
     def test_special_chars_validated(self):
         """Test that special characters are validated."""
@@ -376,8 +379,12 @@ class TestComprehensiveValidation:
 
     def test_too_many_special_chars_fails(self):
         """Test rejection of queries with too many special characters."""
-        is_valid, _ = validate_query_security("$$$${{{{}}}}}||||||||")
+        is_valid, message = validate_query_security("$$$${{{{}}}}}||||||||")
         assert is_valid is False
+        assert message is not None
+        assert "/" not in message
+        assert "%" not in message
+        assert "dangerous" not in message.lower()
 
     def test_validation_summary_available(self):
         """Test that validation summary can be retrieved."""

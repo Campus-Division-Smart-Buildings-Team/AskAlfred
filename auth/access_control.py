@@ -2,7 +2,25 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from auth.auth_context import AuthContext
+from config import OPERATOR_ROLES
+
 REQUIRED_ACL_FIELDS = ("tenant_id", "access_level", "allowed_roles")
+
+
+def is_operator(auth_context: AuthContext) -> bool:
+    """Return True only for an authenticated user holding an operator app role.
+
+    Fails closed: an anonymous session, a missing/empty ``roles`` claim, or a
+    claim that shares no value with ``OPERATOR_ROLES`` is not an operator.
+    Comparison is case-sensitive to match the Entra ID app-role ``value``.
+    """
+    if not auth_context.authenticated:
+        return False
+    operator_roles = {role.strip() for role in OPERATOR_ROLES if role.strip()}
+    if not operator_roles:
+        return False
+    return any(str(role).strip() in operator_roles for role in auth_context.roles)
 
 
 def combine_pinecone_filters(

@@ -41,6 +41,7 @@ data/
 # markdowns
 *.md
 !README.md
+!plan/dependency_and_source_classification.md
 
 # metrics
 *.prom
