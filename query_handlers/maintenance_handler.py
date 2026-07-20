@@ -8,18 +8,23 @@ Delegates logic to generate_maintenance_answers.generate_maintenance_answer.
 """
 
 # First party import
+from core.outcomes import OutcomeStatus
 from query_core.query_context import QueryContext
 from query_core.query_result import QueryResult
 from query_core.query_types import QueryType
-from search_core.generate_maintenance_answers import generate_maintenance_answer
+from search_core.generate_maintenance_answers import (
+    generate_maintenance_answer_with_outcome,
+)
 from search_core.structured_queries import (
     is_maintenance_query,
     is_property_condition_query,
     is_ranking_query,
 )
+from security.log_sanitiser import sanitise_error
 
 # Local import
 from .base_handler import BaseQueryHandler
+from .handler_failures import handler_failed_result
 
 
 class MaintenanceHandler(BaseQueryHandler):
@@ -72,13 +77,14 @@ class MaintenanceHandler(BaseQueryHandler):
                 or prev_building
             )
 
-            answer = generate_maintenance_answer(
+            outcome = generate_maintenance_answer_with_outcome(
                 query_text,
                 building_override=building_override,
                 access_filter=context.access_filter,
             )
 
-            if not answer:
+            answer = outcome.answer
+            if not answer and outcome.status is OutcomeStatus.EMPTY:
                 answer = (
                     "I couldn't identify any maintenance information for your query. "
                     "You can try specifying a building, maintenance category, or job type."
@@ -90,23 +96,25 @@ class MaintenanceHandler(BaseQueryHandler):
                 results=[],
                 handler_used="MaintenanceHandler",
                 query_type=self.query_type.value,
-                metadata={"structured_response": True},
+                status=outcome.status,
+                failure=outcome.failure,
+                degraded_components=outcome.degraded_components,
+                source_outcomes=outcome.source_outcomes,
+                metadata={
+                    "structured_response": True,
+                    "status": outcome.status.value,
+                },
+            )
+        except Exception as e:
+            self.logger.error(
+                "Maintenance handler error: %s", sanitise_error(e), exc_info=False
             )
 
-        except Exception as e:
-            self.logger.error("Maintenance handler error: %s", e, exc_info=True)
-
-            # Metadata may be displayed/persisted by callers, so expose only an
-            # error code/type; the detailed text stays in the sanitized logs.
-            return QueryResult(
-                query=query_text,
-                answer="Sorry — I encountered an error while processing your maintenance query.",
-                results=[],
-                success=False,
-                handler_used="MaintenanceHandler",
-                query_type=self.query_type.value,
-                metadata={
-                    "error": "maintenance_handler_error",
-                    "error_type": type(e).__name__,
-                },
+            # Metadata may be displayed/persisted by callers, so expose only a
+            # stable error code; the detailed text stays in the sanitized logs.
+            return handler_failed_result(
+                query_text,
+                "MaintenanceHandler",
+                self.query_type.value,
+                error_code="maintenance_handler_error",
             )

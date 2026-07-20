@@ -42,7 +42,8 @@ from query_core.intent_classifier import NLPIntentClassifier, warm_encoder_runti
 from query_core.query_context import build_access_filter, validate_access_context
 from query_core.query_manager import QueryManager
 from search_core.search_instructions import SearchInstructions
-from search_core.search_router import execute
+from search_core.search_router import execute, normalise_execute_result
+from search_core.semantic_search import semantic_search_with_outcome
 from security.input_validator import get_validation_summary, validate_query_security
 from security.log_sanitiser import SanitisedFormatter, sanitise_error
 from security.rate_limiter import (
@@ -362,37 +363,14 @@ def handle_query_with_manager(query: str, top_k: int):
                 # Store results
                 st.session_state.last_results = result.results
 
-                if not result.success:
-                    history_content = render_query_failure(
-                        present_query_failure(result)
-                    )
-                else:
-                    if result.answer:
-                        history_content = result.answer
-                        safe_markdown(result.answer)
-                        render_citation_legend(result.answer, result.results)
-                    elif result.results:
-                        history_content = (
-                            f"I found {len(result.results)} relevant "
-                            f"{'result' if len(result.results) == 1 else 'results'}."
-                        )
-                        st.markdown(history_content)
-                    else:
-                        history_content = NO_RESULTS_MESSAGE
-                        st.markdown(NO_RESULTS_MESSAGE)
-
-                    if getattr(result, "publication_date_info", None):
-                        display_safe_publication_date_info(result.publication_date_info)
-
-                    if getattr(result, "score_too_low", False):
-                        display_safe_low_score_warning()
+                history_content, stored_results = render_manager_result(result)
 
                 # Store in chat history
                 st.session_state.messages.append(
                     {
                         "role": "assistant",
                         "content": history_content,
-                        "results": result.results if result.success else [],
+                        "results": stored_results,
                     }
                 )
 
@@ -403,6 +381,65 @@ def handle_query_with_manager(query: str, top_k: int):
             except Exception as e:
                 handle_search_error(e)
                 # st.session_state.processing_query = False
+
+
+# Statuses whose result must be shown as a dedicated failure/rejection notice,
+# never rendered as an ordinary assistant answer (UI-01).
+_MANAGER_FAILURE_STATUSES = frozenset(
+    {
+        OutcomeStatus.REJECTED,
+        OutcomeStatus.UNAVAILABLE,
+        OutcomeStatus.FAILED,
+        OutcomeStatus.CRITICAL_INCONSISTENT,
+    }
+)
+
+
+def render_manager_result(result) -> tuple[str, list[Any]]:
+    """Render a QueryManager result according to its structured outcome.
+
+    Returns ``(history_text, stored_results)`` for the chat transcript. Hard
+    failures and rejections render as a dedicated notice; genuine empty results
+    render as a privacy-safe empty notice; partial/degraded results show what is
+    available plus a concise capability warning.
+    """
+    status = result.status
+
+    # Hard failures, rejections, and genuine empty results: notice only.
+    if status in _MANAGER_FAILURE_STATUSES or status is OutcomeStatus.EMPTY:
+        return render_query_failure(present_query_failure(result)), []
+
+    # Nothing to display but not a hard failure (e.g. partial with no results).
+    if not result.answer and not result.results:
+        if status is OutcomeStatus.SUCCESS:
+            st.markdown(NO_RESULTS_MESSAGE)
+            return NO_RESULTS_MESSAGE, []
+        return render_query_failure(present_query_failure(result)), []
+
+    # success / low_confidence / degraded / partial with content to show.
+    if result.answer:
+        history_content = result.answer
+        safe_markdown(result.answer)
+        render_citation_legend(result.answer, result.results)
+    else:
+        history_content = (
+            f"I found {len(result.results)} relevant "
+            f"{'result' if len(result.results) == 1 else 'results'}."
+        )
+        st.markdown(history_content)
+
+    if getattr(result, "publication_date_info", None):
+        display_safe_publication_date_info(result.publication_date_info)
+
+    if getattr(result, "score_too_low", False):
+        display_safe_low_score_warning()
+
+    # Concise capability warning for incomplete coverage. low_confidence already
+    # shows a low-score note above, and success needs no notice.
+    if status in (OutcomeStatus.PARTIAL, OutcomeStatus.DEGRADED):
+        render_query_failure(present_query_failure(result))
+
+    return history_content, result.results
 
 
 def validate_query(query: str) -> tuple[bool, Optional[str]]:
@@ -534,30 +571,17 @@ def main():
 def safe_execute(
     instr: SearchInstructions,
 ) -> tuple[list[dict[str, Any]], str, str, bool]:
-    """Run search_core.execute and normalise its return shape."""
-    raw = execute(instr)
+    """Run search_core.execute and normalise its return shape.
 
-    # Semantic: 4 items
-    if len(raw) == 4:
-        results, answer, pub_info, score_too_low = raw
-        return results, answer or "", pub_info or "", score_too_low
-
-    # Planon: (results, answer, publication_date_info)
-    if len(raw) == 3:
-        results, answer, pub_info = raw  # pylint: disable=unbalanced-tuple-unpacking
-        return results, answer or "", pub_info or "", False
-
-    # Maintenance: (results, answer)
-    if len(raw) == 2:
-        results, answer = raw  # pylint: disable=unbalanced-tuple-unpacking
-        return results, answer or "", "", False
-
-    # Fallback (should never happen)
-    return [], "", "", False
+    Raises :class:`SearchError` on an unexpected return-arity so a router
+    contract violation surfaces as a typed failure rather than a silent empty
+    result (SEARCH-12).
+    """
+    return normalise_execute_result(execute(instr))
 
 
 def handle_search_query(query: str, top_k: int):
-    """Handle search queries via unified search_core router."""
+    """Handle search queries via the structured semantic outcome path."""
     with st.chat_message("assistant", avatar=EMOJI_GORILLA):
         # Fail closed before retrieval when an authenticated session has no
         # usable access context, rather than returning a fake empty result.
@@ -583,10 +607,9 @@ def handle_search_query(query: str, top_k: int):
 
         with st.spinner(SEARCH_SPINNER_TEXT):
             try:
-                instr = SearchInstructions(
-                    type="semantic",
-                    query=query,
-                    top_k=top_k,
+                outcome = semantic_search_with_outcome(
+                    query,
+                    top_k,
                     access_filter=build_access_filter(
                         tenant_id=st.session_state.get("tenant_id"),
                         user_roles=tuple(st.session_state.get("user_roles", [])),
@@ -596,22 +619,42 @@ def handle_search_query(query: str, top_k: int):
                     ),
                 )
 
-                results, answer, publication_date_info, score_too_low = safe_execute(
-                    instr
-                )
-
-                st.session_state.last_results = results
-
-                if not results:
-                    handle_no_results()
-                elif score_too_low:
-                    handle_low_score_results(answer, results)
-                else:
-                    handle_successful_results(answer, results, publication_date_info)
+                st.session_state.last_results = outcome.results
+                render_legacy_semantic_outcome(outcome)
 
             except Exception as e:
                 handle_search_error(e)
                 # st.session_state.processing_query = False
+
+
+def render_legacy_semantic_outcome(outcome):
+    """Render a structured semantic outcome in the legacy search path."""
+    status = outcome.status
+
+    # A required-source outage must not read as "no results" (Phase 2 exit).
+    if status in _MANAGER_FAILURE_STATUSES or status is OutcomeStatus.EMPTY:
+        content = render_query_failure(present_outcome(status, outcome.failure))
+        st.session_state.messages.append(
+            {"role": "assistant", "content": content}
+        )
+        return
+
+    if outcome.score_too_low:
+        handle_low_score_results(outcome.answer or "", outcome.results)
+    elif outcome.answer or outcome.results:
+        handle_successful_results(
+            outcome.answer or "", outcome.results, outcome.publication_info
+        )
+    else:
+        content = render_query_failure(present_outcome(status, outcome.failure))
+        st.session_state.messages.append(
+            {"role": "assistant", "content": content}
+        )
+        return
+
+    # Concise capability warning for incomplete coverage.
+    if status in (OutcomeStatus.PARTIAL, OutcomeStatus.DEGRADED):
+        render_query_failure(present_outcome(status, outcome.failure))
 
 
 def handle_no_results():
@@ -624,14 +667,26 @@ def handle_no_results():
 
 def handle_low_score_results(answer: str, results: list[dict[str, Any]]):
     """Handle case when results have scores below threshold."""
-    safe_markdown(answer)
-    render_citation_legend(answer, results)
+    if answer:
+        safe_markdown(answer)
+        render_citation_legend(answer, results)
+        history_content = answer
+    else:
+        history_content = (
+            f"I found {len(results)} possible "
+            f"{'match' if len(results) == 1 else 'matches'}:"
+        )
+        st.markdown(history_content)
+        for i, result in enumerate(results, 1):
+            render_result_item(result, i, is_top=(i == 1))
+            if i < len(results):
+                st.markdown("---")
     display_safe_low_score_warning()
 
     st.session_state.messages.append(
         {
             "role": "assistant",
-            "content": answer,
+            "content": history_content,
             "results": results,
             "score_too_low": True,
         }

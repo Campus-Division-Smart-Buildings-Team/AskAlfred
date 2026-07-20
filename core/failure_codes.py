@@ -34,6 +34,7 @@ class FailureCode(str, Enum):
 
     SEARCH_INDEX_UNAVAILABLE = "search.index_unavailable"
     SEARCH_EMBEDDING_UNAVAILABLE = "search.embedding_unavailable"
+    SEARCH_EMBEDDING_FAILED = "search.embedding_failed"
     SEARCH_NAMESPACE_UNAVAILABLE = "search.namespace_unavailable"
     SEARCH_BACKEND_UNAVAILABLE = "search.backend_unavailable"
     SEARCH_SOURCE_PARTIAL = "search.source_partial"
@@ -93,6 +94,7 @@ _NON_RETRYABLE_CODES = {
     FailureCode.ACCESS_AUTHORIZED_SCOPE_EMPTY,
     FailureCode.ROUTING_GRAPH_INVALID,
     FailureCode.SEARCH_CONTRACT_INVALID,
+    FailureCode.SEARCH_EMBEDDING_FAILED,
     FailureCode.INGEST_CONFIGURATION_INVALID,
     FailureCode.INGEST_INPUT_INVALID,
     FailureCode.INGEST_FILE_CHANGED,

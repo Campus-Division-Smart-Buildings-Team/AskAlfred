@@ -9,21 +9,24 @@ Delegates logic to counting_queries.generate_property_condition_answer.
 
 import re
 
+from core.outcomes import OutcomeStatus
 from query_core.query_context import QueryContext
 from query_core.query_result import QueryResult
 
 # First party import
 from query_core.query_types import QueryType
 from search_core.structured_queries import (
-    generate_property_condition_answer,
+    generate_property_condition_answer_with_outcome,
     is_counting_query,
     is_maintenance_query,
     is_property_condition_query,
     is_ranking_query,
 )
+from security.log_sanitiser import sanitise_error
 
 # Local import
 from .base_handler import BaseQueryHandler
+from .handler_failures import handler_failed_result
 
 
 class PropertyHandler(BaseQueryHandler):
@@ -98,12 +101,13 @@ class PropertyHandler(BaseQueryHandler):
         query_text = context.query.strip()
 
         try:
-            answer = generate_property_condition_answer(
+            outcome = generate_property_condition_answer_with_outcome(
                 query_text,
                 access_filter=context.access_filter,
             )
 
-            if not answer:
+            answer = outcome.answer
+            if not answer and outcome.status is OutcomeStatus.EMPTY:
                 answer = (
                     "I couldn't interpret a valid property condition in your query. "
                     "Try specifying Condition A, B, C, D, or 'derelict'."
@@ -115,18 +119,22 @@ class PropertyHandler(BaseQueryHandler):
                 results=[],
                 handler_used="PropertyHandler",
                 query_type=self.query_type.value,
-                metadata={"structured_response": True},
+                status=outcome.status,
+                failure=outcome.failure,
+                degraded_components=outcome.degraded_components,
+                source_outcomes=outcome.source_outcomes,
+                metadata={
+                    "structured_response": True,
+                    "status": outcome.status.value,
+                },
             )
-
         except Exception as e:
-            self.logger.error("Property handler error: %s", e, exc_info=True)
-
-            return QueryResult(
-                query=query_text,
-                answer="Sorry — something went wrong while retrieving property condition information.",
-                results=[],
-                success=False,
-                handler_used="PropertyHandler",
-                query_type=self.query_type.value,
-                metadata={"error": "property_handler_error"},
+            self.logger.error(
+                "Property handler error: %s", sanitise_error(e), exc_info=False
+            )
+            return handler_failed_result(
+                query_text,
+                "PropertyHandler",
+                self.query_type.value,
+                error_code="property_handler_error",
             )

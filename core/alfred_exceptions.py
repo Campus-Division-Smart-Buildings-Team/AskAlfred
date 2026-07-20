@@ -46,6 +46,28 @@ class SearchError(AskAlfredError):
     """Raised when search operation fails."""
 
 
+class AnswerGenerationError(AskAlfredError):
+    """Raised when answer generation (LLM summarisation) fails.
+
+    Retrieval and answer generation are separate stages. This is raised so a
+    caller can treat retrieval as successful and answer generation as a
+    ``partial`` outcome instead of encoding an error sentence as an answer.
+    """
+
+
+class StructuredSearchUnavailable(SearchError):
+    """Raised when every required structured-retrieval source is unavailable.
+
+    Carries a transport-safe :class:`~core.outcomes.FailureInfo` so callers can
+    surface ``unavailable`` (not ``empty``) without inspecting the underlying
+    provider exception.
+    """
+
+    def __init__(self, failure, message: str = "Structured search unavailable"):
+        super().__init__(message)
+        self.failure = failure
+
+
 class UnexpectedError(IngestError):
     """Fallback for unexpected exceptions raised during ingestion."""
 

@@ -574,7 +574,33 @@ Regression coverage:
   passes.
 
 Phase 1 is complete. Correlation references now reach both query and sign-in
-failure surfaces. Typed retrieval-source outcome migration remains Phase 2.
+failure surfaces.
+
+## Phase 2 update (completed 2026-07-20)
+
+Semantic and vector-backed structured retrieval now preserve typed per-source
+health through aggregation, handlers, routing, caching, and Streamlit rendering.
+All-index outages surface as `unavailable`/`failed`; mixed healthy and failed
+sources surface as `partial`; healthy zero matches surface as `empty`; and low
+scores are evaluated only after source health is known. Required/optional source
+classification fails safe for unclassified indexes.
+
+Answer generation is a separate stage. Provider failures and empty model
+responses retain retrieved result cards as a `partial` direct-results fallback,
+while non-retryable embedding configuration/authentication failures are distinct
+from transient embedding outages. The legacy tuple APIs remain available, but
+unexpected router arity now raises a typed contract error rather than returning
+a false empty result.
+
+`QueryManager` caches only `success`, genuine `empty`, and `low_confidence`
+outcomes. The manager and legacy Streamlit paths render hard failures as notices
+and show concise incomplete-coverage warnings for partial/degraded answers.
+
+Regression coverage includes the four Phase 2 exit criteria, semantic and
+structured source aggregation, cache eligibility, non-retryable embedding
+classification, empty model responses, and the router contract guard. The full
+suite reports 506 passed and 5 platform/capability skips when run with a
+workspace-local pytest temp directory; `ruff check .` also passes.
 
 ## Delivery plan
 

@@ -10,11 +10,16 @@ Provides:
 - execute()              unified router for SearchInstructions
 """
 
-from .maintenance_search import maintenance_search
-from .planon_search import planon_search
+from .maintenance_search import maintenance_search, maintenance_search_with_outcome
+from .planon_search import planon_search, planon_search_with_outcome
+from .retrieval_outcomes import (
+    SemanticOutcome,
+    StructuredAnswerOutcome,
+    aggregate_source_outcomes,
+)
 
 # Router for SearchInstructions
-from .search_router import execute
+from .search_router import execute, execute_with_outcome
 
 # Utilities (optional re-export)
 from .search_utils import (
@@ -24,13 +29,20 @@ from .search_utils import (
     get_effective_score,
     search_one_index,
 )
-from .semantic_search import semantic_search
+from .semantic_search import semantic_search, semantic_search_with_outcome
 
 __all__ = [
     "semantic_search",
+    "semantic_search_with_outcome",
+    "SemanticOutcome",
+    "StructuredAnswerOutcome",
+    "aggregate_source_outcomes",
     "planon_search",
+    "planon_search_with_outcome",
     "maintenance_search",
+    "maintenance_search_with_outcome",
     "execute",
+    "execute_with_outcome",
     "search_one_index",
     "deduplicate_results",
     "apply_doc_type_boost",

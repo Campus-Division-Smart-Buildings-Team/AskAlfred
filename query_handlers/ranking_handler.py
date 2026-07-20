@@ -9,13 +9,14 @@ Delegates ranking logic to counting_queries.generate_ranking_answer.
 
 import re
 
+from core.outcomes import OutcomeStatus
 from query_core.query_context import QueryContext
 from query_core.query_result import QueryResult
 
 # First party import
 from query_core.query_types import QueryType
 from search_core.structured_queries import (
-    generate_ranking_answer,
+    generate_ranking_answer_with_outcome,
     is_counting_query,
     is_maintenance_query,
     is_property_condition_query,
@@ -25,6 +26,7 @@ from security.log_sanitiser import sanitise_error
 
 # Local import
 from .base_handler import BaseQueryHandler
+from .handler_failures import handler_failed_result
 
 
 class RankingHandler(BaseQueryHandler):
@@ -120,12 +122,13 @@ class RankingHandler(BaseQueryHandler):
         query_text = context.query.strip()
 
         try:
-            answer = generate_ranking_answer(
+            outcome = generate_ranking_answer_with_outcome(
                 query_text,
                 access_filter=context.access_filter,
             )
 
-            if not answer:
+            answer = outcome.answer
+            if not answer and outcome.status is OutcomeStatus.EMPTY:
                 answer = (
                     "I couldn't generate a ranking for your query. "
                     "Try specifying whether you want gross or net area."
@@ -137,20 +140,22 @@ class RankingHandler(BaseQueryHandler):
                 results=[],
                 handler_used="RankingHandler",
                 query_type=self.query_type.value,
-                metadata={"structured_response": True},
+                status=outcome.status,
+                failure=outcome.failure,
+                degraded_components=outcome.degraded_components,
+                source_outcomes=outcome.source_outcomes,
+                metadata={
+                    "structured_response": True,
+                    "status": outcome.status.value,
+                },
             )
-
         except Exception as e:
             self.logger.error(
                 "Ranking handler error: %s", sanitise_error(e), exc_info=False
             )
-
-            return QueryResult(
-                query=query_text,
-                answer="Sorry — I encountered an error while generating the ranking.",
-                results=[],
-                success=False,
-                handler_used="RankingHandler",
-                query_type=self.query_type.value,
-                metadata={"error": "ranking_handler_error"},
+            return handler_failed_result(
+                query_text,
+                "RankingHandler",
+                self.query_type.value,
+                error_code="ranking_handler_error",
             )

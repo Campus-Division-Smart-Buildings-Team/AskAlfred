@@ -17,6 +17,11 @@ REGISTER_PATH = REPO_ROOT / "plan" / "failure_and_degraded_states_plan.md"
 
 # Phase 0 freezes the existing broad-exception/silent-sentinel debt so later
 # phases can remove it incrementally. Any new fingerprint fails this test.
+#
+# Phase 2 removed the semantic and structured retrieval entries as those paths
+# migrated to typed source outcomes (search_one_index_with_outcome,
+# _query_index_with_outcome, and per-source embedding outcomes). The best-effort
+# `_query_index_with_batches` wrapper still returns [] and remains frozen.
 SILENT_FAILURE_BASELINE = {
     "auth/auth_manager.py:_try_complete_authentication",
     "building/alias_override.py:validate_overrides",
@@ -29,12 +34,7 @@ SILENT_FAILURE_BASELINE = {
     "core/pinecone_utils.py:query_all_chunks",
     "ingest/document_content.py:extract_maintenance_csv",
     "ingest/upsert_handler.py:Dispatcher._execute_inline",
-    "search_core/search_utils.py:search_one_index",
-    "search_core/search_utils.py:search_one_index._query_namespace",
-    "search_core/semantic_search.py:semantic_search._vector_for",
     "search_core/structured_queries.py:_query_index_with_batches",
-    "search_core/structured_queries.py:generate_counting_answer.query_single_index_for_counting",
-    "search_core/structured_queries.py:rank_buildings_by_area.query_single_index",
     "security/rate_limiter.py:RedisRateLimiter.acquire_lease",
     "security/rate_limiter.py:RedisRateLimiter.release_lease",
 }

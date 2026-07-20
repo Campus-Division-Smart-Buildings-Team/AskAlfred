@@ -13,7 +13,7 @@ import logging
 import re
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Optional, cast
+from typing import Any, Callable, Optional, cast
 
 from auth.access_control import (
     combine_pinecone_filters,
@@ -32,9 +32,19 @@ from config import (
     get_display_namespace,
     normalise_ns,
 )
+from core.alfred_exceptions import StructuredSearchUnavailable
+from core.failure_codes import FailureCode
+from core.outcomes import FailureInfo, OutcomeStatus, SourceOutcome
 from core.pinecone_utils import open_index, query_all_chunks
 from domain.maintenance_utils import _plural
 from search_core.generate_maintenance_answers import generate_maintenance_answer
+from search_core.retrieval_outcomes import (
+    STRUCTURED_RETRIEVAL_COMPONENT,
+    StructuredAnswerOutcome,
+    raise_if_backend_unavailable,
+    structured_answer_outcome,
+    unavailable_structured_answer,
+)
 from security.input_validator import sanitise_pinecone_filter, validate_building_name
 from security.log_sanitiser import sanitise_error
 from ui.emojis import (
@@ -246,6 +256,8 @@ def query_property_by_condition(
     building_filter: Optional[str] = None,
     index_names: Optional[list[str]] = None,
     access_filter: Optional[dict[str, Any]] = None,
+    *,
+    _source_outcomes: list[SourceOutcome] | None = None,
 ) -> dict[str, Any]:
     """
     Query buildings by property condition from the 'planon_data' namespace.
@@ -264,14 +276,16 @@ def query_property_by_condition(
         # Use the existing building filter creation function
         filter_dict = create_building_filter(building_filter)
 
+    condition_outcomes: list[SourceOutcome] = []
     for idx_name in index_names:
-        matches = _query_index_with_batches(
+        matches, outcome = _query_index_with_outcome(
             idx_name=idx_name,
             namespace=namespace,
             filter_dict=filter_dict,
             access_filter=access_filter,
             top_k=DEFAULT_BATCH_TOP_K,
         )
+        condition_outcomes.append(outcome)
 
         for match in matches:
             metadata = match.get("metadata", {}) or {}
@@ -291,6 +305,10 @@ def query_property_by_condition(
                     }
                 )
 
+    if _source_outcomes is not None:
+        _source_outcomes.extend(condition_outcomes)
+    _raise_if_structured_backend_down(condition_outcomes)
+
     return {
         "condition_filter": condition,
         "matching_buildings": matching_buildings,
@@ -304,6 +322,8 @@ def rank_buildings_by_area(
     order: str = "desc",
     limit: Optional[int] = None,
     access_filter: Optional[dict[str, Any]] = None,
+    *,
+    _source_outcomes: list[SourceOutcome] | None = None,
 ) -> dict[str, Any]:
     """
     Rank buildings by gross or net area from Planon data vectors in Pinecone.
@@ -343,19 +363,17 @@ def rank_buildings_by_area(
         namespace,
     )
 
-    def query_single_index(idx_name: str) -> list[dict[str, Any]]:
-        """Query a single index and return matches."""
-        try:
-            return _query_index_with_batches(
-                idx_name=idx_name,
-                namespace=namespace,
-                filter_dict=None,
-                access_filter=access_filter,
-                top_k=DEFAULT_BATCH_TOP_K,
-            )
-        except Exception as e:
-            logging.error("Failed to query index %s: %s", idx_name, sanitise_error(e))
-            return []
+    ranking_outcomes: list[SourceOutcome] = []
+
+    def query_single_index(idx_name: str) -> tuple[list[dict[str, Any]], SourceOutcome]:
+        """Query a single index and return ``(matches, source_outcome)``."""
+        return _query_index_with_outcome(
+            idx_name=idx_name,
+            namespace=namespace,
+            filter_dict=None,
+            access_filter=access_filter,
+            top_k=DEFAULT_BATCH_TOP_K,
+        )
 
     # Use ThreadPoolExecutor for parallel index queries
     # Rate limit: max 3 concurrent workers to prevent resource exhaustion
@@ -368,7 +386,25 @@ def rank_buildings_by_area(
         for future in as_completed(future_to_idx):
             idx_name = future_to_idx[future]
             try:
-                matches = future.result()
+                matches, outcome = future.result()
+            except Exception as e:
+                logging.error(
+                    "Failed to query index %s: %s", idx_name, sanitise_error(e)
+                )
+                ranking_outcomes.append(
+                    SourceOutcome(
+                        source=idx_name,
+                        status=OutcomeStatus.UNAVAILABLE,
+                        failure=FailureInfo.from_code(
+                            FailureCode.STRUCTURED_SEARCH_UNAVAILABLE,
+                            STRUCTURED_RETRIEVAL_COMPONENT,
+                        ),
+                    )
+                )
+                continue
+
+            ranking_outcomes.append(outcome)
+            try:
                 logging.info(
                     "%s Index '%s': Retrieved %d matches",
                     EMOJI_TICK,
@@ -410,6 +446,12 @@ def rank_buildings_by_area(
                         }
             except Exception as e:
                 logging.error("Error processing results from index %s: %s", idx_name, e)
+
+    if _source_outcomes is not None:
+        _source_outcomes.extend(ranking_outcomes)
+
+    # A total structured-retrieval outage must be `unavailable`, not "no data".
+    _raise_if_structured_backend_down(ranking_outcomes)
 
     total = len(buildings)
     logging.info("%s Total buildings with valid area data: %d", EMOJI_CLIPBOARD, total)
@@ -509,7 +551,7 @@ def _dedupe_matches_by_key(matches):
     return deduped
 
 
-def _query_index_with_batches(
+def _fetch_index_matches(
     idx_name: str,
     namespace: Optional[str],
     filter_dict: Optional[dict[str, Any]] = None,
@@ -518,65 +560,124 @@ def _query_index_with_batches(
 ) -> list[dict[str, Any]]:
     """
     Query a Pinecone index in batches with optional filters.
-    Returns all matches from all batches combined and deduplicated.
+
+    Raises on backend failure (no silent empty). Callers that want a typed
+    source outcome should use :func:`_query_index_with_outcome`; callers that
+    only want a best-effort list use :func:`_query_index_with_batches`.
     """
     namespace = normalise_ns(namespace)
     display_namespace = get_display_namespace(namespace)
 
+    idx = open_index(idx_name)
+    stats = idx.describe_index_stats()
+    ns_stats = stats.get("namespaces", {}).get(namespace, {})
+    total_vecs = ns_stats.get("vector_count", 0)
+
+    if total_vecs == 0:
+        logging.debug(
+            "namespace=%r raw_stats_keys=%s",
+            namespace,
+            stats.get("namespaces", {}).keys(),
+        )
+        logging.info("[%s] namespace=%s has 0 vectors", idx_name, namespace)
+        return []
+
+    safe_top_k = min(top_k, MAX_SAFE_TOP_K)
+    logging.info(
+        "[%s] Fetching up to %d vectors from namespace=%s",
+        idx_name,
+        safe_top_k,
+        display_namespace,
+    )
+    # Use zero vector to fetch all (dimension already in stats from above)
+    dim = stats.get("dimension", 1536)
+    zero_vec = [0.0] * dim
+
+    combined_filter = combine_pinecone_filters(filter_dict, access_filter)
+
+    all_matches = query_all_chunks(
+        index=idx,
+        namespace=namespace,
+        query_vector=zero_vec,
+        filter_dict=combined_filter,
+        top_k=safe_top_k,
+        include_metadata=True,
+    )
+
+    deduped = _dedupe_matches_by_key(all_matches)
+    authorised = filter_authorized_structured_matches(
+        deduped,
+        access_filter=access_filter,
+    )
+    logging.info(
+        "[%s] Retrieved %d authorised unique matches (from %d total)",
+        idx_name,
+        len(authorised),
+        len(all_matches),
+    )
+
+    return authorised
+
+
+def _query_index_with_batches(
+    idx_name: str,
+    namespace: Optional[str],
+    filter_dict: Optional[dict[str, Any]] = None,
+    access_filter: Optional[dict[str, Any]] = None,
+    top_k: int = DEFAULT_BATCH_TOP_K,
+) -> list[dict[str, Any]]:
+    """
+    Best-effort index query returning matches only (empty list on failure).
+
+    Retained for callers that do not aggregate source health; callers that must
+    distinguish a backend outage from genuinely empty data should use
+    :func:`_query_index_with_outcome`.
+    """
     try:
-        idx = open_index(idx_name)
-        stats = idx.describe_index_stats()
-        ns_stats = stats.get("namespaces", {}).get(namespace, {})
-        total_vecs = ns_stats.get("vector_count", 0)
-
-        if total_vecs == 0:
-            logging.debug(
-                "namespace=%r raw_stats_keys=%s",
-                namespace,
-                stats.get("namespaces", {}).keys(),
-            )
-            logging.info("[%s] namespace=%s has 0 vectors", idx_name, namespace)
-            return []
-
-        safe_top_k = min(top_k, MAX_SAFE_TOP_K)
-        logging.info(
-            "[%s] Fetching up to %d vectors from namespace=%s",
-            idx_name,
-            safe_top_k,
-            display_namespace,
+        return _fetch_index_matches(
+            idx_name, namespace, filter_dict, access_filter, top_k
         )
-        # Use zero vector to fetch all (dimension already in stats from above)
-        dim = stats.get("dimension", 1536)
-        zero_vec = [0.0] * dim
-
-        combined_filter = combine_pinecone_filters(filter_dict, access_filter)
-
-        all_matches = query_all_chunks(
-            index=idx,
-            namespace=namespace,
-            query_vector=zero_vec,
-            filter_dict=combined_filter,
-            top_k=safe_top_k,
-            include_metadata=True,
-        )
-
-        deduped = _dedupe_matches_by_key(all_matches)
-        authorised = filter_authorized_structured_matches(
-            deduped,
-            access_filter=access_filter,
-        )
-        logging.info(
-            "[%s] Retrieved %d authorised unique matches (from %d total)",
-            idx_name,
-            len(authorised),
-            len(all_matches),
-        )
-
-        return authorised
-
     except Exception as e:
         logging.error("Error querying %s: %s", idx_name, sanitise_error(e))
         return []
+
+
+def _query_index_with_outcome(
+    idx_name: str,
+    namespace: Optional[str],
+    filter_dict: Optional[dict[str, Any]] = None,
+    access_filter: Optional[dict[str, Any]] = None,
+    top_k: int = DEFAULT_BATCH_TOP_K,
+) -> tuple[list[dict[str, Any]], SourceOutcome]:
+    """Query one structured index, returning ``(matches, source_outcome)``."""
+    try:
+        matches = _fetch_index_matches(
+            idx_name, namespace, filter_dict, access_filter, top_k
+        )
+        status = OutcomeStatus.SUCCESS if matches else OutcomeStatus.EMPTY
+        return matches, SourceOutcome(
+            source=idx_name, status=status, result_count=len(matches)
+        )
+    except Exception as e:  # pylint: disable=broad-except
+        logging.error("Error querying %s: %s", idx_name, sanitise_error(e))
+        return [], SourceOutcome(
+            source=idx_name,
+            status=OutcomeStatus.UNAVAILABLE,
+            failure=FailureInfo.from_code(
+                FailureCode.STRUCTURED_SEARCH_UNAVAILABLE,
+                STRUCTURED_RETRIEVAL_COMPONENT,
+                safe_context={"phase": "index_query"},
+            ),
+        )
+
+
+def _raise_if_structured_backend_down(outcomes: list[SourceOutcome]) -> None:
+    """Raise when every required structured-retrieval source failed."""
+    raise_if_backend_unavailable(
+        outcomes,
+        component=STRUCTURED_RETRIEVAL_COMPONENT,
+        backend_code=FailureCode.STRUCTURED_SEARCH_UNAVAILABLE,
+    )
 
 
 def _query_index_with_fallback(
@@ -928,6 +1029,9 @@ def create_document_building_filter(building_name: str) -> dict[str, Any]:
 def generate_property_condition_answer(
     query: str,
     access_filter: Optional[dict[str, Any]] = None,
+    *,
+    _source_outcomes: list[SourceOutcome] | None = None,
+    _matched_counts: list[int] | None = None,
 ) -> Optional[str]:
     # condition = normalise_property_condition(query)
     # if not condition:
@@ -950,15 +1054,21 @@ def generate_property_condition_answer(
     if building and not condition:
         # Query Planon vectors for just this building, then read Property condition
         matches_found = []
+        case_a_outcomes: list[SourceOutcome] = []
         for idx_name in TARGET_INDEXES:
-            matches = _query_index_with_batches(
+            matches, outcome = _query_index_with_outcome(
                 idx_name=idx_name,
                 namespace="planon_data",
                 filter_dict=create_building_filter(building),
                 access_filter=access_filter,
                 top_k=DEFAULT_BATCH_TOP_K,
             )
+            case_a_outcomes.append(outcome)
             matches_found.extend(matches)
+
+        if _source_outcomes is not None:
+            _source_outcomes.extend(case_a_outcomes)
+        _raise_if_structured_backend_down(case_a_outcomes)
 
         # Extract first non-empty property condition (dedupe-ish)
         prop_condition = None
@@ -970,11 +1080,15 @@ def generate_property_condition_answer(
                 break
 
         if not prop_condition:
+            if _matched_counts is not None:
+                _matched_counts.append(0)
             return (
                 f"I couldn't find a property condition for **{building}** "
                 "in the available property records."
             )
 
+        if _matched_counts is not None:
+            _matched_counts.append(1)
         return f"The property condition of **{building}** is **{prop_condition}**."
     # ------------------------------------------------------------------
     # CASE B: No building and no condition → prompt user (unchanged behavior)
@@ -991,8 +1105,11 @@ def generate_property_condition_answer(
             condition,
             building_filter=building,
             access_filter=access_filter,
+            _source_outcomes=_source_outcomes,
         )
         building_count = results["building_count"]
+        if _matched_counts is not None:
+            _matched_counts.append(building_count)
 
         # If user asked about a specific building + yes/no intent → return boolean answer
         if building and yes_no_intent:
@@ -1060,6 +1177,9 @@ def generate_property_condition_answer(
 def generate_ranking_answer(
     query: str,
     access_filter: Optional[dict[str, Any]] = None,
+    *,
+    _source_outcomes: list[SourceOutcome] | None = None,
+    _matched_counts: list[int] | None = None,
 ) -> Optional[str]:
     """
     Generate an answer for building ranking queries (by area).
@@ -1098,10 +1218,13 @@ def generate_ranking_answer(
         order=order,
         limit=limit,
         access_filter=access_filter,
+        _source_outcomes=_source_outcomes,
     )
 
     total_buildings = results.get("total_buildings", 0)
     ranked = results.get("results", [])
+    if _matched_counts is not None:
+        _matched_counts.append(len(ranked))
 
     logging.info(
         "%s Results: total_buildings=%d, ranked_results=%d",
@@ -1162,14 +1285,32 @@ def generate_ranking_answer(
 def generate_counting_answer(
     query: str,
     access_filter: Optional[dict[str, Any]] = None,
+    *,
+    _source_outcomes: list[SourceOutcome] | None = None,
+    _matched_counts: list[int] | None = None,
 ) -> Optional[str]:
     # Route to other handlers first
     if is_maintenance_query(query):
-        return generate_maintenance_answer(query, access_filter=access_filter)
+        return generate_maintenance_answer(
+            query,
+            access_filter=access_filter,
+            _source_outcomes=_source_outcomes,
+            _matched_counts=_matched_counts,
+        )
     if is_property_condition_query(query):
-        return generate_property_condition_answer(query, access_filter=access_filter)
+        return generate_property_condition_answer(
+            query,
+            access_filter=access_filter,
+            _source_outcomes=_source_outcomes,
+            _matched_counts=_matched_counts,
+        )
     if is_ranking_query(query):
-        return generate_ranking_answer(query, access_filter=access_filter)
+        return generate_ranking_answer(
+            query,
+            access_filter=access_filter,
+            _source_outcomes=_source_outcomes,
+            _matched_counts=_matched_counts,
+        )
     if not is_counting_query(query):
         return None
 
@@ -1199,19 +1340,19 @@ def generate_counting_answer(
     building_set = set()
     keys_by_bldg = defaultdict(set)
 
-    def query_single_index_for_counting(idx_name: str) -> list[dict[str, Any]]:
-        """Query a single index for counting and return matches."""
-        try:
-            ns = _route_namespace(doc_type)
-            return _query_index_with_batches(
-                idx_name,
-                ns,
-                filter_dict,
-                access_filter,
-            )
-        except Exception as e:
-            logging.error("Failed to query index %s for counting: %s", idx_name, e)
-            return []
+    counting_outcomes: list[SourceOutcome] = []
+
+    def query_single_index_for_counting(
+        idx_name: str,
+    ) -> tuple[list[dict[str, Any]], SourceOutcome]:
+        """Query a single index for counting, returning ``(matches, outcome)``."""
+        ns = _route_namespace(doc_type)
+        return _query_index_with_outcome(
+            idx_name,
+            ns,
+            filter_dict,
+            access_filter,
+        )
 
     # Use ThreadPoolExecutor for parallel index queries
     # Rate limit: max 3 concurrent workers to prevent resource exhaustion and DoS
@@ -1225,7 +1366,23 @@ def generate_counting_answer(
         for future in as_completed(future_to_idx):
             idx_name = future_to_idx[future]
             try:
-                matches = future.result()
+                matches, outcome = future.result()
+            except Exception as e:
+                logging.error("Failed to query index %s for counting: %s", idx_name, e)
+                counting_outcomes.append(
+                    SourceOutcome(
+                        source=idx_name,
+                        status=OutcomeStatus.UNAVAILABLE,
+                        failure=FailureInfo.from_code(
+                            FailureCode.STRUCTURED_SEARCH_UNAVAILABLE,
+                            STRUCTURED_RETRIEVAL_COMPONENT,
+                        ),
+                    )
+                )
+                continue
+
+            counting_outcomes.append(outcome)
+            try:
                 for m in matches:
                     md = m.get("metadata", {}) or {}
                     b = md.get("canonical_building_name") or md.get(
@@ -1247,8 +1404,16 @@ def generate_counting_answer(
                     "Error processing counting results from index %s: %s", idx_name, e
                 )
 
+    if _source_outcomes is not None:
+        _source_outcomes.extend(counting_outcomes)
+
+    # A total structured-retrieval outage must be `unavailable`, not "no data".
+    _raise_if_structured_backend_down(counting_outcomes)
+
     buildings = sorted(building_set)
     count = len(building_set)
+    if _matched_counts is not None:
+        _matched_counts.append(count)
 
     # --- Build Response
     if doc_type:
@@ -1281,3 +1446,61 @@ def generate_counting_answer(
         return f"**{building}** appears in **{count} buildings in the system.**"
 
     return f"**{count} unique buildings** are available in the property records."
+
+
+def _generate_structured_answer_with_outcome(
+    generator: Callable[..., Optional[str]],
+    query: str,
+    access_filter: Optional[dict[str, Any]],
+) -> StructuredAnswerOutcome:
+    """Run a formatted structured query while retaining source outcomes."""
+
+    source_outcomes: list[SourceOutcome] = []
+    matched_counts: list[int] = []
+    try:
+        answer = generator(
+            query,
+            access_filter=access_filter,
+            _source_outcomes=source_outcomes,
+            _matched_counts=matched_counts,
+        )
+    except StructuredSearchUnavailable as exc:
+        return unavailable_structured_answer(exc.failure, source_outcomes)
+    return structured_answer_outcome(
+        answer,
+        source_outcomes,
+        empty=bool(matched_counts) and matched_counts[-1] == 0,
+    )
+
+
+def generate_property_condition_answer_with_outcome(
+    query: str,
+    access_filter: Optional[dict[str, Any]] = None,
+) -> StructuredAnswerOutcome:
+    """Return a property-condition answer and its retrieval health."""
+
+    return _generate_structured_answer_with_outcome(
+        generate_property_condition_answer, query, access_filter
+    )
+
+
+def generate_ranking_answer_with_outcome(
+    query: str,
+    access_filter: Optional[dict[str, Any]] = None,
+) -> StructuredAnswerOutcome:
+    """Return a ranking answer and its retrieval health."""
+
+    return _generate_structured_answer_with_outcome(
+        generate_ranking_answer, query, access_filter
+    )
+
+
+def generate_counting_answer_with_outcome(
+    query: str,
+    access_filter: Optional[dict[str, Any]] = None,
+) -> StructuredAnswerOutcome:
+    """Return a counting answer and its retrieval health."""
+
+    return _generate_structured_answer_with_outcome(
+        generate_counting_answer, query, access_filter
+    )

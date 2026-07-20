@@ -32,6 +32,30 @@ TEST_CASES = [
 ]
 
 
+@pytest.fixture
+def stub_retrieval_handlers(monkeypatch):
+    """Keep routing tests focused on routing, not live retrieval services."""
+
+    monkeypatch.setattr(QueryManager, "_run_preprocessors", lambda self, context: None)
+
+    def fake_handle(self, context):
+        return QueryResult(
+            query=context.query,
+            answer=f"{self.query_type.value} response",
+            handler_used=self.__class__.__name__,
+            query_type=self.query_type.value,
+        )
+
+    for handler_path in (
+        "query_handlers.counting_handler.CountingHandler",
+        "query_handlers.maintenance_handler.MaintenanceHandler",
+        "query_handlers.property_handler.PropertyHandler",
+        "query_handlers.ranking_handler.RankingHandler",
+        "query_handlers.semantic_search_handler.SemanticSearchHandler",
+    ):
+        monkeypatch.setattr(f"{handler_path}.handle", fake_handle)
+
+
 class TestQueryManager:
     """Test the Query Manager."""
 
@@ -40,22 +64,8 @@ class TestQueryManager:
         self.manager = QueryManager()
 
     @pytest.mark.parametrize("query,expected_type", TEST_CASES)
-    def test_query_routing(self, query, expected_type, monkeypatch):
+    def test_query_routing(self, query, expected_type, stub_retrieval_handlers):
         """Test that queries route to correct handlers."""
-
-        # Routing tests must not execute the live maintenance path (Pinecone).
-        def fake_maintenance_handle(self, context):
-            return QueryResult(
-                query=context.query,
-                answer="maintenance response",
-                handler_used="MaintenanceHandler",
-                query_type=QueryType.MAINTENANCE.value,
-            )
-
-        monkeypatch.setattr(
-            "query_handlers.maintenance_handler.MaintenanceHandler.handle",
-            fake_maintenance_handle,
-        )
 
         result = self.manager.process_query(query)
 
@@ -85,7 +95,7 @@ class TestQueryManager:
         assert result is not None
         assert isinstance(result.answer, str)
 
-    def test_statistics(self):
+    def test_statistics(self, stub_retrieval_handlers):
         """Test statistics tracking."""
         # Process some queries
         queries = ["hello", "how many buildings?", "rank buildings by area"]
@@ -97,7 +107,8 @@ class TestQueryManager:
         stats = self.manager.get_statistics()
         assert stats["total_queries"] == len(queries)
         assert len(stats["query_types"]) > 0
-        assert stats["avg_time_ms"] > 0
+        assert isinstance(stats["avg_time_ms"], float)
+        assert stats["avg_time_ms"] >= 0
 
     def test_cache_entries_do_not_share_mutable_state(self):
         """Stored and returned cache values are independent deep copies."""
@@ -130,7 +141,7 @@ class TestQueryManager:
 class TestBackwardCompatibility:
     """Test that results match old system format."""
 
-    def test_result_format(self):
+    def test_result_format(self, stub_retrieval_handlers):
         """Test QueryResult has all expected fields."""
 
         query = "What is the BMS configuration?"

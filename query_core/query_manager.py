@@ -52,6 +52,16 @@ from ui.emojis import EMOJI_CAUTION, EMOJI_CROSS, EMOJI_TICK, EMOJI_TIME
 # FOLLOWUP CONFIGs
 # ============================================================================
 
+# Only these terminal outcomes are safe to serve from cache. Transient failures
+# (failed/unavailable) and incomplete/degraded results must not be replayed.
+_CACHEABLE_STATUSES = frozenset(
+    {
+        OutcomeStatus.SUCCESS,
+        OutcomeStatus.EMPTY,
+        OutcomeStatus.LOW_CONFIDENCE,
+    }
+)
+
 FOLLOWUP_PREFIXES = {
     "and",
     "also",
@@ -479,8 +489,10 @@ class QueryManager:
             success=query_result.success,
         )
 
-        # Cache result
-        if self.cache_enabled:
+        # Cache result. Only cache trustworthy terminal outcomes: a transient
+        # failed/unavailable/partial/degraded result must not be replayed from
+        # cache until its TTL expires (plan section A / ROUTE-12).
+        if self.cache_enabled and query_result.status in _CACHEABLE_STATUSES:
             self._store_cached_result(cache_key, query_result)
 
         # ---------------------------------------------------
@@ -918,9 +930,9 @@ def process_query_unified(
 
     return (
         query_result.results,
-        query_result.answer,
-        query_result.publication_date_info,
-        query_result.score_too_low,
+        query_result.answer or "",
+        query_result.publication_date_info or "",
+        bool(query_result.score_too_low),
     )
 
 

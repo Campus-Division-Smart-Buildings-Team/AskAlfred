@@ -11,6 +11,9 @@ from building.utils import (
 )
 from building.validation import sanitise_building_candidate
 from config import TARGET_INDEXES
+from core.alfred_exceptions import StructuredSearchUnavailable
+from core.failure_codes import FailureCode
+from core.outcomes import FailureInfo, OutcomeStatus, SourceOutcome
 from core.pinecone_utils import open_index
 from domain.maintenance_utils import (
     aggregate_request_metrics,
@@ -20,6 +23,14 @@ from domain.maintenance_utils import (
     is_request_metrics,
     parse_maintenance_query,
 )
+from search_core.retrieval_outcomes import (
+    STRUCTURED_RETRIEVAL_COMPONENT,
+    StructuredAnswerOutcome,
+    raise_if_backend_unavailable,
+    structured_answer_outcome,
+    unavailable_structured_answer,
+)
+from security.log_sanitiser import sanitise_error
 from ui.emojis import (
     EMOJI_BRAIN,
     EMOJI_BUILDING,
@@ -36,6 +47,9 @@ def generate_maintenance_answer(
     query: str,
     building_override: str | None = None,
     access_filter: Optional[dict[str, Any]] = None,
+    *,
+    _source_outcomes: list[SourceOutcome] | None = None,
+    _matched_counts: list[int] | None = None,
 ) -> Optional[str]:
     """
     Handles maintenance queries using building-level vectors in Pinecone.
@@ -101,41 +115,78 @@ def generate_maintenance_answer(
     logging.info("%s Using Pinecone namespace: %s", EMOJI_SEARCH, namespace)
 
     matches: list[dict[str, Any]] = []
+    maintenance_outcomes: list[SourceOutcome] = []
     for idx_name in TARGET_INDEXES:
-        idx = open_index(idx_name)
-        ns_details = idx.describe_index_stats().get("namespaces", {})
-        if namespace not in ns_details:
-            logging.warning(
-                "%s Namespace '%s' not found in index '%s' — available: %s",
-                EMOJI_CAUTION,
-                namespace,
-                idx_name,
-                list(ns_details.keys()),
+        try:
+            idx = open_index(idx_name)
+            ns_details = idx.describe_index_stats().get("namespaces", {})
+            if namespace not in ns_details:
+                logging.warning(
+                    "%s Namespace '%s' not found in index '%s' — available: %s",
+                    EMOJI_CAUTION,
+                    namespace,
+                    idx_name,
+                    list(ns_details.keys()),
+                )
+                # A missing namespace is healthy-but-empty, not an outage.
+                maintenance_outcomes.append(
+                    SourceOutcome(source=idx_name, status=OutcomeStatus.EMPTY)
+                )
+                continue
+
+            # --- Query Pinecone for all vectors in namespace ---
+            dim = idx.describe_index_stats().get("dimension", 1536)
+            zero_vec = [0.0] * dim
+
+            raw: Any = idx.query(
+                vector=zero_vec,
+                top_k=2000,
+                namespace=namespace,
+                include_metadata=True,
+                filter=access_filter if access_filter else None,
             )
-            continue
+            response = (
+                raw.to_dict() if hasattr(raw, "to_dict") else cast(dict[str, Any], raw)
+            )
+            index_matches = response.get("matches", [])
+            matches.extend(index_matches)
+            maintenance_outcomes.append(
+                SourceOutcome(
+                    source=idx_name,
+                    status=(
+                        OutcomeStatus.SUCCESS if index_matches else OutcomeStatus.EMPTY
+                    ),
+                    result_count=len(index_matches),
+                )
+            )
+            logging.info(
+                "%s Retrieved %d maintenance building vectors from Pinecone index '%s'",
+                EMOJI_CHART,
+                len(index_matches),
+                idx_name,
+            )
+        except Exception as e:  # pylint: disable=broad-except
+            logging.error(
+                "Failed to query maintenance index %s: %s",
+                idx_name,
+                sanitise_error(e),
+            )
+            maintenance_outcomes.append(
+                SourceOutcome(
+                    source=idx_name,
+                    status=OutcomeStatus.UNAVAILABLE,
+                    failure=FailureInfo.from_code(
+                        FailureCode.STRUCTURED_SEARCH_UNAVAILABLE,
+                        STRUCTURED_RETRIEVAL_COMPONENT,
+                    ),
+                )
+            )
 
-        # --- Query Pinecone for all vectors in namespace ---
-        dim = idx.describe_index_stats().get("dimension", 1536)
-        zero_vec = [0.0] * dim
+    if _source_outcomes is not None:
+        _source_outcomes.extend(maintenance_outcomes)
 
-        raw: Any = idx.query(
-            vector=zero_vec,
-            top_k=2000,
-            namespace=namespace,
-            include_metadata=True,
-            filter=access_filter if access_filter else None,
-        )
-        response = (
-            raw.to_dict() if hasattr(raw, "to_dict") else cast(dict[str, Any], raw)
-        )
-        index_matches = response.get("matches", [])
-        matches.extend(index_matches)
-        logging.info(
-            "%s Retrieved %d maintenance building vectors from Pinecone index '%s'",
-            EMOJI_CHART,
-            len(index_matches),
-            idx_name,
-        )
+    # A total maintenance-retrieval outage must be `unavailable`, not "no data".
+    raise_if_backend_unavailable(maintenance_outcomes)
 
     logging.info(
         "%s Retrieved %d maintenance building vectors from Pinecone (all target indexes)",
@@ -222,6 +273,8 @@ def generate_maintenance_answer(
     filtered = filter_maintenance_buildings(
         matches, building, category, priority, status
     )
+    if _matched_counts is not None:
+        _matched_counts.append(len(filtered))
     logging.info(
         "%s Filtered matches: %d (from %d total)",
         EMOJI_SEARCH,
@@ -429,4 +482,30 @@ def generate_maintenance_answer(
         total_records=total_records,
         query_type=query_type,
         limit=10,
+    )
+
+
+def generate_maintenance_answer_with_outcome(
+    query: str,
+    building_override: str | None = None,
+    access_filter: Optional[dict[str, Any]] = None,
+) -> StructuredAnswerOutcome:
+    """Generate a maintenance answer without discarding source health."""
+
+    source_outcomes: list[SourceOutcome] = []
+    matched_counts: list[int] = []
+    try:
+        answer = generate_maintenance_answer(
+            query,
+            building_override=building_override,
+            access_filter=access_filter,
+            _source_outcomes=source_outcomes,
+            _matched_counts=matched_counts,
+        )
+    except StructuredSearchUnavailable as exc:
+        return unavailable_structured_answer(exc.failure, source_outcomes)
+    return structured_answer_outcome(
+        answer,
+        source_outcomes,
+        empty=bool(matched_counts) and matched_counts[-1] == 0,
     )

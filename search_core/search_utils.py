@@ -18,6 +18,8 @@ from building.utils import (
     result_matches_building,
 )
 from config import SEARCH_ALL_NAMESPACES, TARGET_INDEXES, get_index_config
+from core.failure_codes import FailureCode
+from core.outcomes import FailureInfo, OutcomeStatus, SourceOutcome
 from core.pinecone_utils import (
     embed_texts,
     list_namespaces_for_index,
@@ -25,6 +27,11 @@ from core.pinecone_utils import (
     open_index,
     vector_query,
 )
+from search_core.retrieval_outcomes import (
+    RETRIEVAL_COMPONENT,
+    embedding_failure_outcome,
+)
+from security.log_sanitiser import sanitise_error
 
 # ============================================================================
 # CONSTANTS
@@ -142,7 +149,23 @@ def get_doc_type(hit: dict[str, Any]) -> str:
 _NAMESPACE_QUERY_MAX_WORKERS = 6
 
 
-def search_one_index(
+def _index_failure_outcome(
+    idx_name: str, code: FailureCode, phase: str
+) -> SourceOutcome:
+    """Build a typed unavailable :class:`SourceOutcome` for one index."""
+
+    return SourceOutcome(
+        source=idx_name,
+        status=OutcomeStatus.UNAVAILABLE,
+        failure=FailureInfo.from_code(
+            code,
+            RETRIEVAL_COMPONENT,
+            safe_context={"phase": phase},
+        ),
+    )
+
+
+def search_one_index_with_outcome(
     idx_name: str,
     query: str,
     k: int = 10,
@@ -150,20 +173,22 @@ def search_one_index(
     building_filter: Optional[str] = None,
     access_filter: Optional[dict[str, Any]] = None,
     query_vector: Optional[list[float]] = None,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], SourceOutcome]:
     """
-    Search a single index with building-aware filtering.
+    Search a single index, returning ``(hits, source_outcome)``.
 
-    Namespaces are queried concurrently with one shared query embedding.
-    Callers issuing several searches for the same query (e.g. staged
-    building-filtered then unfiltered passes) should embed once and pass
-    `query_vector` to avoid repeated embedding API calls.
+    The :class:`SourceOutcome` distinguishes an index-open outage, an embedding
+    outage, and per-namespace query failure so aggregation can produce
+    ``partial``/``unavailable`` instead of a silent empty result. Namespaces are
+    queried concurrently with one shared query embedding.
     """
     try:
         idx = open_index(idx_name)
-    except Exception as e:
-        logging.warning("Failed to open index '%s': %s", idx_name, e)
-        return []
+    except Exception as e:  # pylint: disable=broad-except
+        logging.warning("Failed to open index '%s': %s", idx_name, sanitise_error(e))
+        return [], _index_failure_outcome(
+            idx_name, FailureCode.SEARCH_INDEX_UNAVAILABLE, "index_open"
+        )
 
     # Get index config
     index_config = get_index_config(idx_name)
@@ -194,10 +219,14 @@ def search_one_index(
         try:
             query_vector = embed_texts([query], embed_model)[0]
         except Exception as e:  # pylint: disable=broad-except
-            logging.warning("Failed to embed query for index '%s': %s", idx_name, e)
-            return []
+            logging.warning(
+                "Failed to embed query for index '%s': %s",
+                idx_name,
+                sanitise_error(e),
+            )
+            return [], embedding_failure_outcome(idx_name, e)
 
-    def _query_namespace(ns: Optional[str]) -> list[dict[str, Any]]:
+    def _query_namespace(ns: Optional[str]) -> tuple[list[dict[str, Any]], bool]:
         ns_display = "(default)" if ns is None else ns
         logging.debug("Querying index '%s' in namespace: %s", idx_name, ns_display)
         try:
@@ -225,28 +254,91 @@ def search_one_index(
                 h["index"] = idx_name
                 h["namespace"] = ns
 
-            return hits
+            return hits, True
         except Exception as e:  # pylint: disable=broad-except
             logging.warning(
                 "Search failed for index='%s', namespace='%s': %s",
                 idx_name,
                 ns_display,
-                e,
+                sanitise_error(e),
             )
-            return []
+            return [], False
 
     # Each namespace query is an independent network round-trip; running them
     # serially used to dominate query latency once several namespaces existed.
     all_hits: list[dict[str, Any]] = []
-    if len(namespaces) == 1:
-        all_hits.extend(_query_namespace(namespaces[0]))
+    failed_namespaces = 0
+    total_namespaces = len(namespaces)
+    if total_namespaces == 1:
+        hits, ok = _query_namespace(namespaces[0])
+        all_hits.extend(hits)
+        if not ok:
+            failed_namespaces += 1
     else:
-        max_workers = min(len(namespaces), _NAMESPACE_QUERY_MAX_WORKERS)
+        max_workers = min(total_namespaces, _NAMESPACE_QUERY_MAX_WORKERS)
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            for hits in executor.map(_query_namespace, namespaces):
+            for hits, ok in executor.map(_query_namespace, namespaces):
                 all_hits.extend(hits)
+                if not ok:
+                    failed_namespaces += 1
 
-    return all_hits
+    if failed_namespaces == 0:
+        status = OutcomeStatus.SUCCESS if all_hits else OutcomeStatus.EMPTY
+        return all_hits, SourceOutcome(
+            source=idx_name, status=status, result_count=len(all_hits)
+        )
+
+    # A namespace query failed: the index is fully unavailable when every
+    # namespace failed, otherwise partial with whatever hits succeeded.
+    namespace_failure = FailureInfo.from_code(
+        FailureCode.SEARCH_NAMESPACE_UNAVAILABLE,
+        RETRIEVAL_COMPONENT,
+        safe_context={
+            "phase": "namespace_query",
+            "failed_namespaces": failed_namespaces,
+            "total_namespaces": total_namespaces,
+        },
+    )
+    if failed_namespaces >= total_namespaces:
+        return all_hits, SourceOutcome(
+            source=idx_name,
+            status=OutcomeStatus.UNAVAILABLE,
+            result_count=len(all_hits),
+            failure=namespace_failure,
+        )
+    return all_hits, SourceOutcome(
+        source=idx_name,
+        status=OutcomeStatus.PARTIAL,
+        result_count=len(all_hits),
+        failure=namespace_failure,
+    )
+
+
+def search_one_index(
+    idx_name: str,
+    query: str,
+    k: int = 10,
+    embed_model: Optional[str] = None,
+    building_filter: Optional[str] = None,
+    access_filter: Optional[dict[str, Any]] = None,
+    query_vector: Optional[list[float]] = None,
+) -> list[dict[str, Any]]:
+    """
+    Search a single index with building-aware filtering (hits only).
+
+    Backward-compatible wrapper around :func:`search_one_index_with_outcome` for
+    callers that do not consume the typed source outcome.
+    """
+    hits, _outcome = search_one_index_with_outcome(
+        idx_name,
+        query,
+        k=k,
+        embed_model=embed_model,
+        building_filter=building_filter,
+        access_filter=access_filter,
+        query_vector=query_vector,
+    )
+    return hits
 
 
 def get_effective_score(result: dict[str, Any]) -> float:

@@ -7,18 +7,18 @@ Handles all remaining queries not claimed by other handlers.
 
 import logging
 import time
-from typing import Any, Optional, cast
+from typing import Optional
 
-import search_core
-from core.alfred_exceptions import RoutingError
 from query_core.query_context import QueryContext
 from query_core.query_result import QueryResult
 from query_core.query_types import QueryType
 from search_core.search_instructions import SearchInstructions
-from search_core.search_router import execute
+from search_core.search_router import execute_with_outcome
+from search_core.semantic_search import semantic_search_with_outcome
 from security.log_sanitiser import sanitise_error
 
 from .base_handler import BaseQueryHandler
+from .handler_failures import handler_failed_result
 
 
 class SemanticSearchHandler(BaseQueryHandler):
@@ -102,7 +102,7 @@ class SemanticSearchHandler(BaseQueryHandler):
         start = time.time()
 
         try:
-            results, answer, pub_date_info, score_too_low = search_core.semantic_search(
+            outcome = semantic_search_with_outcome(
                 query_text,
                 context.top_k,
                 building_filter=context.building_filter,
@@ -111,33 +111,27 @@ class SemanticSearchHandler(BaseQueryHandler):
 
             elapsed = round(time.time() - start, 3)
 
-            # ------------------------------------------------------------
-            #  PATCH: Guarantee non-empty answer
-            # ------------------------------------------------------------
-            if not answer or not isinstance(answer, str) or not answer.strip():
-                if results:
-                    answer = (
-                        f"I found {len(results)} relevant results for your query. "
-                        "Let me know if you'd like a summary or details."
-                    )
-                else:
-                    answer = (
-                        "I couldn't find any matching information for your query. "
-                        "Try rephrasing or adding more detail."
-                    )
-            # ------------------------------------------------------------
+            # Retrieval health drives the structured status: a backend outage is
+            # `unavailable`, incomplete coverage is `partial`, an answer-generation
+            # failure is `partial` with results retained, healthy zero matches is
+            # `empty`. The UI branches on status rather than on answer text.
             return QueryResult(
                 query=query_text,
-                answer=answer,
-                results=results,
-                publication_date_info=pub_date_info,
-                score_too_low=score_too_low,
+                answer=outcome.answer or None,
+                results=outcome.results,
+                publication_date_info=outcome.publication_info,
+                score_too_low=outcome.score_too_low,
                 handler_used="SemanticSearchHandler",
                 query_type=self.query_type.value,
+                status=outcome.status,
+                failure=outcome.failure,
+                degraded_components=outcome.degraded_components,
+                source_outcomes=outcome.source_outcomes,
                 metadata={
-                    "num_results": len(results),
+                    "num_results": len(outcome.results),
                     "elapsed_seconds": elapsed,
-                    "score_too_low": score_too_low,
+                    "score_too_low": outcome.score_too_low,
+                    "status": outcome.status.value,
                     "building_filter": context.building_filter,
                     "access_control_applied": bool(context.access_filter),
                 },
@@ -147,94 +141,57 @@ class SemanticSearchHandler(BaseQueryHandler):
             logging.error(
                 "Semantic search failure: %s", sanitise_error(e), exc_info=False
             )
-            elapsed = round(time.time() - start, 3)
-
-            return QueryResult(
-                query=query_text,
-                answer=(
-                    "I couldn't complete that search right now. "
-                    "Please try again in a few minutes."
-                ),
-                results=[],
-                success=False,
-                handler_used="SemanticSearchHandler",
-                query_type=self.query_type.value,
-                metadata={
-                    "error": "semantic_search_error",
-                    "elapsed_seconds": elapsed,
-                    "fallback": True,
-                },
+            return handler_failed_result(
+                query_text,
+                "SemanticSearchHandler",
+                self.query_type.value,
+                error_code="semantic_search_error",
             )
 
     def _execute_instructions(
         self, context: QueryContext, instr: SearchInstructions
     ) -> QueryResult:
-        """Execute a structured search instruction coming from another handler and handles semantic instructions from QueryManager."""
+        """Execute a structured search instruction from another handler.
+
+        Semantic instructions run through the structured outcome path so a
+        backend outage or answer-generation failure carries its status; planon
+        and maintenance instructions preserve the same status contract, mapping
+        a total structured outage to ``unavailable``.
+        """
         start = time.time()
 
         try:
-            # Use the unified router
-            result = execute(instr)
-
-            if instr.type == "semantic":
-                results, answer, pub_info, score_flag = cast(
-                    tuple[list[dict[str, Any]], str, str, bool], result
-                )
-
-            elif instr.type == "planon":
-                results, answer, pub_info = cast(
-                    tuple[list[dict[str, Any]], Optional[str], str], result
-                )
-                score_flag = None
-
-            elif instr.type == "maintenance":
-                results, answer = cast(
-                    tuple[list[dict[str, Any]], Optional[str]], result
-                )
-                pub_info = None
-                score_flag = None
-
-            else:
-                raise RoutingError(f"Unknown search instruction type: {instr.type}")
-
+            outcome = execute_with_outcome(instr)
             elapsed = round(time.time() - start, 3)
+            results = getattr(outcome, "results", [])
 
             return QueryResult(
                 query=context.query,
-                answer=answer,
+                answer=outcome.answer or None,
                 results=results,
-                publication_date_info=pub_info,
-                score_too_low=score_flag,
+                publication_date_info=getattr(outcome, "publication_info", None),
+                score_too_low=getattr(outcome, "score_too_low", None),
                 handler_used="SemanticSearchHandler",
                 query_type=self.query_type.value,
+                status=outcome.status,
+                failure=outcome.failure,
+                degraded_components=outcome.degraded_components,
+                source_outcomes=outcome.source_outcomes,
                 metadata={
                     "instruction_type": instr.type,
                     "elapsed_seconds": elapsed,
                     "building_filter": instr.building,
                     "num_results": len(results),
+                    "status": outcome.status.value,
                 },
             )
-
         except Exception as e:
             logging.error(
                 "Search instruction failed: %s", sanitise_error(e), exc_info=False
             )
-            elapsed = round(time.time() - start, 3)
-
-            return QueryResult(
-                query=context.query,
-                answer=(
-                    "I couldn't complete that search right now. "
-                    "Please try again in a few minutes."
-                ),
-                results=[],
-                success=False,
-                handler_used="SemanticSearchHandler",
-                query_type=self.query_type.value,
-                metadata={
-                    "instruction_type": instr.type if instr else None,
-                    "error": "search_instruction_error",
-                    "elapsed_seconds": elapsed,
-                    "fallback": True,
-                },
+            return handler_failed_result(
+                context.query,
+                "SemanticSearchHandler",
+                self.query_type.value,
+                error_code="search_instruction_error",
             )
