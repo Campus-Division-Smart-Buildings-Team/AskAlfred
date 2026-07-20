@@ -60,7 +60,7 @@ INGEST_DEFAULT_ACCESS_LEVEL = (
 )
 INGEST_DEFAULT_ALLOWED_ROLES = tuple(
     role.strip()
-    for role in os.getenv("INGEST_DEFAULT_ALLOWED_ROLES", "pilot_user").split(",")
+    for role in os.getenv("INGEST_DEFAULT_ALLOWED_ROLES", "base_view").split(",")
     if role.strip()
 )
 
@@ -114,6 +114,11 @@ INGEST_VERIFY_FETCH_BATCH_SIZE = 100
 INGEST_DEDUP_FETCH_BATCH_SIZE = 100
 INGEST_VERIFY_BACKOFF_BASE = 0.2
 INGEST_VERIFY_BACKOFF_CAP = 1.5
+# Number of post-upsert verification fetch passes before a batch is declared
+# failed. The vector store is read-after-write eventually consistent, so a
+# freshly upserted vector can be briefly invisible; retrying the (cheap) fetch
+# with backoff absorbs that lag instead of forcing a full re-upsert.
+INGEST_VERIFY_ATTEMPTS = 3
 INGEST_UPSERT_SPLIT_MAX_DEPTH = 4
 INGEST_UPSERT_SPLIT_MIN_BATCH_SIZE = 10
 INGEST_METADATA_MAX_SIZE = 10240  # Previously 40960
@@ -406,6 +411,7 @@ __all__ = [
     "INGEST_DEDUP_FETCH_BATCH_SIZE",
     "INGEST_VERIFY_BACKOFF_BASE",
     "INGEST_VERIFY_BACKOFF_CAP",
+    "INGEST_VERIFY_ATTEMPTS",
     "INGEST_UPSERT_SPLIT_MAX_DEPTH",
     "INGEST_UPSERT_SPLIT_MIN_BATCH_SIZE",
     "INGEST_METADATA_MAX_SIZE",

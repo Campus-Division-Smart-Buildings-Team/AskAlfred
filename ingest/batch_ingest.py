@@ -132,10 +132,13 @@ def _run_ingest_parallel(
     - Limited max_parse_workers (default 6, max 16) to prevent DOS
     - ThreadPoolExecutor bounds workers to prevent resource exhaustion
     """
-    worker_count = max(
-        ctx.config.max_io_workers,
-        ctx.config.max_parse_workers,
-    )
+    # The thread pool sizes *I/O* concurrency: each worker blocks on Redis,
+    # the OpenAI embeddings call and the upsert queue. CPU-bound
+    # extract/chunk/FRA parsing is offloaded to the separate max_parse_workers
+    # process pool, so it must not widen this pool — doing so would silently
+    # raise the number of concurrent embedding calls above the configured I/O
+    # limit (the knob operators tune against API rate limits).
+    worker_count = ctx.config.max_io_workers
     # DOS protection: Cap worker count to prevent resource exhaustion
     worker_count = min(worker_count, 32)
 

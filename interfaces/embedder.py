@@ -200,6 +200,9 @@ class OpenAIEmbedder:
             errors_by_index[i] = error_reason or "failed_after_retries"
             errors.append(error_reason or "failed_after_retries")
             i += 1
+            # Restore the full batch size for the remaining items; a single
+            # bad item must not collapse the rest of the run to size 1.
+            batch_size = initial_batch_size
 
         return EmbeddingsResult(
             embeddings_by_index=embeddings_by_index,

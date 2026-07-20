@@ -23,7 +23,6 @@ from redis.exceptions import RedisError
 
 from building.filename_building_parser import should_flag_for_review
 from config import (
-    INGEST_EMBED_BATCH_SIZE,
     INGEST_LOW_CONFIDENCE_WARN,
     INGEST_PROCESSING_LEASE_SECONDS,
     DocumentTypes,
@@ -717,7 +716,7 @@ class DocumentProcessor:
                     doc_type=doc_type,
                 )
 
-            batch_size = INGEST_EMBED_BATCH_SIZE
+            batch_size = max(1, int(self.ctx.config.embed_batch))
             batch_chunks: list[str] = []
             batch_indices: list[int] = []
             chunk_idx = 0
@@ -1019,6 +1018,11 @@ class Vectoriser:
             return []
 
         vectors_to_upsert: list[dict[str, Any]] = []
+        # FRA candidates yield two independent artefacts: structured risk-item
+        # summaries (fra_risk_items) and the whole document itself
+        # (fire_risk_assessments). Extract the risk items first — this also
+        # propagates assessment dates / parse diagnostics onto docs — then
+        # always index the document below so both artefacts are produced.
         self._processor.maybe_extract_fra_vectors(
             key=key,
             text_sample=text_sample or "",
@@ -1127,6 +1131,7 @@ class FileIngestOrchestrator:
             )
             raise IngestError(f"File processing timed out: {key}")
 
+        self._processor.ctx.completion_tracker.register(vectors)
         return FileProcessResult(
             status="processed",
             vectors=vectors,

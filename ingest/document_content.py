@@ -42,7 +42,6 @@ from config import (
     INGEST_BACKOFF_JITTER_SPAN,
     INGEST_DOCX_MAX_ARCHIVE_ENTRIES,
     INGEST_DOCX_MAX_UNCOMPRESSED_MB,
-    INGEST_EMBED_BATCH_SIZE,
     INGEST_FETCH_MAX_SIZE_MB,
     INGEST_PDF_MAX_PAGES,
 )
@@ -692,7 +691,7 @@ def embed_texts_batch(
         texts,
         model=ctx.config.embed_model,
         timeout=ctx.config.openai_timeout,
-        max_batch=INGEST_EMBED_BATCH_SIZE,
+        max_batch=max(1, int(ctx.config.embed_batch)),
     )
     elapsed = time.perf_counter() - t_start
     ctx.stats.observe_timing("embed_batch_seconds", elapsed)
@@ -1082,7 +1081,11 @@ def extract_maintenance_csv(
                 parsed = parse_pivot_header(col_str, is_requests)
                 status = (str(parsed.get("status") or "").strip()) or "unknown"
                 parsed["status"] = status[:1].upper() + status[1:].lower()
-                parsed["priority"] = normalise_priority(parsed.get("priority") or "")
+                # normalise_priority returns None for labels it can't classify;
+                # keep priority a str (dict[str, str]) and out of metric keys.
+                parsed["priority"] = (
+                    normalise_priority(parsed.get("priority") or "") or "Unknown"
+                )
                 parsed_headers[col] = parsed
             except Exception as error:
                 log.warning(

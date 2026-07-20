@@ -18,6 +18,7 @@ from config import (
     FRA_LOCK_TIMEOUT_SECONDS,
     FRA_RISK_ITEMS_NAMESPACE,
     INGEST_VECTOR_BUFFER_MAX_SIZE,
+    INGEST_VERIFY_ATTEMPTS,
     INGEST_VERIFY_BACKOFF_BASE,
     INGEST_VERIFY_BACKOFF_CAP,
     INGEST_VERIFY_FETCH_BATCH_SIZE,
@@ -115,6 +116,89 @@ class ThreadSafeStats(MetricsReader):
             current_max = self._stats.get(max_key, 0.0)
             if float(value) > float(current_max):
                 self._stats[max_key] = float(value)
+
+
+class FileCompletionTracker:
+    """Track vector completion so files are only marked successful once."""
+
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._expected: dict[str, set[str]] = {}
+        self._succeeded: dict[str, set[str]] = {}
+        self._templates: dict[str, dict[str, Any]] = {}
+        self._namespaces: dict[str, set[str | None]] = {}
+        self._failed: set[str] = set()
+        self._finalised: set[str] = set()
+
+    @staticmethod
+    def _file_id(vector: dict[str, Any]) -> str | None:
+        vector_id = vector.get("id")
+        if not vector_id:
+            return None
+        return str(vector_id).split(":", 1)[0] or None
+
+    def register(self, vectors: list[dict[str, Any]]) -> None:
+        """Register a file's full vector set before any batches are queued."""
+        with self._lock:
+            for vector in vectors:
+                file_id = self._file_id(vector)
+                vector_id = vector.get("id")
+                if file_id is None or not vector_id:
+                    continue
+                self._expected.setdefault(file_id, set()).add(str(vector_id))
+                self._succeeded.setdefault(file_id, set())
+                self._templates.setdefault(file_id, vector)
+                self._namespaces.setdefault(file_id, set()).add(vector.get("namespace"))
+
+    def record_success(self, batch: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+        """Return one synthetic batch for each file completed by this batch."""
+        completed: list[list[dict[str, Any]]] = []
+        with self._lock:
+            touched: set[str] = set()
+            for vector in batch:
+                file_id = self._file_id(vector)
+                vector_id = vector.get("id")
+                if file_id is None or not vector_id:
+                    continue
+                if file_id in self._failed or file_id in self._finalised:
+                    continue
+                # Direct callers may not have registered expected IDs.
+                self._expected.setdefault(file_id, set()).add(str(vector_id))
+                self._succeeded.setdefault(file_id, set()).add(str(vector_id))
+                self._templates.setdefault(file_id, vector)
+                self._namespaces.setdefault(file_id, set()).add(vector.get("namespace"))
+                touched.add(file_id)
+
+            for file_id in touched:
+                if not self._expected[file_id].issubset(self._succeeded[file_id]):
+                    continue
+                template = self._templates[file_id]
+                namespaces = self._namespaces.get(file_id) or {None}
+                completed.append(
+                    [
+                        {
+                            "id": template["id"],
+                            "metadata": template.get("metadata") or {},
+                            "namespace": namespace,
+                            "_processing_token": template.get("_processing_token"),
+                        }
+                        for namespace in namespaces
+                    ]
+                )
+                self._finalised.add(file_id)
+                self._expected.pop(file_id, None)
+                self._succeeded.pop(file_id, None)
+                self._templates.pop(file_id, None)
+                self._namespaces.pop(file_id, None)
+        return completed
+
+    def record_failure(self, batch: list[dict[str, Any]]) -> None:
+        """Make failure terminal so a later batch cannot overwrite it."""
+        with self._lock:
+            for vector in batch:
+                file_id = self._file_id(vector)
+                if file_id is not None:
+                    self._failed.add(file_id)
 
 
 # ============================================================================
@@ -433,14 +517,12 @@ class FraTransaction:
                 new_assessment_date=assessment_date,
             )
             self._superseded_ids.extend(superseded)
-            if self._txn_log is not None:
-                self._txn_log.record_superseded(
-                    self._tx_id, building, superseded
-                )  # type: ignore[arg-type]
+            if self._txn_log is not None and self._tx_id is not None:
+                self._txn_log.record_superseded(self._tx_id, building, superseded)
 
         self._raise_if_lock_lost()
         upsert_vectors(self._ctx, self._vectors)
-        _mark_batch_state(self._ctx, self._vectors, status="upserted")
+        self._ctx.stats.increment("batch_state_upserted_total")
 
     def verify(self) -> list[str]:
         """
@@ -449,10 +531,12 @@ class FraTransaction:
         Commits the txn log on success.
         """
         self._raise_if_lock_lost()
-        missing_ids = _verify_fra_vectors_present(self._ctx, self._vectors)
+        missing_ids = _verify_fra_vectors_present(
+            self._ctx, self._vectors, attempts=INGEST_VERIFY_ATTEMPTS
+        )
         if not missing_ids:
-            if self._txn_log is not None:
-                self._txn_log.commit(self._tx_id)  # type: ignore[arg-type]
+            if self._txn_log is not None and self._tx_id is not None:
+                self._txn_log.commit(self._tx_id)
         return missing_ids
 
     def rollback(self, reason: str) -> None:
@@ -499,12 +583,12 @@ def _handle_verification_failure(
 ) -> None:
     _emit_verification_failure_event(ctx, missing_ids)
     error_tag = f"verification_failed_missing_{len(missing_ids)}"
-    _mark_batch_state(ctx, vectors, status="failed", error=error_tag)
+    ctx.stats.increment("batch_state_failed_total")
     try:
         _record_ingested_files(ctx, vectors, status="failed", error=error_tag)
     except Exception as record_error:  # pylint: disable=broad-except
         ctx.logger.warning("FileRegistry update failed: %s", record_error)
-    raise RuntimeError(
+    raise ExternalServiceError(
         f"FRA upsert verification failed; missing {len(missing_ids)} vectors"
     )
 
@@ -526,11 +610,13 @@ def upsert_vectors_atomic(ctx: "IngestContext", vectors: list[dict[str, Any]]) -
     if not needs_supersession:
         # Simple path: no supersession needed
         upsert_vectors(ctx, vectors)
-        _mark_batch_state(ctx, vectors, status="upserted")
-        missing_ids = _verify_fra_vectors_present(ctx, vectors)
+        ctx.stats.increment("batch_state_upserted_total")
+        missing_ids = _verify_fra_vectors_present(
+            ctx, vectors, attempts=INGEST_VERIFY_ATTEMPTS
+        )
         if missing_ids:
             _handle_verification_failure(ctx, vectors, missing_ids)
-        _mark_batch_state(ctx, vectors, status="verified")
+        ctx.stats.increment("batch_state_verified_total")
         try:
             _record_ingested_files(ctx, vectors, status="success")
         except Exception as error:  # pylint: disable=broad-except
@@ -545,7 +631,7 @@ def upsert_vectors_atomic(ctx: "IngestContext", vectors: list[dict[str, Any]]) -
             if missing_ids:
                 _handle_verification_failure(ctx, vectors, missing_ids)
 
-            _mark_batch_state(ctx, vectors, status="verified")
+            ctx.stats.increment("batch_state_verified_total")
             try:
                 _record_ingested_files(ctx, vectors, status="success")
             except Exception as error:  # pylint: disable=broad-except
@@ -560,7 +646,7 @@ def upsert_vectors_atomic(ctx: "IngestContext", vectors: list[dict[str, Any]]) -
             ModelNotInitialisedError,
         ) as error:
             txn.rollback(str(error))
-            _mark_batch_state(ctx, vectors, status="failed", error=str(error))
+            ctx.stats.increment("batch_state_failed_total")
             try:
                 _record_ingested_files(ctx, vectors, status="failed", error=str(error))
             except Exception as record_error:  # pylint: disable=broad-except
@@ -747,6 +833,31 @@ def _record_ingested_files(
     if getattr(ctx.config, "dry_run", False):
         return
 
+    batches = [batch]
+    completion_tracker = getattr(ctx, "completion_tracker", None)
+    if completion_tracker is not None:
+        if status == "success":
+            batches = completion_tracker.record_success(batch)
+        elif status == "failed":
+            completion_tracker.record_failure(batch)
+
+    for completed_batch in batches:
+        _write_ingested_file_records(
+            ctx,
+            completed_batch,
+            status=status,
+            error=error,
+        )
+
+
+def _write_ingested_file_records(
+    ctx: "IngestContext",
+    batch: list[dict[str, Any]],
+    *,
+    status: str,
+    error: str | None,
+) -> None:
+    """Collapse a completed batch to one registry update per source file."""
     ingested_at_iso = datetime.now(timezone.utc).isoformat() + "Z"
     records: dict[str, dict[str, Any]] = {}
     namespaces: dict[str, set[str]] = {}
@@ -769,7 +880,7 @@ def _record_ingested_files(
             records[file_id] = {
                 "file_id": file_id,
                 "source_path": metadata.get("source_path", ""),
-                "source_key": metadata.get("key") or metadata.get("source") or "",
+                "source_key": metadata.get("source") or metadata.get("key") or "",
                 "content_hash": metadata.get("content_hash"),
                 "ingested_at_iso": ingested_at_iso,
                 "status": status,
@@ -822,7 +933,7 @@ def _mark_batch_state(
             records[file_id] = {
                 "processing_token": vector.get("_processing_token"),
                 "source_path": metadata.get("source_path", ""),
-                "source_key": metadata.get("key") or metadata.get("source") or "",
+                "source_key": metadata.get("source") or metadata.get("key") or "",
                 "content_hash": metadata.get("content_hash"),
             }
 
@@ -850,7 +961,7 @@ def _mark_batch_failed(
 ) -> None:
     if not batch:
         return
-    _mark_batch_state(ctx, batch, status="failed", error=reason)
+    ctx.stats.increment("batch_state_failed_total")
     try:
         _record_ingested_files(ctx, batch, status="failed", error=reason)
     except Exception as error:  # pylint: disable=broad-except
@@ -951,57 +1062,35 @@ def extract_fra_risk_items_integration(
     Extract and embed FRA risk items from a candidate FRA file.
     """
     page_texts = None
-    parse_text = text_sample
-    raw_text_sample = text_sample
     parse_verbose = ctx.config.log_level == "DEBUG"
     triage_computer = FRATriageComputer(verbose=parse_verbose)
 
-    used_layout_text = False
-    if ext(key) == "pdf":
-        layout_text = _extract_fra_layout_text(
-            ctx,
-            base_path=base_path,
-            key=key,
-        )
-        if layout_text:
-            parse_text = layout_text
-            used_layout_text = True
-
-    if parse_pool:
+    def _run_parse(text_for_parse: str):
+        """Parse an action plan, in the process pool when one is available."""
         parse_start = time.perf_counter()
-        future = parse_pool.submit(
-            parse_action_plan_in_process,
-            parse_text,
-            key,
-            building,
-            parse_verbose,
-        )
-        risk_items, confidence = future.result()
-        parse_elapsed = time.perf_counter() - parse_start
+        if parse_pool:
+            future = parse_pool.submit(
+                parse_action_plan_in_process,
+                text_for_parse,
+                key,
+                building,
+                parse_verbose,
+            )
+            items, conf = future.result()
+            where = "process"
+        else:
+            parser = FRAActionPlanParser(verbose=parse_verbose)
+            items, conf = parser.extract_risk_items(
+                item_text=text_for_parse,
+                item_key=key,
+                canonical_building=building,
+                page_texts=page_texts,
+            )
+            where = "thread"
         ctx.logger.debug(
-            "FRA parse (process) %s: %.3fs",
-            key,
-            parse_elapsed,
+            "FRA parse (%s) %s: %.3fs", where, key, time.perf_counter() - parse_start
         )
-    else:
-        fra_parser = FRAActionPlanParser(verbose=parse_verbose)
-        parse_start = time.perf_counter()
-        risk_items, confidence = fra_parser.extract_risk_items(
-            item_text=parse_text,
-            item_key=key,
-            canonical_building=building,
-            page_texts=page_texts,
-        )
-        parse_elapsed = time.perf_counter() - parse_start
-        ctx.logger.debug(
-            "FRA parse (thread) %s: %.3fs",
-            key,
-            parse_elapsed,
-        )
-
-    parsing_confidence = getattr(confidence, "overall", 0.0)
-    parsing_warnings = list(getattr(confidence, "warnings", []) or [])
-    parsing_field_scores = dict(getattr(confidence, "field_scores", {}) or {})
+        return items, conf
 
     def _field_score_below(
         scores: dict[str, float],
@@ -1011,43 +1100,42 @@ def extract_fra_risk_items_integration(
         value = scores.get(field_name)
         return value is not None and value < threshold
 
-    if used_layout_text and raw_text_sample:
+    # Parse the already-extracted text first. For the common case where the
+    # standard text parses cleanly this avoids the pdftotext -layout subprocess
+    # (a process spawn plus a second full parse of the PDF).
+    risk_items, confidence = _run_parse(text_sample)
+    parsing_confidence = getattr(confidence, "overall", 0.0)
+    parsing_warnings = list(getattr(confidence, "warnings", []) or [])
+    parsing_field_scores = dict(getattr(confidence, "field_scores", {}) or {})
+
+    # Escalate to layout-preserving extraction only when the cheap parse is
+    # weak. Layout text parses table-heavy action plans better, but costs the
+    # subprocess and a second parse, so it is reserved for low-quality parses.
+    if ext(key) == "pdf":
         low_confidence = parsing_confidence < 0.35
         low_fields = _field_score_below(
             parsing_field_scores, "issue_description", 0.5
         ) or _field_score_below(parsing_field_scores, "proposed_solution", 0.5)
         if low_confidence or low_fields:
-            ctx.logger.warning(
-                "Low-quality FRA layout parse for %s (confidence %.2f); retrying text parse",
-                key,
-                parsing_confidence,
-            )
-            if parse_pool:
-                retry_future = parse_pool.submit(
-                    parse_action_plan_in_process,
-                    raw_text_sample,
+            layout_text = _extract_fra_layout_text(ctx, base_path=base_path, key=key)
+            if layout_text and layout_text != text_sample:
+                ctx.logger.warning(
+                    "Low-quality FRA text parse for %s (confidence %.2f); "
+                    "retrying with layout extraction",
                     key,
-                    building,
-                    parse_verbose,
+                    parsing_confidence,
                 )
-                retry_items, retry_confidence = retry_future.result()
-            else:
-                retry_parser = FRAActionPlanParser(verbose=parse_verbose)
-                retry_items, retry_confidence = retry_parser.extract_risk_items(
-                    item_text=raw_text_sample,
-                    item_key=key,
-                    canonical_building=building,
-                    page_texts=page_texts,
-                )
-            retry_overall = getattr(retry_confidence, "overall", 0.0)
-            if retry_overall >= parsing_confidence:
-                risk_items = retry_items
-                confidence = retry_confidence
-                parsing_confidence = retry_overall
-                parsing_warnings = list(getattr(retry_confidence, "warnings", []) or [])
-                parsing_field_scores = dict(
-                    getattr(retry_confidence, "field_scores", {}) or {}
-                )
+                layout_items, layout_confidence = _run_parse(layout_text)
+                layout_overall = getattr(layout_confidence, "overall", 0.0)
+                if layout_overall >= parsing_confidence:
+                    risk_items = layout_items
+                    parsing_confidence = layout_overall
+                    parsing_warnings = list(
+                        getattr(layout_confidence, "warnings", []) or []
+                    )
+                    parsing_field_scores = dict(
+                        getattr(layout_confidence, "field_scores", {}) or {}
+                    )
 
     missing_action_plan = (
         not risk_items and "No action plan section found" in parsing_warnings

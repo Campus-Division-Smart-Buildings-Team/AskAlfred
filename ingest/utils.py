@@ -176,7 +176,9 @@ def validate_with_truncation(
         metadata,
         max_metadata_size=ctx.config.max_metadata_size,
     )
-    if not ok:
+    # Oversized metadata may become valid after truncating its text field.
+    # Serialisation errors cannot be repaired by truncation.
+    if not ok and size_error != "Metadata too large":
         return False, f"{size_error} ({size_bytes} bytes)"
 
     truncated = False
@@ -187,7 +189,7 @@ def validate_with_truncation(
             encoder=ctx.encoder,
             max_tokens=ctx.config.max_metadata_text_tokens,
         )
-        truncated = new_text is not text_value
+        truncated = new_text != text_value
         metadata["text"] = new_text
 
     return MetadataValidator.validate(

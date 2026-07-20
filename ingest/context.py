@@ -39,6 +39,7 @@ from interfaces import (
 )
 
 from .transaction import (
+    FileCompletionTracker,
     ThreadSafeCache,
     ThreadSafeStats,
 )
@@ -86,6 +87,7 @@ class IngestContext:
         # Thread-safe utilities
         self.stats = ThreadSafeStats()
         self.cache = ThreadSafeCache()
+        self.completion_tracker = FileCompletionTracker()
         self.export_events_lock = threading.Lock()
         self.upsert_stop_event: threading.Event | None = None
 

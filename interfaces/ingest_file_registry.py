@@ -171,6 +171,72 @@ class RedisIngestFileRegistry:
             redis.call("EXPIRE", key, ttl_seconds)
             return 1
             """)
+        self._mark_state_script = self._client.register_script("""
+            local key = KEYS[1]
+            local now_epoch = tonumber(ARGV[1])
+            local now_iso = ARGV[2]
+            local file_id = ARGV[3]
+            local supplied_token = ARGV[4]
+            local status = ARGV[5]
+            local state_error = ARGV[6]
+            local source_path = ARGV[7]
+            local source_key = ARGV[8]
+            local content_hash = ARGV[9]
+            local namespaces = ARGV[10]
+            local ttl_seconds = tonumber(ARGV[11])
+            local terminal = ARGV[12] == "1"
+
+            local current_status = redis.call("HGET", key, "status")
+            if current_status == "processing" then
+                local current_expiry = tonumber(
+                    redis.call("HGET", key, "processing_expires_at_epoch") or "0"
+                )
+                if current_expiry > now_epoch then
+                    local current_token = redis.call("HGET", key, "processing_token") or ""
+                    if supplied_token == "" or supplied_token ~= current_token then
+                        return 0
+                    end
+                end
+            end
+
+            local function supplied_or_current(supplied, field)
+                if supplied ~= "" then
+                    return supplied
+                end
+                return redis.call("HGET", key, field) or ""
+            end
+
+            local processing_token = ""
+            local processing_expires_at = ""
+            local processing_expires_at_epoch = ""
+            if not terminal then
+                processing_token = redis.call("HGET", key, "processing_token") or ""
+                processing_expires_at = redis.call(
+                    "HGET", key, "processing_expires_at"
+                ) or ""
+                processing_expires_at_epoch = redis.call(
+                    "HGET", key, "processing_expires_at_epoch"
+                ) or ""
+            end
+
+            redis.call(
+                "HSET",
+                key,
+                "file_id", file_id,
+                "source_path", supplied_or_current(source_path, "source_path"),
+                "source_key", supplied_or_current(source_key, "source_key"),
+                "content_hash", supplied_or_current(content_hash, "content_hash"),
+                "ingested_at_iso", now_iso,
+                "namespaces", supplied_or_current(namespaces, "namespaces"),
+                "status", status,
+                "error", state_error,
+                "processing_token", processing_token,
+                "processing_expires_at", processing_expires_at,
+                "processing_expires_at_epoch", processing_expires_at_epoch
+            )
+            redis.call("EXPIRE", key, ttl_seconds)
+            return 1
+            """)
 
     def _key(self, file_id: str) -> str:
         return f"{self._prefix}{file_id}"
@@ -283,8 +349,10 @@ class RedisIngestFileRegistry:
             ),
         }
         ttl_seconds = self._ttl_for_status(record.status)
-        self._client.hset(self._key(record.file_id), mapping=payload)
-        self._client.expire(self._key(record.file_id), ttl_seconds)
+        pipeline = self._client.pipeline(transaction=False)
+        pipeline.hset(self._key(record.file_id), mapping=payload)
+        pipeline.expire(self._key(record.file_id), ttl_seconds)
+        pipeline.execute()
 
     def upsert_with_token(
         self,
@@ -368,47 +436,31 @@ class RedisIngestFileRegistry:
         content_hash: str | None = None,
         namespaces: tuple[str, ...] | None = None,
     ) -> None:
-        existing = self.get(file_id)
-        now_epoch = int(datetime.now(timezone.utc).timestamp())
-        if existing and existing.status == "processing":
-            expiry_epoch = int(existing.processing_expires_at_epoch or 0)
-            if expiry_epoch > now_epoch:
-                if (
-                    not processing_token
-                    or processing_token != existing.processing_token
-                ):
-                    raise ValueError(
-                        f"Rejecting state update for {file_id}: token mismatch"
-                    )
-        now_iso = datetime.now(timezone.utc).isoformat() + "Z"
-        self.upsert(
-            FileRecord(
-                file_id=file_id,
-                source_path=source_path or (existing.source_path if existing else ""),
-                source_key=source_key or (existing.source_key if existing else ""),
-                content_hash=content_hash
-                or (existing.content_hash if existing else None),
-                ingested_at_iso=now_iso,
-                namespaces=namespaces or (existing.namespaces if existing else ()),
-                status=status,
-                error=error,
-                processing_token=(
-                    None
-                    if status in ("success", "failed")
-                    else (existing.processing_token if existing else None)
+        now = datetime.now(timezone.utc)
+        terminal = status in ("success", "failed")
+        updated = self._mark_state_script(
+            keys=[self._key(file_id)],
+            args=[
+                str(int(now.timestamp())),
+                now.isoformat() + "Z",
+                file_id,
+                processing_token or "",
+                status,
+                error or "",
+                source_path or "",
+                source_key or "",
+                content_hash or "",
+                (
+                    json.dumps(list(namespaces), ensure_ascii=False)
+                    if namespaces
+                    else ""
                 ),
-                processing_expires_at=(
-                    None
-                    if status in ("success", "failed")
-                    else (existing.processing_expires_at if existing else None)
-                ),
-                processing_expires_at_epoch=(
-                    None
-                    if status in ("success", "failed")
-                    else (existing.processing_expires_at_epoch if existing else None)
-                ),
-            )
+                str(self._ttl_for_status(status)),
+                "1" if terminal else "0",
+            ],
         )
+        if not updated:
+            raise ValueError(f"Rejecting state update for {file_id}: token mismatch")
 
     def delete(self, file_id: str) -> None:
         self._client.delete(self._key(file_id))

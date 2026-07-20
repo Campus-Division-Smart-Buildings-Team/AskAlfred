@@ -144,9 +144,9 @@ class BatchIngestConfig:
     upsert_join_timeout_seconds: float = INGEST_UPSERT_JOIN_TIMEOUT_SECONDS
     upsert_join_poll_seconds: float = INGEST_UPSERT_JOIN_POLL_SECONDS
 
-    max_io_workers: int = 12
+    max_io_workers: int = 24
     max_parse_workers: int = 6
-    upsert_workers: int = 2
+    upsert_workers: int = 4
     fra_supersession_single_threaded: bool = FRA_SUPERSESSION_SINGLE_THREADED
     max_pending_vectors: int = 2000
     openai_timeout: float = OPENAI_TIMEOUT_DEFAULT_S
@@ -366,13 +366,12 @@ class BatchIngestConfig:
                 self.upsert_workers,
             )
             self.upsert_workers = 8
-        if self.fra_supersession_single_threaded and self.upsert_workers != 1:
-            logging.warning(
-                "fra_supersession_single_threaded is enabled; forcing upsert_workers=1 "
-                "(was %d) to avoid global lock contention.",
+        if self.fra_supersession_single_threaded and self.upsert_workers > 1:
+            logging.info(
+                "FRA supersession will be serialised by its global lock; "
+                "%d upsert workers remain available for non-FRA batches.",
                 self.upsert_workers,
             )
-            self.upsert_workers = 1
 
         if self.embed_batch < 1 or self.embed_batch > 2048:
             raise ConfigError("embed_batch out of range (1-2048)")
