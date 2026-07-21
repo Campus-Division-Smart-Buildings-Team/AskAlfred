@@ -133,6 +133,9 @@ def test_oversized_metadata_is_truncated_before_size_validation():
         "source": "doc.txt",
         "document_type": "unknown",
         "text": "x" * 5_000,
+        "tenant_id": "tenant-123",
+        "access_level": "pilot_internal",
+        "allowed_roles": ["base_view"],
     }
 
     valid, reason = validate_with_truncation(ctx, metadata)
