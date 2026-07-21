@@ -21,7 +21,7 @@ from config import (
     QUERY_RULE_OVERRIDE_THRESHOLD,
 )
 from core.failure_codes import FailureCode
-from core.outcomes import OutcomeStatus
+from core.outcomes import OutcomeStatus, is_successful
 from core.session_manager import SessionManager
 from core.telemetry import (
     COMPONENT_BUILDING_DIRECTORY,
@@ -472,7 +472,7 @@ class QueryManager:
                 handler_class_name=query_result.handler_used or "unknown",
                 query_type=query_result.query_type or "unknown",
                 elapsed_ms=elapsed_ms,
-                success=query_result.success,
+                success=is_successful(query_result.status),
             )
             self._record_outcome_telemetry(query_result)
 
@@ -514,7 +514,7 @@ class QueryManager:
             handler_class_name=query_result.handler_used or "unknown",
             query_type=query_result.query_type or "unknown",
             elapsed_ms=handler_elapsed_ms,
-            success=query_result.success,
+            success=is_successful(query_result.status),
         )
 
         # Cache result. Only cache trustworthy terminal outcomes: a transient

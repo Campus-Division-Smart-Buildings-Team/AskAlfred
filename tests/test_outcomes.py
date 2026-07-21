@@ -15,7 +15,7 @@ from core.failure_codes import (
     FailureCode,
     get_failure_code_spec,
 )
-from core.outcomes import FailureInfo, OutcomeStatus, SourceOutcome
+from core.outcomes import FailureInfo, OutcomeStatus, SourceOutcome, is_successful
 from query_core.query_result import QueryResult
 
 
@@ -99,14 +99,14 @@ def test_query_result_defaults_to_structured_success():
     result = QueryResult(query="hello", answer="Hello")
 
     assert result.status is OutcomeStatus.SUCCESS
-    assert result.success is True
+    assert is_successful(result.status) is True
 
 
-def test_legacy_false_maps_to_failed():
-    result = QueryResult(query="hello", answer=None, success=False)
+def test_failed_status_is_not_successful():
+    result = QueryResult(query="hello", answer=None, status=OutcomeStatus.FAILED)
 
     assert result.status is OutcomeStatus.FAILED
-    assert result.success is False
+    assert is_successful(result.status) is False
 
 
 @pytest.mark.parametrize(
@@ -122,23 +122,13 @@ def test_legacy_false_maps_to_failed():
         (OutcomeStatus.CRITICAL_INCONSISTENT, False),
     ],
 )
-def test_query_result_success_is_derived_from_status(status, compatible_success):
+def test_is_successful_is_derived_from_status(status, compatible_success):
     result = QueryResult(query="hello", answer=None, status=status)
 
-    assert result.success is compatible_success
+    assert is_successful(result.status) is compatible_success
 
 
-def test_query_result_rejects_conflicting_legacy_and_structured_states():
-    with pytest.raises(ValueError, match="conflicts"):
-        QueryResult(
-            query="hello",
-            answer=None,
-            success=True,
-            status=OutcomeStatus.UNAVAILABLE,
-        )
-
-
-def test_query_result_serialises_new_contract_and_legacy_success():
+def test_query_result_serialises_structured_contract():
     failure = FailureInfo.from_code(
         FailureCode.ANSWER_GENERATION_UNAVAILABLE,
         "answer_generator",
@@ -162,7 +152,7 @@ def test_query_result_serialises_new_contract_and_legacy_success():
     payload = result.to_dict()
 
     assert payload["status"] == "partial"
-    assert payload["success"] is True
+    assert payload["successful"] is True
     assert payload["failure"]["code"] == "answer.generation_unavailable"
     assert payload["source_outcomes"] == [
         {

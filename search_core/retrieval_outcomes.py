@@ -201,17 +201,6 @@ class SemanticOutcome:
     source_outcomes: list[SourceOutcome] = field(default_factory=list)
     degraded_components: list[str] = field(default_factory=list)
 
-    def as_legacy_tuple(self) -> tuple[list[dict], str, str, bool]:
-        """Return the legacy ``(results, answer, publication_info, score_too_low)``.
-
-        Callers on the old 4-tuple contract keep working; the structured status
-        is dropped for them, but ``results`` are only populated for outcomes
-        that should surface results, so a backend outage yields an empty list
-        (never a false ``empty`` answer string).
-        """
-
-        return self.results, self.answer, self.publication_info, self.score_too_low
-
 
 @dataclass
 class StructuredAnswerOutcome:

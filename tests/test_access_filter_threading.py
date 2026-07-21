@@ -5,7 +5,7 @@ from auth.access_control import filter_authorized_structured_matches
 from query_core.query_context import DENY_ALL_TENANT_ID, build_access_filter
 from search_core import structured_queries
 from search_core.search_instructions import SearchInstructions
-from search_core.search_router import execute
+from search_core.search_router import execute_with_outcome
 from search_core.search_utils import search_one_index
 
 
@@ -57,16 +57,21 @@ def test_build_access_filter_denies_authenticated_user_without_tenant():
 def test_search_router_passes_access_filter_to_semantic_search(monkeypatch):
     captured = {}
 
-    def fake_semantic_search(query, top_k, building_filter=None, access_filter=None):
+    def fake_semantic_search_with_outcome(
+        query, top_k, building_filter=None, access_filter=None
+    ):
         captured["query"] = query
         captured["top_k"] = top_k
         captured["building_filter"] = building_filter
         captured["access_filter"] = access_filter
-        return [], "", "", False
+        return object()
 
-    monkeypatch.setattr("search_core.search_router.semantic_search", fake_semantic_search)
+    monkeypatch.setattr(
+        "search_core.search_router.semantic_search_with_outcome",
+        fake_semantic_search_with_outcome,
+    )
 
-    execute(
+    execute_with_outcome(
         SearchInstructions(
             type="semantic",
             query="Show me the FRA",

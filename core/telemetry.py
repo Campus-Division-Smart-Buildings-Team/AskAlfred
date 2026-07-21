@@ -134,6 +134,20 @@ class Telemetry:
                 result[metric] = count
         return result
 
+    def samples(self) -> list[tuple[str, tuple[tuple[str, str], ...], int]]:
+        """Return ``(metric, sorted-labels, count)`` triples for exporters.
+
+        Unlike :meth:`snapshot`, this keeps the label pairs structured so a
+        metrics exporter can render them in a Prometheus exposition format
+        without re-parsing a flattened key.
+        """
+
+        with self._lock:
+            return [
+                (metric, labels, count)
+                for (metric, labels), count in self._counters.items()
+            ]
+
     def reset(self) -> None:
         """Clear all counters (used by tests)."""
 

@@ -31,6 +31,8 @@ from security.sanitise_context import (
     display_safe_publication_date_info,
 )
 
+logger = logging.getLogger(__name__)
+
 BUILDING_DIRECTORY_LIMITED_MESSAGE = (
     "Building-name recognition is temporarily limited. "
     "For the best results, use the full building name in your question."
@@ -309,6 +311,73 @@ def render_operator_diagnostics() -> None:
                 st.json(manager.get_statistics())
             except Exception:  # pylint: disable=broad-except
                 logging.warning("Operator stats lookup failed", exc_info=True)
+
+        _render_operator_health()
+
+
+def _render_operator_health() -> None:
+    """Render readiness, active alerts, outcome rates, and rollout flags.
+
+    Phase 5 wires the process-wide telemetry and readiness snapshots into the
+    operator view so a data-empty, access-empty, partial, unavailable, or failed
+    request can be distinguished without inspecting logs or stack traces. All
+    values are the low-cardinality telemetry already enforced for label safety;
+    nothing here interpolates exception text, IDs, queries, or paths.
+    """
+
+    from config import feature_flags
+    from core.alerts import evaluate_alerts
+    from core.fault_injection import get_fault_injector
+    from core.outcome_rates import outcome_counts, outcome_rates
+    from core.telemetry import get_readiness, get_telemetry
+
+    telemetry = get_telemetry()
+    readiness = get_readiness()
+
+    st.markdown("**Component readiness**")
+    try:
+        st.json(readiness.snapshot() or {"status": "no components recorded yet"})
+    except Exception:  # pylint: disable=broad-except
+        logger.warning("Operator readiness lookup failed", exc_info=True)
+
+    st.markdown("**Active alerts**")
+    try:
+        active = evaluate_alerts(telemetry, readiness)
+        if not active:
+            st.caption("No active alerts.")
+        for alert in active:
+            line = f"{alert.severity.upper()}: {alert.summary}"
+            if alert.severity == "critical":
+                st.error(line)
+            else:
+                st.warning(line)
+    except Exception:  # pylint: disable=broad-except
+        logger.warning("Operator alert evaluation failed", exc_info=True)
+
+    st.markdown("**Request outcome rates**")
+    try:
+        counts = outcome_counts(telemetry.snapshot())
+        rates = outcome_rates(counts)
+        st.json(
+            {
+                "counts": counts,
+                "rates": {status: round(rate, 3) for status, rate in rates.items()},
+            }
+        )
+    except Exception:  # pylint: disable=broad-except
+        logger.warning("Operator outcome-rate lookup failed", exc_info=True)
+
+    st.markdown("**Rollout flags**")
+    try:
+        armed = get_fault_injector().armed_points()
+        st.json(
+            {
+                **feature_flags.snapshot(),
+                "fault_injection_armed": armed,
+            }
+        )
+    except Exception:  # pylint: disable=broad-except
+        logger.warning("Operator rollout-flag lookup failed", exc_info=True)
 
 
 @st.cache_data(ttl=60, show_spinner=False)

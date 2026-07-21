@@ -30,6 +30,7 @@ from core.alfred_exceptions import (
     ExternalServiceError,
     IngestError,
 )
+from core.fault_injection import FaultPoint, maybe_fail
 from core.ingest_outcomes import IngestTerminalStatus, exit_code_for_status
 from core.telemetry import get_telemetry
 from security.file_operations_validator import (
@@ -480,7 +481,18 @@ def _teardown_worker(
         queue_drained = False
         elapsed = 0.0
         next_log_at = 10.0
-        while elapsed < join_timeout:
+        # Rollout fault-injection seam (no-op unless armed in a non-prod env). An
+        # armed fault skips the wait loop so the queue is treated as not drained,
+        # exercising the queue-drain-timeout handling below (VECTOR-09).
+        drain_fault_injected = False
+        try:
+            maybe_fail(FaultPoint.QUEUE_DRAIN)
+        except Exception:  # pylint: disable=broad-except
+            ctx.logger.warning(
+                "Injected queue-drain fault; treating queue as not drained"
+            )
+            drain_fault_injected = True
+        while not drain_fault_injected and elapsed < join_timeout:
             try:
                 # Try to join with a short timeout so we can log progress
                 remaining = join_timeout - elapsed

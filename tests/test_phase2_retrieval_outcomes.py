@@ -20,7 +20,6 @@ import pytest
 
 from core.alfred_exceptions import (
     AnswerGenerationError,
-    SearchError,
     StructuredSearchUnavailable,
 )
 from core.failure_codes import FailureCode
@@ -33,7 +32,6 @@ from search_core.retrieval_outcomes import (
     raise_if_backend_unavailable,
     structured_answer_outcome,
 )
-from search_core.search_router import normalise_execute_result
 from search_core.semantic_search import semantic_search_with_outcome
 
 # The ``search_core`` package re-exports ``semantic_search`` as a function, which
@@ -191,11 +189,6 @@ def test_structured_generator_carries_partial_outcome_to_handler_boundary(monkey
 )
 def test_only_trustworthy_terminal_query_outcomes_are_cacheable(status, cacheable):
     assert (status in _CACHEABLE_STATUSES) is cacheable
-
-
-def test_safe_execute_rejects_unexpected_router_arity():
-    with pytest.raises(SearchError):
-        normalise_execute_result(([], "", "", False, "extra"))
 
 
 # ---------------------------------------------------------------------------
@@ -516,25 +509,3 @@ def test_low_score_hits_is_low_confidence(stub_semantic, monkeypatch):
     assert outcome.results
 
 
-def test_legacy_tuple_wrapper_preserves_shape(stub_semantic, monkeypatch):
-    _set_indexes(monkeypatch, ["testacl"])
-
-    def all_down(idx, query, k, building_filter=None, access_filter=None, query_vector=None):
-        return [], SourceOutcome(
-            source=idx,
-            status=OutcomeStatus.UNAVAILABLE,
-            failure=FailureInfo.from_code(
-                FailureCode.SEARCH_INDEX_UNAVAILABLE, RETRIEVAL_COMPONENT
-            ),
-        )
-
-    monkeypatch.setattr(semantic_module, "search_one_index_with_outcome", all_down)
-
-    from search_core.semantic_search import semantic_search
-
-    results, answer, pub_info, score_too_low = semantic_search("anything", top_k=5)
-
-    assert results == []
-    assert isinstance(answer, str) and answer == ""
-    assert isinstance(pub_info, str)
-    assert score_too_low is False

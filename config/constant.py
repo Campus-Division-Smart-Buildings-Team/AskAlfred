@@ -277,8 +277,14 @@ BUILDING_UTILS_MIN_NAME_LENGTH = 3
 # ===========================================================================
 # QUERY MANAGER CONFIGURATION
 # ===========================================================================
-# Query Manager Feature Flag
-USE_QUERY_MANAGER = True  # Set to True to enable new system
+# Query Manager Feature Flag. Env-configurable so the structured routing path
+# can be rolled back without a redeploy; see config.feature_flags.use_query_manager.
+USE_QUERY_MANAGER = os.getenv("USE_QUERY_MANAGER", "true").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 # Query Manager Configuration
 QUERY_MANAGER_CONFIG = {
     "enable_caching": False,  # Enable query result caching

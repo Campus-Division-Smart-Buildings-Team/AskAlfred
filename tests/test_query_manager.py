@@ -5,6 +5,7 @@ ensuring correct routing of queries to handlers and backward compatibility of re
 
 import pytest
 
+from core.outcomes import is_successful
 from query_core import query_context
 from query_core.query_manager import QueryManager, process_query_unified
 from query_core.query_result import QueryResult
@@ -87,7 +88,9 @@ class TestQueryManager:
             f"Query '{query}' routed to {result.query_type}, "
             f"expected {expected_type.value}"
         )
-        assert result.success, f"Query failed: {result.metadata.get('error')}"
+        assert is_successful(
+            result.status
+        ), f"Query failed: {result.metadata.get('error')}"
         assert (
             result.answer is not None and len(result.answer) > 0
         ), "Empty answer returned"

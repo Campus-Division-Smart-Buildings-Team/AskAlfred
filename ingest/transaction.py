@@ -35,6 +35,7 @@ from core.alfred_exceptions import (
     IngestError,
     RollbackError,
 )
+from core.fault_injection import FaultPoint, maybe_fail
 from core.pinecone_utils import NULL_SENTINEL
 from core.telemetry import get_telemetry
 from fra import (
@@ -637,6 +638,8 @@ class FraTransaction:
 
         if self._tx_id is None:
             return
+        # Rollout fault-injection seam (no-op unless armed in a non-prod env).
+        maybe_fail(FaultPoint.FRA_ROLLBACK)
         self._transition(
             FraJournalState.ROLLBACK_PENDING,
             failure_code="fra.supersession_failed",
@@ -1147,6 +1150,10 @@ def _record_ingested_files(
 ) -> None:
     if getattr(ctx.config, "dry_run", False):
         return
+
+    # Rollout fault-injection seam (no-op unless armed in a non-prod env). A
+    # fault here exercises the vector-success/registry-write divergence path.
+    maybe_fail(FaultPoint.REGISTRY_WRITE)
 
     batches = [batch]
     completion_tracker = getattr(ctx, "completion_tracker", None)

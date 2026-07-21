@@ -19,6 +19,7 @@ from redis import Redis
 
 from auth.credential_manager import SecureCredentialManager
 from core.alfred_exceptions import ConfigError
+from core.fault_injection import FaultPoint, maybe_fail
 from security.log_sanitiser import sanitise_message
 
 _TRUTHY_VALUES = {"1", "true", "yes", "on"}
@@ -123,6 +124,8 @@ class ClientManager:
         Lazy-load Redis client.
         Only creates client when first needed.
         """
+        # Rollout fault-injection seam (no-op unless armed in a non-prod env).
+        maybe_fail(FaultPoint.REDIS)
         if cls._redis is not None:
             return cls._redis
 

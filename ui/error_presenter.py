@@ -15,11 +15,14 @@ a running app; only :func:`render_query_failure` touches ``st``.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from core.failure_codes import FailureCode
 from core.outcomes import FailureInfo, OutcomeStatus, new_correlation_id
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:  # pragma: no cover - import only for type checking
     from query_core.query_result import QueryResult
@@ -192,34 +195,100 @@ def present_query_failure(result: "QueryResult") -> PresentedOutcome:
     return present_outcome(result.status, result.failure)
 
 
+# ---------------------------------------------------------------------------
+# Presenter kill-switch (Phase 5)
+# ---------------------------------------------------------------------------
+# The presenter is a hard dependency of every failure surface, so a bug here or
+# a deliberate rollback must degrade to a single, static, user-safe notice
+# rather than raising a fresh unhandled exception. This copy interpolates
+# nothing, so it is safe even when the structured presenter is disabled.
+_FALLBACK_MESSAGE = "I can't complete that request right now."
+_FALLBACK_ACTION = "Please try again in a few minutes."
+
+
+def _fallback_presented() -> PresentedOutcome:
+    """Return the static, always-safe outcome used when presentation fails."""
+
+    return PresentedOutcome(
+        severity="error",
+        message=_FALLBACK_MESSAGE,
+        action=_FALLBACK_ACTION,
+        retry_suggested=True,
+        reference=new_correlation_id(),
+        render_as_notice=True,
+    )
+
+
+def safe_present_outcome(
+    status: OutcomeStatus | str,
+    failure: FailureInfo | None = None,
+) -> PresentedOutcome:
+    """Presenter entry point that never raises and honours the kill-switch.
+
+    When ``USE_STRUCTURED_PRESENTER`` is cleared, or when the structured
+    presenter raises for any reason, this returns the static fallback outcome so
+    a presentation fault cannot escape to Streamlit as an unhandled exception.
+    """
+
+    from config import feature_flags
+
+    if not feature_flags.use_structured_presenter():
+        return _fallback_presented()
+    try:
+        return present_outcome(status, failure)
+    except Exception:  # pylint: disable=broad-except
+        logger.exception("error_presenter.present_outcome failed; using fallback")
+        return _fallback_presented()
+
+
+def safe_present_query_failure(result: "QueryResult") -> PresentedOutcome:
+    """Kill-switch-protected presentation for a completed query result."""
+
+    try:
+        return safe_present_outcome(result.status, result.failure)
+    except Exception:  # pylint: disable=broad-except
+        logger.exception("error_presenter.present_query_failure failed; fallback")
+        return _fallback_presented()
+
+
 def render_query_failure(presented: PresentedOutcome) -> str:
     """Render a presented outcome as a Streamlit notice and return its text.
 
     The returned string is what should be stored in chat history so the
     transcript matches what the user saw. Streamlit is imported lazily so the
-    mapping functions above stay usable without a running app.
+    mapping functions above stay usable without a running app. Rendering is
+    wrapped so that a Streamlit failure downgrades to a plain error notice
+    instead of escaping as an unhandled exception (presenter kill-switch).
     """
 
     import streamlit as st
 
-    caption_parts: list[str] = []
-    if presented.action:
-        caption_parts.append(presented.action)
-    if presented.reference:
-        caption_parts.append(f"Reference: {presented.reference}")
+    try:
+        caption_parts: list[str] = []
+        if presented.action:
+            caption_parts.append(presented.action)
+        if presented.reference:
+            caption_parts.append(f"Reference: {presented.reference}")
 
-    notice = {
-        "success": st.success,
-        "info": st.info,
-        "warning": st.warning,
-        "error": st.error,
-    }.get(presented.severity, st.error)
+        notice = {
+            "success": st.success,
+            "info": st.info,
+            "warning": st.warning,
+            "error": st.error,
+        }.get(presented.severity, st.error)
 
-    notice(presented.message)
-    if caption_parts:
-        st.caption("  •  ".join(caption_parts))
+        notice(presented.message)
+        if caption_parts:
+            st.caption("  •  ".join(caption_parts))
 
-    return presented.message
+        return presented.message
+    except Exception:  # pylint: disable=broad-except
+        logger.exception("render_query_failure failed; rendering static fallback")
+        try:
+            st.error(_FALLBACK_MESSAGE)
+        except Exception:  # pylint: disable=broad-except
+            logger.exception("static fallback notice also failed")
+        return _FALLBACK_MESSAGE
 
 
 __all__ = [
@@ -227,4 +296,6 @@ __all__ = [
     "present_outcome",
     "present_query_failure",
     "render_query_failure",
+    "safe_present_outcome",
+    "safe_present_query_failure",
 ]

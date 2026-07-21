@@ -1,0 +1,62 @@
+# AskAlfred outcome alert rules for Prometheus/Alertmanager.
+# Generated from core.alerts.render_prometheus_rules(); regenerate with
+# scripts/gen_alert_rules.py after changing the rules. Do not edit by hand.
+groups:
+  - name: askalfred_outcome_alerts
+    rules:
+      - alert: AskAlfredCriticalInconsistentRequest
+        expr: sum(increase(askalfred_request_outcome_total{status="critical_inconsistent"}[10m])) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "A request ended in critical_inconsistent state"
+          description: "One or more user requests returned critical_inconsistent, meaning stored state may be inconsistent. Page an operator and reconcile."
+      - alert: AskAlfredCriticalInconsistentIngest
+        expr: sum(increase(askalfred_ingest_outcome_total{status="critical_inconsistent"}[30m])) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "An ingestion run ended in critical_inconsistent state"
+          description: "An ingestion file or run reached critical_inconsistent (e.g. an incomplete FRA rollback). Affected writes are blocked pending reconciliation."
+      - alert: AskAlfredComponentUnavailable
+        expr: max(askalfred_component_readiness{readiness="unavailable"}) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "A required component is unavailable"
+          description: "A named component reported unavailable readiness. Retrieval, answer generation, or access control may be down."
+      - alert: AskAlfredComponentDegraded
+        expr: max(askalfred_component_readiness{readiness="degraded"}) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "A component is running degraded"
+          description: "A named component reported degraded readiness (reduced-capability fallback active). Results may be incomplete."
+      - alert: AskAlfredElevatedErrorRate
+        expr: sum(increase(askalfred_request_outcome_total{status=~"unavailable|failed"}[10m])) / clamp_min(sum(increase(askalfred_request_outcome_total[10m])), 1) > 0.2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Elevated unavailable/failed request rate"
+          description: "The share of requests ending unavailable or failed exceeded 20% of recent traffic."
+      - alert: AskAlfredServiceDegradedEvents
+        expr: sum(increase(askalfred_service_degraded_total[10m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Degraded-service events observed"
+          description: "A backend (e.g. the rate-limit store) failed open or degraded. Safeguards may be running in a reduced mode."
+      - alert: AskAlfredAclMetadataDrops
+        expr: sum(increase(askalfred_acl_metadata_drop_total[30m])) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Matches dropped for missing ACL metadata"
+          description: "Vectors were dropped during access filtering for missing/invalid ACL metadata. Identify and re-ingest/quarantine non-conformant vectors."

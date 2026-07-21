@@ -3,15 +3,15 @@
 """
 Unified search core package.
 
-Provides:
-- semantic_search()      vector semantic retrieval
-- planon_search()        structured property/condition/ranking logic
-- maintenance_search()   structured maintenance lookups
-- execute()              unified router for SearchInstructions
+Provides (all on the structured per-source outcome contract):
+- semantic_search_with_outcome()   vector semantic retrieval
+- planon_search_with_outcome()     structured property/condition/ranking logic
+- maintenance_search_with_outcome() structured maintenance lookups
+- execute_with_outcome()           unified router for SearchInstructions
 """
 
-from .maintenance_search import maintenance_search, maintenance_search_with_outcome
-from .planon_search import planon_search, planon_search_with_outcome
+from .maintenance_search import maintenance_search_with_outcome
+from .planon_search import planon_search_with_outcome
 from .retrieval_outcomes import (
     SemanticOutcome,
     StructuredAnswerOutcome,
@@ -19,7 +19,7 @@ from .retrieval_outcomes import (
 )
 
 # Router for SearchInstructions
-from .search_router import execute, execute_with_outcome
+from .search_router import execute_with_outcome
 
 # Utilities (optional re-export)
 from .search_utils import (
@@ -29,19 +29,15 @@ from .search_utils import (
     get_effective_score,
     search_one_index,
 )
-from .semantic_search import semantic_search, semantic_search_with_outcome
+from .semantic_search import semantic_search_with_outcome
 
 __all__ = [
-    "semantic_search",
     "semantic_search_with_outcome",
     "SemanticOutcome",
     "StructuredAnswerOutcome",
     "aggregate_source_outcomes",
-    "planon_search",
     "planon_search_with_outcome",
-    "maintenance_search",
     "maintenance_search_with_outcome",
-    "execute",
     "execute_with_outcome",
     "search_one_index",
     "deduplicate_results",

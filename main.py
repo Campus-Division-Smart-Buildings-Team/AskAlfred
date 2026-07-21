@@ -33,7 +33,7 @@ from config import (
     UI_RECENT_TURNS_FOR_SUMMARY,
     UI_SNIPPET_MAX_CHARS,
     UI_SUMMARY_MAX_TOKENS,
-    USE_QUERY_MANAGER,
+    feature_flags,
 )
 from config.constant import IS_PRODUCTION
 from core.clients import ClientManager
@@ -41,8 +41,6 @@ from core.outcomes import OutcomeStatus
 from query_core.intent_classifier import NLPIntentClassifier, warm_encoder_runtime_async
 from query_core.query_context import build_access_filter, validate_access_context
 from query_core.query_manager import QueryManager
-from search_core.search_instructions import SearchInstructions
-from search_core.search_router import execute, normalise_execute_result
 from search_core.semantic_search import semantic_search_with_outcome
 from security.input_validator import get_validation_summary, validate_query_security
 from security.log_sanitiser import SanitisedFormatter, sanitise_error
@@ -58,9 +56,9 @@ from security.sanitise_context import (
 )
 from ui.emojis import EMOJI_BOOKS, EMOJI_CAUTION, EMOJI_GORILLA, EMOJI_TIME
 from ui.error_presenter import (
-    present_outcome,
-    present_query_failure,
     render_query_failure,
+    safe_present_outcome,
+    safe_present_query_failure,
 )
 from ui.ui_components import (
     display_chat_history,
@@ -319,7 +317,7 @@ def handle_chat_input(top_k: int):
         safe_markdown(query)
 
     # Route through query manager or legacy system
-    if USE_QUERY_MANAGER:
+    if feature_flags.use_query_manager():
         handle_query_with_manager(query, top_k)
     else:
         handle_search_query(query, top_k)
@@ -407,14 +405,14 @@ def render_manager_result(result) -> tuple[str, list[Any]]:
 
     # Hard failures, rejections, and genuine empty results: notice only.
     if status in _MANAGER_FAILURE_STATUSES or status is OutcomeStatus.EMPTY:
-        return render_query_failure(present_query_failure(result)), []
+        return render_query_failure(safe_present_query_failure(result)), []
 
     # Nothing to display but not a hard failure (e.g. partial with no results).
     if not result.answer and not result.results:
         if status is OutcomeStatus.SUCCESS:
             st.markdown(NO_RESULTS_MESSAGE)
             return NO_RESULTS_MESSAGE, []
-        return render_query_failure(present_query_failure(result)), []
+        return render_query_failure(safe_present_query_failure(result)), []
 
     # success / low_confidence / degraded / partial with content to show.
     if result.answer:
@@ -437,7 +435,7 @@ def render_manager_result(result) -> tuple[str, list[Any]]:
     # Concise capability warning for incomplete coverage. low_confidence already
     # shows a low-score note above, and success needs no notice.
     if status in (OutcomeStatus.PARTIAL, OutcomeStatus.DEGRADED):
-        render_query_failure(present_query_failure(result))
+        render_query_failure(safe_present_query_failure(result))
 
     return history_content, result.results
 
@@ -568,18 +566,6 @@ def main():
     display_last_results()
 
 
-def safe_execute(
-    instr: SearchInstructions,
-) -> tuple[list[dict[str, Any]], str, str, bool]:
-    """Run search_core.execute and normalise its return shape.
-
-    Raises :class:`SearchError` on an unexpected return-arity so a router
-    contract violation surfaces as a typed failure rather than a silent empty
-    result (SEARCH-12).
-    """
-    return normalise_execute_result(execute(instr))
-
-
 def handle_search_query(query: str, top_k: int):
     """Handle search queries via the structured semantic outcome path."""
     with st.chat_message("assistant", avatar=EMOJI_GORILLA):
@@ -599,7 +585,7 @@ def handle_search_query(query: str, top_k: int):
                 access_failure.component,
             )
             history_content = render_query_failure(
-                present_outcome(OutcomeStatus.REJECTED, access_failure)
+                safe_present_outcome(OutcomeStatus.REJECTED, access_failure)
             )
             st.session_state.messages.append(
                 {"role": "assistant", "content": history_content}
@@ -635,7 +621,7 @@ def render_legacy_semantic_outcome(outcome):
 
     # A required-source outage must not read as "no results" (Phase 2 exit).
     if status in _MANAGER_FAILURE_STATUSES or status is OutcomeStatus.EMPTY:
-        content = render_query_failure(present_outcome(status, outcome.failure))
+        content = render_query_failure(safe_present_outcome(status, outcome.failure))
         st.session_state.messages.append(
             {"role": "assistant", "content": content}
         )
@@ -648,7 +634,7 @@ def render_legacy_semantic_outcome(outcome):
             outcome.answer or "", outcome.results, outcome.publication_info
         )
     else:
-        content = render_query_failure(present_outcome(status, outcome.failure))
+        content = render_query_failure(safe_present_outcome(status, outcome.failure))
         st.session_state.messages.append(
             {"role": "assistant", "content": content}
         )
@@ -656,7 +642,7 @@ def render_legacy_semantic_outcome(outcome):
 
     # Concise capability warning for incomplete coverage.
     if status in (OutcomeStatus.PARTIAL, OutcomeStatus.DEGRADED):
-        render_query_failure(present_outcome(status, outcome.failure))
+        render_query_failure(safe_present_outcome(status, outcome.failure))
 
 
 def handle_no_results():

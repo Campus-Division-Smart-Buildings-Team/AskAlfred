@@ -125,8 +125,8 @@ def test_present_query_failure_reads_result_status_and_failure():
     assert presented.reference == failure.correlation_id
 
 
-def test_legacy_failed_result_still_gets_a_reference():
-    result = QueryResult(query="hello", answer=None, success=False)
+def test_failed_result_without_failure_still_gets_a_reference():
+    result = QueryResult(query="hello", answer=None, status=OutcomeStatus.FAILED)
 
     presented = present_query_failure(result)
 

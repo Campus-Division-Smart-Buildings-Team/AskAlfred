@@ -7,10 +7,10 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from core.outcomes import (
-    COMPATIBLE_SUCCESS_STATUSES,
     FailureInfo,
     OutcomeStatus,
     SourceOutcome,
+    is_successful,
 )
 
 
@@ -18,9 +18,10 @@ from core.outcomes import (
 class QueryResult:
     """Represent the final response and its structured operation outcome.
 
-    ``success`` remains available as a temporary compatibility property while
-    handlers migrate to ``status``. New code should use ``status``, ``failure``,
-    ``degraded_components``, and ``source_outcomes`` directly.
+    ``status`` (with ``failure``, ``degraded_components``, and
+    ``source_outcomes``) is the single source of truth for a result's outcome.
+    The legacy boolean ``success`` argument/property was removed in Phase 5;
+    derive a coarse success signal from :func:`core.outcomes.is_successful`.
     """
 
     query: str
@@ -44,7 +45,6 @@ class QueryResult:
         results: list[Any] | None = None,
         handler_used: Optional[str] = None,
         query_type: Optional[str] = None,
-        success: bool | None = None,
         processing_time_ms: Optional[float] = None,
         publication_date_info: Any = None,
         score_too_low: Optional[bool] = None,
@@ -55,21 +55,11 @@ class QueryResult:
         degraded_components: list[str] | None = None,
         source_outcomes: list[SourceOutcome] | None = None,
     ) -> None:
-        """Create a result while accepting the legacy ``success`` argument.
-
-        Existing callers that pass ``success=False`` are mapped to ``failed``
-        until they are migrated to a more precise outcome.
-        """
+        """Create a result from its structured status (defaults to success)."""
 
         resolved_status = (
             OutcomeStatus(status) if status is not None else OutcomeStatus.SUCCESS
         )
-        if status is None and success is False:
-            resolved_status = OutcomeStatus.FAILED
-        elif success is not None:
-            compatible_success = resolved_status in COMPATIBLE_SUCCESS_STATUSES
-            if success != compatible_success:
-                raise ValueError("success conflicts with the structured status")
 
         self.query = query
         self.answer = answer
@@ -84,18 +74,6 @@ class QueryResult:
         self.publication_date_info = publication_date_info
         self.score_too_low = score_too_low
         self.metadata = dict(metadata or {})
-
-    @property
-    def success(self) -> bool:
-        """Temporary boolean compatibility view of the structured status."""
-
-        return self.status in COMPATIBLE_SUCCESS_STATUSES
-
-    @success.setter
-    def success(self, value: bool) -> None:
-        """Support legacy mutation while callers migrate to ``status``."""
-
-        self.status = OutcomeStatus.SUCCESS if value else OutcomeStatus.FAILED
 
     def add_metadata(self, key: str, value: Any) -> None:
         """Add a single metadata item."""
@@ -120,7 +98,7 @@ class QueryResult:
             "handler_used": self.handler_used,
             "query_type": self.query_type,
             "status": self.status.value,
-            "success": self.success,
+            "successful": is_successful(self.status),
             "failure": self.failure.to_dict() if self.failure else None,
             "degraded_components": list(self.degraded_components),
             "source_outcomes": [
@@ -140,5 +118,5 @@ class QueryResult:
             f"QueryResult(query={self.query!r}, "
             f"handler={self.handler_used!r}, "
             f"query_type={self.query_type!r}, status={self.status.value!r}, "
-            f"success={self.success}, results={len(self.results)} items)"
+            f"results={len(self.results)} items)"
         )

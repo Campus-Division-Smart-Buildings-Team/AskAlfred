@@ -25,6 +25,7 @@ from config import (
 )
 from core.alfred_exceptions import ConfigError
 from core.failure_codes import FailureCode
+from core.fault_injection import FaultPoint, maybe_fail
 from core.outcomes import FailureInfo
 from query_core.query_context import auth_is_mandatory
 from security.log_sanitiser import sanitise_error
@@ -403,6 +404,7 @@ def _try_complete_authentication() -> AuthContext | None:
         return None
 
     try:
+        maybe_fail(FaultPoint.AUTH_CALLBACK)
         app = build_msal_app(allow_common_fallback=not AUTH_STRICT_TENANT)
         result = app.acquire_token_by_auth_code_flow(flow, auth_response=params)
     except Exception as error:  # pylint: disable=broad-except

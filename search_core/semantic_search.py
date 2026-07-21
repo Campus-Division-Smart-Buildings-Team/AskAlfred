@@ -11,6 +11,7 @@ from building.utils import (
 from config import MIN_SCORE_THRESHOLD, TARGET_INDEXES, get_index_config
 from core.alfred_exceptions import AnswerGenerationError
 from core.failure_codes import FailureCode
+from core.fault_injection import FaultPoint, maybe_fail
 from core.outcomes import FailureInfo, OutcomeStatus, SourceOutcome
 from core.pinecone_utils import embed_texts
 from domain.business_terms import BusinessTermMapper
@@ -225,6 +226,7 @@ def semantic_search_with_outcome(
     else:
         # ===== Answer-generation stage =====
         try:
+            maybe_fail(FaultPoint.OPENAI_ANSWER)
             answer, pub_info, top_hits = _generate_semantic_answer(
                 query, top_hits, building, term_context
             )
@@ -269,20 +271,3 @@ def semantic_search_with_outcome(
         source_outcomes=source_outcomes,
         degraded_components=degraded_components,
     )
-
-
-def semantic_search(
-    query: str,
-    top_k: int,
-    building_filter: Optional[str] = None,
-    access_filter: Optional[dict] = None,
-) -> tuple[list[dict], str, str, bool]:
-    """Backward-compatible 4-tuple wrapper around :func:`semantic_search_with_outcome`.
-
-    Returns ``(results, answer, publication_info, score_too_low)``. Callers that
-    need the structured status should use :func:`semantic_search_with_outcome`.
-    """
-    outcome = semantic_search_with_outcome(
-        query, top_k, building_filter=building_filter, access_filter=access_filter
-    )
-    return outcome.as_legacy_tuple()

@@ -19,6 +19,7 @@ from building.utils import (
 )
 from config import SEARCH_ALL_NAMESPACES, TARGET_INDEXES, get_index_config
 from core.failure_codes import FailureCode
+from core.fault_injection import FaultPoint, maybe_fail
 from core.outcomes import FailureInfo, OutcomeStatus, SourceOutcome
 from core.pinecone_utils import (
     embed_texts,
@@ -183,6 +184,7 @@ def search_one_index_with_outcome(
     queried concurrently with one shared query embedding.
     """
     try:
+        maybe_fail(FaultPoint.PINECONE_INDEX_OPEN)
         idx = open_index(idx_name)
     except Exception as e:  # pylint: disable=broad-except
         logging.warning("Failed to open index '%s': %s", idx_name, sanitise_error(e))
@@ -217,6 +219,7 @@ def search_one_index_with_outcome(
     # Embed the query once; the same vector is valid for every namespace.
     if query_vector is None:
         try:
+            maybe_fail(FaultPoint.OPENAI_EMBEDDING)
             query_vector = embed_texts([query], embed_model)[0]
         except Exception as e:  # pylint: disable=broad-except
             logging.warning(
@@ -230,6 +233,7 @@ def search_one_index_with_outcome(
         ns_display = "(default)" if ns is None else ns
         logging.debug("Querying index '%s' in namespace: %s", idx_name, ns_display)
         try:
+            maybe_fail(FaultPoint.PINECONE_QUERY)
             raw = vector_query(
                 idx,
                 namespace=ns,

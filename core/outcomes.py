@@ -24,8 +24,8 @@ class OutcomeStatus(str, Enum):
     CRITICAL_INCONSISTENT = "critical_inconsistent"
 
 
-# These states map to ``True`` for the temporary QueryResult.success
-# compatibility property. Rejected requests and system failures map to False.
+# Statuses that count as a usable (possibly-degraded) success for stats and
+# routing. Rejected requests and system failures are excluded.
 COMPATIBLE_SUCCESS_STATUSES = frozenset(
     {
         OutcomeStatus.SUCCESS,
@@ -35,6 +35,18 @@ COMPATIBLE_SUCCESS_STATUSES = frozenset(
         OutcomeStatus.PARTIAL,
     }
 )
+
+
+def is_successful(status: OutcomeStatus | str) -> bool:
+    """Return whether ``status`` counts as a usable (possibly-degraded) success.
+
+    This replaces the removed ``QueryResult.success`` boolean: callers that need
+    a coarse success signal should derive it from the structured status here so
+    there is a single, authoritative definition.
+    """
+
+    resolved = status if isinstance(status, OutcomeStatus) else OutcomeStatus(status)
+    return resolved in COMPATIBLE_SUCCESS_STATUSES
 
 
 def new_correlation_id() -> str:
@@ -130,5 +142,6 @@ __all__ = [
     "FailureInfo",
     "OutcomeStatus",
     "SourceOutcome",
+    "is_successful",
     "new_correlation_id",
 ]
