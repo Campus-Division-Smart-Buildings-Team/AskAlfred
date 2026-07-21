@@ -8,7 +8,6 @@ With dynamic building cache initialisation across all indexes.
 import logging
 import os
 import time
-import zipfile
 from pathlib import Path
 from typing import Any, Optional
 
@@ -37,6 +36,7 @@ from config import (
 )
 from config.constant import IS_PRODUCTION
 from core.clients import ClientManager
+from core.model_archive import initialise_local_model_archive
 from core.outcomes import OutcomeStatus
 from query_core.intent_classifier import NLPIntentClassifier, warm_encoder_runtime_async
 from query_core.query_context import build_access_filter, validate_access_context
@@ -81,21 +81,6 @@ os.environ["HF_HUB_OFFLINE"] = "1"
 
 MODEL_ZIP = Path("models/all-MiniLM-L6-v2.zip")
 MODEL_DIR = Path("models/all-MiniLM-L6-v2")
-
-
-def _safe_extract_zip(zip_path: Path, dest_dir: Path) -> None:
-    """Extract a zip, rejecting any member that would escape dest_dir (zip-slip)."""
-    dest_root = dest_dir.resolve()
-    with zipfile.ZipFile(zip_path, "r") as z:
-        for member in z.namelist():
-            target = (dest_dir / member).resolve()
-            if target != dest_root and dest_root not in target.parents:
-                raise ValueError(f"Unsafe path in archive {zip_path}: {member!r}")
-        z.extractall(dest_dir)
-
-
-if MODEL_ZIP.exists() and not MODEL_DIR.exists():
-    _safe_extract_zip(MODEL_ZIP, MODEL_DIR)
 
 
 os.environ["STREAMLIT_LOG_LEVEL"] = "info"  # ensure Streamlit honours INFO
@@ -182,6 +167,12 @@ MIN_QUERY_LENGTH = QUERY_MIN_LENGTH
 
 
 @st.cache_resource(show_spinner=False)
+def initialise_model_archive_once() -> bool:
+    """Prepare the optional local intent model during controlled startup."""
+    return initialise_local_model_archive(MODEL_ZIP, MODEL_DIR)
+
+
+@st.cache_resource(show_spinner=False)
 def initialise_rate_limiter_once() -> bool:
     """Initialise the process-wide rate limiter exactly once.
 
@@ -205,12 +196,12 @@ def initialise_rate_limiter_once() -> bool:
 
 
 @st.cache_resource(show_spinner="Getting Alfred ready…")
-def get_intent_classifier() -> NLPIntentClassifier:
+def get_intent_classifier(enable_model: bool = True) -> NLPIntentClassifier:
     """
     Process-wide intent classifier. The CT2 model load and intent embedding
     generation happen once per server process instead of once per session.
     """
-    return NLPIntentClassifier()
+    return NLPIntentClassifier(enable_model=enable_model)
 
 
 @st.cache_resource(show_spinner="Loading building information…")
@@ -332,7 +323,9 @@ def handle_query_with_manager(query: str, top_k: int):
     # embeddings) is shared process-wide via st.cache_resource.
     if "manager" not in st.session_state:
         st.session_state.manager = QueryManager(
-            intent_classifier=get_intent_classifier()
+            intent_classifier=get_intent_classifier(
+                st.session_state.get("intent_model_enabled", True)
+            )
         )
     manager = st.session_state.manager
 
@@ -516,6 +509,11 @@ def main():
     """Main application function."""
     setup_page_config()
     render_custom_css()
+
+    # Archive validation/extraction belongs to controlled startup so a bad
+    # deployment artifact cannot abort module import. On failure the classifier
+    # is explicitly constructed in its reduced-capability pattern-only mode.
+    st.session_state.intent_model_enabled = initialise_model_archive_once()
 
     auth_context = ensure_authentication()
 

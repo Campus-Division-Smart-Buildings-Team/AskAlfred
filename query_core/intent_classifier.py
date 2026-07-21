@@ -280,6 +280,7 @@ class NLPIntentClassifier:
         model_name: str = "michaelfeil/ct2fast-all-MiniLM-L6-v2",
         confidence_threshold: float = INTENT_CONFIDENCE_THRESHOLD,
         cache_path: str = "intent_embeddings_cache",
+        enable_model: bool = True,
     ):
         self.logger = logging.getLogger(self.__class__.__name__)
         self.model_name = model_name
@@ -300,7 +301,12 @@ class NLPIntentClassifier:
             for ex in examples
         }
 
-        if _get_encoder_ct2_runtime() is not None:
+        if not enable_model:
+            self.logger.warning(
+                "%s Running in pattern-only mode because local model startup failed.",
+                EMOJI_CAUTION,
+            )
+        elif _get_encoder_ct2_runtime() is not None:
             try:
                 self._load_or_init_model()
                 self.enabled = True
