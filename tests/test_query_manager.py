@@ -5,9 +5,23 @@ ensuring correct routing of queries to handlers and backward compatibility of re
 
 import pytest
 
+from query_core import query_context
 from query_core.query_manager import QueryManager, process_query_unified
 from query_core.query_result import QueryResult
 from query_core.query_types import QueryType
+
+
+@pytest.fixture(autouse=True)
+def _dev_anonymous_posture(monkeypatch):
+    """Run routing tests under the development anonymous-access posture.
+
+    These tests submit anonymous queries to exercise routing. Mandatory-auth
+    rejection of anonymous sessions (AUTH-13) is covered separately in
+    tests/test_phase3_degraded_and_access.py and test_access_context_validation.py.
+    """
+    monkeypatch.setattr(query_context, "IS_PRODUCTION", False)
+    monkeypatch.setattr(query_context, "REQUIRE_AUTH", False)
+    monkeypatch.setattr(query_context, "ALLOW_ANONYMOUS_DEV", True)
 
 # Test queries with expected routing
 TEST_CASES = [

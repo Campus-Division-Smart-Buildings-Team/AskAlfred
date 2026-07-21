@@ -589,6 +589,7 @@ def handle_search_query(query: str, top_k: int):
             authenticated=bool(st.session_state.get("authenticated", False)),
             tenant_id=st.session_state.get("tenant_id"),
             user_roles=tuple(st.session_state.get("user_roles", [])),
+            auth_mandatory=authentication_required(),
         )
         if access_failure is not None:
             logging.warning(
@@ -616,6 +617,7 @@ def handle_search_query(query: str, top_k: int):
                         authenticated=bool(
                             st.session_state.get("authenticated", False)
                         ),
+                        auth_mandatory=authentication_required(),
                     ),
                 )
 

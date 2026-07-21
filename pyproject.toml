@@ -28,7 +28,7 @@ hf_hub_ctranslate2 = ">=2.13.0"
 # hf-hub-ctranslate2 imports torch at module load but does not declare it.
 # Its classifier runs through CTranslate2, so Linux does not need a CUDA torch build.
 torch = [
-    { version = ">=2.9.0,<2.11.0", markers = "sys_platform == 'linux'", source = "pytorch-cpu" },
+    { version = ">=2.13.0,<2.14.0", markers = "sys_platform == 'linux'", source = "pytorch-cpu" },
     { version = ">=2.9.0,<2.11.0", markers = "sys_platform != 'linux'" },
 ]
 python-dotenv = ">=1.1.0"

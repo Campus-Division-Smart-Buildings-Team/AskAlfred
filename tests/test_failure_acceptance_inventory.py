@@ -22,6 +22,10 @@ REGISTER_PATH = REPO_ROOT / "plan" / "failure_and_degraded_states_plan.md"
 # migrated to typed source outcomes (search_one_index_with_outcome,
 # _query_index_with_outcome, and per-source embedding outcomes). The best-effort
 # `_query_index_with_batches` wrapper still returns [] and remains frozen.
+#
+# Phase 3 removed the rate-limiter lease entries: RedisRateLimiter.acquire_lease
+# and release_lease now fail closed (return False) instead of returning a
+# nominal-success sentinel, and emit a degraded-service metric (START-06).
 SILENT_FAILURE_BASELINE = {
     "auth/auth_manager.py:_try_complete_authentication",
     "building/alias_override.py:validate_overrides",
@@ -35,8 +39,6 @@ SILENT_FAILURE_BASELINE = {
     "ingest/document_content.py:extract_maintenance_csv",
     "ingest/upsert_handler.py:Dispatcher._execute_inline",
     "search_core/structured_queries.py:_query_index_with_batches",
-    "security/rate_limiter.py:RedisRateLimiter.acquire_lease",
-    "security/rate_limiter.py:RedisRateLimiter.release_lease",
 }
 
 

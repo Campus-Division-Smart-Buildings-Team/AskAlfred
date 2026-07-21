@@ -602,6 +602,94 @@ classification, empty model responses, and the router contract guard. The full
 suite reports 506 passed and 5 platform/capability skips when run with a
 workspace-local pytest temp directory; `ruff check .` also passes.
 
+## Phase 3 update (completed 2026-07-21)
+
+Degraded-service observability and access-control posture are now explicit,
+measurable, and fail-safe. Redis outages are made visible instead of silently
+allowing traffic; integrity-critical exclusivity fails closed; the anonymous
+retrieval path can no longer reach ACL-tagged data in mandatory-auth
+deployments; and ACL conformance is measurable.
+
+Implemented:
+
+- Added `core/telemetry.py`: a process-wide, low-cardinality telemetry recorder
+  and a component readiness registry (plan section H, item 1). It records
+  request outcomes by status/failure code, per-source outcomes, fallback
+  activations, degraded-service events, and ACL-metadata drops, and publishes
+  each component as `ready`/`degraded`/`unavailable`. Label safety is enforced,
+  not just documented: metric names, label names, and label values must be short
+  low-cardinality tokens (or enum values), so exception text, user IDs, queries,
+  document names, and file paths are rejected before they can become labels.
+- Made the Redis fail policy explicit per operation (item 2, START-05,
+  START-06, INPUT-09). Query rate limiting still fails open, but each fail-open
+  event emits a `service_degraded` metric and marks `rate_limiter` degraded, so
+  throttling loss is observable. Resource leases now fail *closed*:
+  `RedisRateLimiter.acquire_lease`/`release_lease` deny on backend error rather
+  than returning a nominal success, so integrity-critical exclusivity can never
+  be granted without confirmation. Rate-limiter backend selection publishes
+  readiness at initialisation. The two lease entries were removed from the
+  Phase 0 silent-failure baseline.
+- Resolved the anonymous-access posture and made it fail closed (item 6,
+  AUTH-13). `validate_access_context` and `build_access_filter` take an
+  `auth_mandatory` flag; when authentication is mandatory an anonymous session
+  is rejected with `access.context_invalid` *before* retrieval and receives a
+  deny-all filter as defence in depth. `auth_is_mandatory()` in
+  `query_core.query_context` is the single source of truth, and
+  `auth_manager.authentication_required()` now delegates to it. Anonymous access
+  remains available only under the explicit development posture.
+- Made ACL conformance measurable (item 5, AUTH-10). Matches dropped for a
+  missing ACL envelope under an active access filter are counted via
+  `acl_metadata_drop_total`, keeping "no authorised results" distinct from a
+  silent ACL drop without revealing the dropped vector's identity.
+  `measure_acl_conformance` reports total/compliant/missing plus a conformance
+  ratio and threshold check so non-conformant vectors can be identified for
+  re-ingest/quarantine. (The re-ingest/quarantine pipeline itself is ingestion
+  work carried under Phase 4; this milestone delivers the measurement the exit
+  criterion requires.)
+- Surfaced building-directory and classifier degradation (item 3, ROUTE-03,
+  ROUTE-05, START-02). `QueryManager` publishes building-directory readiness per
+  query; a building-scoped query answered while the directory is unavailable is
+  marked `degraded` (so the UI warns and the reduced-recall answer is not
+  cached), while an unscoped query only records the degraded readiness. Intent
+  classifier fallback records a classifier fallback/degraded state. Every
+  terminal request outcome is recorded by status and failure code.
+- Role-based fail-closed access policy (item 4) remains complete from Phase 1.
+
+Regression coverage:
+
+- `tests/test_phase3_degraded_and_access.py`: the telemetry label/readiness
+  contract; rate-limit fail-open observability and lease fail-closed behaviour;
+  the AUTH-13 mandatory-auth rejection and deny-all filter; ACL drop counting
+  and conformance measurement; and the QueryManager degradation helpers
+  (building-directory downgrade, never upgrading a worse outcome, classifier
+  fallback, and request-outcome recording).
+- `test_auth_manager.py` now asserts the mandatory-auth posture through the
+  shared `auth_is_mandatory()` source of truth; `test_query_manager.py` runs its
+  routing cases under the explicit development anonymous posture.
+- Full suite: 537 passed, 5 platform/capability skips (case-insensitive env
+  vars and symlink creation on Windows) when run with a workspace-local pytest
+  temp directory; `ruff check .` passes.
+
+Exit criteria status:
+
+- Query throttling degradation is observable — met (`service_degraded` metric +
+  degraded readiness on every rate-limit backend fail-open).
+- Integrity-critical leases never fail open — met (lease acquire/release fail
+  closed).
+- Missing tenant/role context cannot masquerade as normal no results — met
+  (pre-retrieval rejection for authenticated-but-incomplete and, under mandatory
+  auth, anonymous sessions).
+- ACL conformance can be measured — met (`measure_acl_conformance` +
+  `acl_metadata_drop_total`); reaching the agreed deployment threshold is an
+  operational rollout activity.
+- The anonymous/unfiltered retrieval path cannot expose ACL-restricted documents
+  in mandatory-auth deployments — met (deny-all filter + pre-retrieval
+  rejection).
+
+Deferred to later phases: identifying and re-ingesting/quarantining the actual
+non-conformant vectors (ingestion pipeline, Phase 4) and wiring the readiness
+snapshot into the operator diagnostics panel and external dashboards (Phase 5).
+
 ## Delivery plan
 
 ### Phase 0: Baseline and contracts

@@ -43,10 +43,20 @@ jobs:
       
       - name: Run Safety check
         id: safety
+        env:
+          SAFETY_API_KEY: ${{ secrets.SAFETY_API_KEY }}
         run: |
           echo "## 🔒 Safety Vulnerability Check" >> $GITHUB_STEP_SUMMARY
-          poetry run safety scan --target . --output json > safety-report.json
-          poetry run safety scan --target . >> $GITHUB_STEP_SUMMARY
+          if [ -z "$SAFETY_API_KEY" ]; then
+            echo "Skipped: configure the SAFETY_API_KEY repository secret to enable Safety. pip-audit will still run." >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
+          poetry run safety --stage cicd scan \
+            --target . \
+            --policy-file .safety-policy.json \
+            --detailed-output \
+            --save-as json safety-report.json \
+            >> $GITHUB_STEP_SUMMARY
       
       - name: Run pip-audit
         id: pip-audit
@@ -65,7 +75,7 @@ jobs:
         id: pinning
         run: |
           echo "## 📌 Poetry Lock Check" >> $GITHUB_STEP_SUMMARY
-          poetry run python scripts/security_scan.py --json
+          poetry check --lock >> $GITHUB_STEP_SUMMARY
       
       - name: Upload security reports
         if: always()

@@ -19,8 +19,49 @@ from functools import wraps
 from typing import Any, Optional
 
 from core.alfred_exceptions import RateLimitError
+from core.failure_codes import FailureCode
+from core.telemetry import (
+    COMPONENT_RATE_LIMITER,
+    COMPONENT_RESOURCE_LEASE,
+    get_readiness,
+    get_telemetry,
+)
 
 logger = logging.getLogger(__name__)
+
+
+# ===========================================================================
+# REDIS FAIL POLICY (plan START-05, START-06, INPUT-09)
+# ===========================================================================
+# Query rate limiting is a best-effort protection: when Redis is unavailable it
+# FAILS OPEN (the request is allowed) but the outage is made observable via a
+# ``service_degraded`` metric and a degraded readiness state, so operators can
+# see that throttling is not enforced.
+#
+# Resource leases guard integrity-critical exclusivity (ingestion/FRA
+# supersession). They must never fail open: if Redis cannot confirm exclusive
+# ownership the lease is DENIED (fail closed) so two workers can never both
+# believe they hold it.
+
+
+def _record_rate_limit_backend_degraded() -> None:
+    """Mark the rate-limit backend degraded and count the fail-open event."""
+    get_telemetry().record_service_degraded(
+        COMPONENT_RATE_LIMITER, FailureCode.RATE_LIMIT_BACKEND_UNAVAILABLE
+    )
+    get_readiness().mark_degraded(
+        COMPONENT_RATE_LIMITER, FailureCode.RATE_LIMIT_BACKEND_UNAVAILABLE
+    )
+
+
+def _record_lease_backend_degraded() -> None:
+    """Mark the lease backend degraded when a lease op fails closed."""
+    get_telemetry().record_service_degraded(
+        COMPONENT_RESOURCE_LEASE, FailureCode.RATE_LIMIT_BACKEND_UNAVAILABLE
+    )
+    get_readiness().mark_degraded(
+        COMPONENT_RESOURCE_LEASE, FailureCode.RATE_LIMIT_BACKEND_UNAVAILABLE
+    )
 
 
 # ===========================================================================
@@ -270,7 +311,9 @@ class RedisRateLimiter(RateLimiterBackend):
 
         except Exception as e:
             logger.error("Redis rate limit check failed: %s - falling back to allow", e)
-            # Fail open (allow the operation) rather than blocking
+            # Fail open (allow the operation) rather than blocking, but make the
+            # degradation observable so throttling is not silently disabled.
+            _record_rate_limit_backend_degraded()
             return False
 
     def get_remaining_calls(self, key: str, max_calls: int, window_seconds: int) -> int:
@@ -318,8 +361,14 @@ class RedisRateLimiter(RateLimiterBackend):
             return bool(result)
 
         except Exception as e:
-            logger.error("Redis lease acquisition failed: %s", e)
-            return True  # Fail open
+            logger.error(
+                "Redis lease acquisition failed: %s - failing closed (lease denied)",
+                e,
+            )
+            # Integrity-critical exclusivity must fail closed: if we cannot
+            # confirm we hold the lease, deny it (START-06).
+            _record_lease_backend_degraded()
+            return False
 
     def release_lease(self, key: str) -> bool:
         """Release a lease."""
@@ -328,8 +377,13 @@ class RedisRateLimiter(RateLimiterBackend):
             return bool(self.redis.delete(lease_key))
 
         except Exception as e:
-            logger.error("Redis lease release failed: %s", e)
-            return True  # Fail open
+            logger.error(
+                "Redis lease release failed: %s - could not confirm release", e
+            )
+            # Cannot confirm the release; report failure rather than a false
+            # success. The lease still expires by its TTL.
+            _record_lease_backend_degraded()
+            return False
 
 
 # ===========================================================================
@@ -361,14 +415,29 @@ class RateLimiterManager:
                 self._backend = RedisRateLimiter(redis_client)
                 self._use_redis = True
                 logger.info("Using Redis-backed rate limiting")
+                get_readiness().mark_ready(COMPONENT_RATE_LIMITER)
             except Exception as e:
                 logger.warning(
                     "Redis unavailable for rate limiting: %s - using in-memory", e
                 )
                 self._backend = InMemoryRateLimiter()
+                # Distributed limits are unavailable; limits are now process-local
+                # and reset on restart (START-05). Surface it as degraded.
+                get_telemetry().record_service_degraded(
+                    COMPONENT_RATE_LIMITER,
+                    FailureCode.RATE_LIMIT_BACKEND_UNAVAILABLE,
+                )
+                get_readiness().mark_degraded(
+                    COMPONENT_RATE_LIMITER,
+                    FailureCode.RATE_LIMIT_BACKEND_UNAVAILABLE,
+                )
         else:
             self._backend = InMemoryRateLimiter()
             logger.info("Using in-memory rate limiting (dev mode)")
+            get_readiness().mark_degraded(
+                COMPONENT_RATE_LIMITER,
+                FailureCode.RATE_LIMIT_BACKEND_UNAVAILABLE,
+            )
 
     def _ensure_initialised(self):
         """Ensure backend is initialised."""

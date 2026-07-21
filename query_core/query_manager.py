@@ -11,6 +11,7 @@ import logging
 import time
 from typing import Any, Optional
 
+from building.utils import BuildingCacheManager
 from building.validation import INVALID_BUILDING_NAMES
 from config import (
     QUERY_CONF_THRESHOLD,
@@ -19,12 +20,20 @@ from config import (
     QUERY_MANAGER_CONFIG,
     QUERY_RULE_OVERRIDE_THRESHOLD,
 )
+from core.failure_codes import FailureCode
 from core.outcomes import OutcomeStatus
 from core.session_manager import SessionManager
+from core.telemetry import (
+    COMPONENT_BUILDING_DIRECTORY,
+    COMPONENT_INTENT_CLASSIFIER,
+    get_readiness,
+    get_telemetry,
+)
 from query_core.intent_classifier import NLPIntentClassifier
 from query_core.query_context import (
     ACCESS_CONTROL_COMPONENT,
     QueryContext,
+    auth_is_mandatory,
     build_access_filter,
     validate_access_context,
 )
@@ -347,10 +356,12 @@ class QueryManager:
         # Fail closed before retrieval when an authenticated session has no
         # usable access context. Otherwise the deny-all filter below yields
         # zero matches that are indistinguishable from a genuine empty result.
+        mandatory_auth = auth_is_mandatory()
         access_failure = validate_access_context(
             authenticated=context.authenticated,
             tenant_id=context.tenant_id,
             user_roles=context.user_roles,
+            auth_mandatory=mandatory_auth,
         )
         if access_failure is not None:
             self.logger.warning(
@@ -358,6 +369,9 @@ class QueryManager:
                 access_failure.code.value,
                 access_failure.correlation_id,
                 access_failure.component,
+            )
+            get_telemetry().record_request_outcome(
+                OutcomeStatus.REJECTED, access_failure.code
             )
             elapsed_ms = (time.time() - start_time) * 1000
             return QueryResult(
@@ -376,6 +390,7 @@ class QueryManager:
                 tenant_id=context.tenant_id,
                 user_roles=context.user_roles,
                 authenticated=context.authenticated,
+                auth_mandatory=mandatory_auth,
             )
 
         # ---------------------------------------------------
@@ -430,6 +445,11 @@ class QueryManager:
             context.building_filter = context.building
             context.routing_notes.append("synchronised_building_filter")
 
+        # Surface building-directory degradation (ROUTE-03). When the building
+        # cache is unavailable, recognition falls back to pattern/n-gram matching
+        # with reduced recall; a building-scoped query is materially affected.
+        building_directory_degraded = self._record_building_directory_readiness(context)
+
         # Cache check (must happen *after* preprocessors + follow-up inheritance,
         # so the cache key includes the correct building scope)
         cache_key = self._make_cache_key(context)
@@ -454,6 +474,7 @@ class QueryManager:
                 elapsed_ms=elapsed_ms,
                 success=query_result.success,
             )
+            self._record_outcome_telemetry(query_result)
 
             query_result.processing_time_ms = elapsed_ms
             return query_result
@@ -478,6 +499,13 @@ class QueryManager:
 
         if isinstance(route.metadata, dict):
             query_result.metadata.update(route.metadata)
+
+        # A building-scoped query answered while the building directory is
+        # degraded may have reduced recall; mark it degraded so the UI can warn
+        # and so the reduced-recall answer is not cached (ROUTE-03).
+        self._apply_building_directory_degradation(
+            query_result, building_directory_degraded
+        )
 
         # ---------------------------------------------------
         # Stats update (expanded telemetry)
@@ -524,7 +552,61 @@ class QueryManager:
             query_result.processing_time_ms,
         )
 
+        self._record_outcome_telemetry(query_result)
         return query_result
+
+    # =========================================================================
+    # Degraded-mode telemetry (plan section H, ROUTE-03, ROUTE-05)
+    # =========================================================================
+
+    def _record_building_directory_readiness(self, context: QueryContext) -> bool:
+        """Publish building-directory readiness; return True if it degrades this query.
+
+        Returns True only when the directory is unavailable *and* the query is
+        building-scoped, so a concise capability warning is warranted.
+        """
+        try:
+            populated = BuildingCacheManager.is_populated()
+        except Exception:  # pragma: no cover - defensive
+            populated = False
+
+        if populated:
+            get_readiness().mark_ready(COMPONENT_BUILDING_DIRECTORY)
+            return False
+
+        get_readiness().mark_degraded(
+            COMPONENT_BUILDING_DIRECTORY,
+            FailureCode.BUILDING_DIRECTORY_UNAVAILABLE,
+        )
+        get_telemetry().record_fallback(COMPONENT_BUILDING_DIRECTORY)
+
+        building_scoped = bool(context.building_filter or context.building)
+        return building_scoped
+
+    def _apply_building_directory_degradation(
+        self, query_result: QueryResult, degraded: bool
+    ) -> None:
+        """Mark a building-scoped result degraded when the directory is unavailable."""
+        if not degraded:
+            return
+        if COMPONENT_BUILDING_DIRECTORY not in query_result.degraded_components:
+            query_result.degraded_components.append(COMPONENT_BUILDING_DIRECTORY)
+        # Only downgrade trustworthy outcomes; never upgrade a worse outcome
+        # (failed/unavailable/partial/rejected) to degraded.
+        if query_result.status in _CACHEABLE_STATUSES:
+            query_result.status = OutcomeStatus.DEGRADED
+
+    def _record_intent_classifier_degraded(self) -> None:
+        """Record an intent-classifier fallback for this query (ROUTE-05)."""
+        get_readiness().mark_degraded(COMPONENT_INTENT_CLASSIFIER)
+        get_telemetry().record_fallback(COMPONENT_INTENT_CLASSIFIER)
+
+    def _record_outcome_telemetry(self, query_result: QueryResult) -> None:
+        """Record the terminal request outcome by status and failure code."""
+        failure_code = (
+            query_result.failure.code if query_result.failure is not None else None
+        )
+        get_telemetry().record_request_outcome(query_result.status, failure_code)
 
     # =========================================================================
     # Preprocessor execution
@@ -606,6 +688,7 @@ class QueryManager:
             self.logger.error(
                 "Intent classifier failed: %s", sanitise_error(e), exc_info=False
             )
+            self._record_intent_classifier_degraded()
             ml = None
 
         # --------------------------------------------------------

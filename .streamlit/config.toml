@@ -1,0 +1,7 @@
+[server]
+# Disable the dev file-watcher. It walks every imported module (including
+# transformers' lazily-loaded vision image-processors), which triggers noisy
+# ModuleNotFoundError tracebacks for optional deps we don't use (scipy.optimize,
+# torchvision). Turning it off silences that noise; the trade-off is no source
+# auto-reload, which is the expected posture for how this app is run.
+fileWatcherType = "none"

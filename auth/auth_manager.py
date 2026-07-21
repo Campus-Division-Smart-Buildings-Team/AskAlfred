@@ -23,10 +23,10 @@ from config import (
     AUTH_STRICT_TENANT,
     REQUIRE_AUTH,
 )
-from config.constant import IS_PRODUCTION
 from core.alfred_exceptions import ConfigError
 from core.failure_codes import FailureCode
 from core.outcomes import FailureInfo
+from query_core.query_context import auth_is_mandatory
 from security.log_sanitiser import sanitise_error
 
 logger = logging.getLogger(__name__)
@@ -170,8 +170,13 @@ def _remove_cached_auth_flow(state: str | None) -> None:
 
 
 def authentication_required() -> bool:
-    """Return True when the current environment must block anonymous access."""
-    return IS_PRODUCTION or REQUIRE_AUTH or not ALLOW_ANONYMOUS_DEV
+    """Return True when the current environment must block anonymous access.
+
+    Delegates to :func:`query_core.query_context.auth_is_mandatory` so the
+    mandatory-auth posture has a single source of truth shared with the
+    pre-retrieval access-context gate (AUTH-13).
+    """
+    return auth_is_mandatory()
 
 
 def _normalise_query_params(params: dict[str, Any]) -> dict[str, str]:

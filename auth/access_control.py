@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Optional
 
 from auth.auth_context import AuthContext
 from config import OPERATOR_ROLES
+from core.telemetry import get_telemetry
 
 REQUIRED_ACL_FIELDS = ("tenant_id", "access_level", "allowed_roles")
 
@@ -53,17 +55,66 @@ def filter_authorized_structured_matches(
 ) -> list[dict[str, Any]]:
     """Fail closed on missing ACL metadata and drop matches outside access scope."""
     authorised_matches: list[dict[str, Any]] = []
+    missing_acl_drops = 0
     for match in matches:
         metadata = match.get("metadata", {}) or {}
         # Only enforce the ACL envelope when an access filter is in play;
         # legacy vectors without ACL metadata remain visible to unscoped
         # (anonymous/dev) sessions until they are re-ingested.
         if access_filter and not has_required_acl_metadata(metadata):
+            # Track non-compliant vectors so ACL conformance is measurable and
+            # "no authorised results" stays distinct from a silent ACL drop
+            # (AUTH-10). The vector's identity is never used as a metric label.
+            missing_acl_drops += 1
             continue
         if access_filter and not metadata_matches_filter(metadata, access_filter):
             continue
         authorised_matches.append(match)
+    if missing_acl_drops:
+        get_telemetry().record_acl_metadata_drop(missing_acl_drops)
     return authorised_matches
+
+
+@dataclass(frozen=True)
+class AclConformance:
+    """Measured ACL-envelope conformance across a set of vector metadata records."""
+
+    total: int
+    compliant: int
+    missing: int
+
+    @property
+    def conformance_ratio(self) -> float:
+        """Fraction of records carrying the full ACL envelope (1.0 when empty)."""
+        if self.total == 0:
+            return 1.0
+        return self.compliant / self.total
+
+    def meets_threshold(self, threshold: float) -> bool:
+        """True when conformance is at or above ``threshold`` (0.0-1.0)."""
+        return self.conformance_ratio >= threshold
+
+
+def measure_acl_conformance(
+    records: list[dict[str, Any]],
+) -> AclConformance:
+    """Measure ACL-envelope conformance for a batch of metadata dicts.
+
+    Each record may be a raw metadata dict or a match wrapping ``metadata``.
+    This is the measurement primitive behind the Phase 3 exit criterion "ACL
+    conformance can be measured"; it identifies vectors that would be dropped
+    by :func:`filter_authorized_structured_matches` so they can be re-ingested
+    or quarantined.
+    """
+    total = 0
+    compliant = 0
+    for record in records:
+        metadata = record.get("metadata") if "metadata" in record else record
+        metadata = metadata or {}
+        total += 1
+        if has_required_acl_metadata(metadata):
+            compliant += 1
+    return AclConformance(total=total, compliant=compliant, missing=total - compliant)
 
 
 def filter_authorized_matches(

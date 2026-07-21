@@ -14,6 +14,7 @@ from auth.auth_manager import (
 )
 from core.alfred_exceptions import ConfigError
 from core.failure_codes import FailureCode
+from query_core import query_context
 
 
 def test_normalise_query_params_flattens_lists():
@@ -30,17 +31,19 @@ def test_normalise_query_params_flattens_lists():
 
 
 def test_authentication_is_always_required_in_production(monkeypatch):
-    monkeypatch.setattr(auth_manager, "IS_PRODUCTION", True)
-    monkeypatch.setattr(auth_manager, "REQUIRE_AUTH", False)
-    monkeypatch.setattr(auth_manager, "ALLOW_ANONYMOUS_DEV", True)
+    # authentication_required() delegates to query_context.auth_is_mandatory(),
+    # the single source of truth for the mandatory-auth posture (AUTH-13).
+    monkeypatch.setattr(query_context, "IS_PRODUCTION", True)
+    monkeypatch.setattr(query_context, "REQUIRE_AUTH", False)
+    monkeypatch.setattr(query_context, "ALLOW_ANONYMOUS_DEV", True)
 
     assert authentication_required() is True
 
 
 def test_anonymous_access_remains_available_only_in_development(monkeypatch):
-    monkeypatch.setattr(auth_manager, "IS_PRODUCTION", False)
-    monkeypatch.setattr(auth_manager, "REQUIRE_AUTH", False)
-    monkeypatch.setattr(auth_manager, "ALLOW_ANONYMOUS_DEV", True)
+    monkeypatch.setattr(query_context, "IS_PRODUCTION", False)
+    monkeypatch.setattr(query_context, "REQUIRE_AUTH", False)
+    monkeypatch.setattr(query_context, "ALLOW_ANONYMOUS_DEV", True)
 
     assert authentication_required() is False
 
