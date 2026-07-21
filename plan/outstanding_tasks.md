@@ -8,12 +8,6 @@ rollout.
 
 ## Ingestion and vector gaps
 
-### VECTOR-06 — Bound aggregate upsert retries
-
-- Add a maximum total retry budget across retries and recursive batch splits.
-- Publish idempotency and retry metrics.
-- Verify that exhausting the budget produces an explicit terminal outcome.
-
 ### VECTOR-13 — Add stale-writer telemetry
 
 - Emit a stable metric whenever a processing token rejects a stale terminal
@@ -70,6 +64,23 @@ plan and have not been completed by repository code alone:
 
 ## Recently completed
 
+- **VECTOR-06:** The upsert path now enforces a single aggregate retry budget
+  (`INGEST_UPSERT_MAX_TOTAL_RETRIES`, default `6`) across both retries and
+  recursive batch splits. Previously each split reset the per-batch retry
+  allowance (`INGEST_RETRY_ATTEMPTS`), so a persistently retryable batch could
+  accumulate a large, effectively unbounded total number of retries down its
+  split tree. `UpsertQueueItem` now carries a `retries_consumed` count that a
+  split passes to both children (and a retry increments), so splitting no longer
+  refreshes the budget; the inline path threads the same count and now also
+  propagates `split_depth` through its recursion. `UpsertPolicy.next_action`
+  fails with the stable terminal reason `upsert_retry_budget_exhausted` once the
+  lineage spends the budget, in both the worker and inline paths. Exhaustion is
+  observable via an `upsert_retry_budget_exhausted_total` run stat and
+  low-cardinality `ingest_integrity_total{event=upsert,state=retry_budget_exhausted}`
+  telemetry; retry replay cost is published as `upsert_idempotent_rewrites_total`
+  (idempotent-by-ID rewrites counted per retried batch). Covered by policy-level
+  budget tests plus worker tests for split inheritance, terminal budget
+  exhaustion, and the idempotent-rewrite metric.
 - **VECTOR-04:** A provider embedding response whose length differs from the
   request is now treated as a contract breach rather than an immediate failure.
   `OpenAIEmbedder.embed_texts` re-issues the batch once (the call is idempotent,

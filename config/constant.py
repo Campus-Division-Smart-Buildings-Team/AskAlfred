@@ -124,6 +124,15 @@ INGEST_VERIFY_BACKOFF_CAP = 1.5
 INGEST_VERIFY_ATTEMPTS = 3
 INGEST_UPSERT_SPLIT_MAX_DEPTH = 4
 INGEST_UPSERT_SPLIT_MIN_BATCH_SIZE = 10
+# Aggregate retry budget for one submitted upsert batch across BOTH its retries
+# and its recursive split children (VECTOR-06). INGEST_RETRY_ATTEMPTS bounds
+# retries per batch, but a split previously reset that allowance, so a batch
+# that kept failing and splitting could accumulate an unbounded total number of
+# retries. This caps the cumulative retries along a batch's split lineage; once
+# spent, the batch fails terminally with `upsert_retry_budget_exhausted`. Must
+# be >= INGEST_RETRY_ATTEMPTS so a single un-split batch keeps its normal
+# retries.
+INGEST_UPSERT_MAX_TOTAL_RETRIES = 6
 INGEST_METADATA_MAX_SIZE = 10240  # Previously 40960
 INGEST_METADATA_CACHE_SIZE = 2048
 # Must be >= chunk_tokens (default 500) plus headroom for the per-chunk
@@ -423,6 +432,7 @@ __all__ = [
     "INGEST_VERIFY_ATTEMPTS",
     "INGEST_UPSERT_SPLIT_MAX_DEPTH",
     "INGEST_UPSERT_SPLIT_MIN_BATCH_SIZE",
+    "INGEST_UPSERT_MAX_TOTAL_RETRIES",
     "INGEST_METADATA_MAX_SIZE",
     "INGEST_METADATA_MAX_TEXT_TOKENS",
     "INGEST_VECTOR_BUFFER_MAX_SIZE",

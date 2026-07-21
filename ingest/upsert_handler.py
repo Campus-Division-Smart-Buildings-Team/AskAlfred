@@ -40,6 +40,7 @@ from config import (
     INGEST_BACKOFF_JITTER_MIN,
     INGEST_BACKOFF_JITTER_SPAN,
     INGEST_RETRY_ATTEMPTS,
+    INGEST_UPSERT_MAX_TOTAL_RETRIES,
     INGEST_UPSERT_SPLIT_MAX_DEPTH,
     INGEST_UPSERT_SPLIT_MIN_BATCH_SIZE,
 )
@@ -48,6 +49,7 @@ from core.alfred_exceptions import (
     RetriableError,
     RollbackError,
 )
+from core.telemetry import get_telemetry
 
 from .document_processor import Writer
 from .helpers import (
@@ -74,6 +76,20 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 # 1. UpsertPolicy  (pure — no I/O, no sleeping, no side effects)
 # ---------------------------------------------------------------------------
+
+
+# Stable terminal reason recorded when the aggregate retry budget (retries plus
+# recursive splits) for a submitted batch is spent (VECTOR-06).
+_RETRY_BUDGET_EXHAUSTED_REASON = "upsert_retry_budget_exhausted"
+
+
+def _record_retry_budget_exhausted(ctx: "IngestContext") -> None:
+    """Make an exhausted aggregate upsert-retry budget observable (VECTOR-06)."""
+    ctx.stats.increment("upsert_retry_budget_exhausted_total")
+    try:
+        get_telemetry().record_ingest_integrity("upsert", "retry_budget_exhausted")
+    except Exception:  # pylint: disable=broad-except
+        ctx.logger.warning("Retry-budget telemetry failed", exc_info=True)
 
 
 class _UpsertAction(Enum):
@@ -133,6 +149,7 @@ class UpsertPolicy:
         retry_index: int,
         split_depth: int,
         batch_size: int,
+        retries_consumed: int = 0,
     ) -> _NextAction:
         """
         Decide what to do after a failed upsert attempt.
@@ -142,6 +159,10 @@ class UpsertPolicy:
             retry_index: Number of retries so far (0 = first failure, 1 = first retry, etc.)
             split_depth: Current recursion depth for batch splitting.
             batch_size: Number of vectors in the current batch.
+            retries_consumed: Cumulative retries spent along this batch's split
+                lineage. Unlike ``retry_index`` (which resets on every split),
+                this carries forward so the aggregate retry budget is not
+                refreshed by splitting (VECTOR-06).
 
         Returns:
             One of: _RetryAction, _SplitAction, _FailAction.
@@ -151,6 +172,13 @@ class UpsertPolicy:
 
         if not UpsertPolicy.is_retryable(error):
             return _FailAction(reason="upsert_failed")
+
+        # Aggregate retry budget across retries AND recursive splits. Once the
+        # lineage has spent the budget, stop retrying/splitting and fail with an
+        # explicit terminal reason so a persistently retryable batch cannot spin
+        # indefinitely across split children (VECTOR-06).
+        if retries_consumed >= INGEST_UPSERT_MAX_TOTAL_RETRIES:
+            return _FailAction(reason=_RETRY_BUDGET_EXHAUSTED_REASON)
 
         # Retryable and we have retries left (retry_index < max means we can retry).
         # NOTE: INGEST_RETRY_ATTEMPTS is "number of retries" after the initial attempt.
@@ -204,6 +232,15 @@ class UpsertExecutor:
             batch: List of vector dictionaries to upsert.
             retry_index: Number of retries so far (0 = first try)
         """
+        if retry_index > 0:
+            # A retry re-sends the same vector IDs; the vector-store upsert is
+            # idempotent by ID, so this is an idempotent rewrite of vectors that
+            # may already be partly persisted. Track the replay volume so the
+            # cost of retries/splits is observable (VECTOR-06).
+            self._ctx.stats.increment(
+                "upsert_idempotent_rewrites_total", len(batch)
+            )
+
         batch_bytes_est = _estimate_batch_bytes(batch)
         batch_metadata_avg = _estimate_metadata_bytes_per_vector(batch)
 
@@ -439,6 +476,8 @@ class Dispatcher:
         batch: list[dict[str, Any]],
         *,
         progress: IngestionProgressTracker | None = None,
+        split_depth: int = 0,
+        retries_consumed: int = 0,
     ) -> None:
         if progress:
             progress.write_message(f"Upserting batch of {len(batch)} vectors...")
@@ -447,7 +486,6 @@ class Dispatcher:
         policy = UpsertPolicy(rng=random.Random())
 
         retry_index = 0
-        split_depth = 0
 
         while True:
             upsert_start = time.perf_counter()
@@ -465,10 +503,14 @@ class Dispatcher:
                     error,
                 )
 
-                action = policy.next_action(error, retry_index, split_depth, len(batch))
+                action = policy.next_action(
+                    error, retry_index, split_depth, len(batch), retries_consumed
+                )
 
                 if isinstance(action, _FailAction):
                     self._ctx.logger.exception("Inline upsert failed: %s", error)
+                    if action.reason == _RETRY_BUDGET_EXHAUSTED_REASON:
+                        _record_retry_budget_exhausted(self._ctx)
                     self._ctx.stats.increment("upsert_batch_failures_total")
                     _mark_batch_failed(self._ctx, batch, reason=action.reason)
                     raise
@@ -494,6 +536,7 @@ class Dispatcher:
                     )
                     time.sleep(sleep_secs)
                     retry_index += 1
+                    retries_consumed += 1
 
                 elif isinstance(action, _SplitAction):
                     self._ctx.logger.warning(
@@ -502,9 +545,21 @@ class Dispatcher:
                     )
                     self._ctx.stats.increment("upsert_batch_splits_total")
                     mid = len(batch) // 2
-                    # Recursively process splits
-                    self._execute_inline(batch[:mid], progress=progress)
-                    self._execute_inline(batch[mid:], progress=progress)
+                    # Recursively process splits. Both the split depth and the
+                    # lineage's consumed-retry count carry forward so splitting
+                    # bounds recursion and does not refresh the retry budget.
+                    self._execute_inline(
+                        batch[:mid],
+                        progress=progress,
+                        split_depth=split_depth + 1,
+                        retries_consumed=retries_consumed,
+                    )
+                    self._execute_inline(
+                        batch[mid:],
+                        progress=progress,
+                        split_depth=split_depth + 1,
+                        retries_consumed=retries_consumed,
+                    )
                     return
 
 
@@ -579,6 +634,7 @@ def _upsert_worker(
         batch: list[dict[str, Any]] = []
         retry_index = 0
         split_depth = 0
+        retries_consumed = 0
         upsert_start: float = 0.0
 
         try:
@@ -589,6 +645,7 @@ def _upsert_worker(
             batch = queued.batch
             retry_index = queued.retry_index
             split_depth = queued.split_depth
+            retries_consumed = queued.retries_consumed
             active_batches = getattr(ctx, "active_upsert_batches", None)
             active_lock = getattr(ctx, "active_upsert_batches_lock", None)
             if active_batches is not None and active_lock is not None:
@@ -630,7 +687,9 @@ def _upsert_worker(
                 error,
             )
 
-            action = policy.next_action(error, retry_index, split_depth, len(batch))
+            action = policy.next_action(
+                error, retry_index, split_depth, len(batch), retries_consumed
+            )
 
             if isinstance(action, _FailAction):
                 if action.reason == "rollback_failure":
@@ -659,6 +718,8 @@ def _upsert_worker(
                     stop_event.set()
                 else:
                     ctx.logger.exception("Upsert worker failed: %s", error)
+                    if action.reason == _RETRY_BUDGET_EXHAUSTED_REASON:
+                        _record_retry_budget_exhausted(ctx)
                     ctx.stats.increment("upsert_batch_failures_total")
                     _mark_batch_failed(ctx, batch, reason=action.reason)
 
@@ -688,13 +749,16 @@ def _upsert_worker(
                     sleep_secs = policy.backoff_seconds(retry_index)
                     ctx.stats.observe_timing("upsert_backoff_sleep_seconds", sleep_secs)
                     # Re-queue immediately with a not-before deadline instead
-                    # of sleeping, so this worker stays available
+                    # of sleeping, so this worker stays available. The lineage's
+                    # consumed-retry count advances so the aggregate budget is
+                    # honoured across re-queues (VECTOR-06).
                     upsert_queue.put(
                         UpsertQueueItem(
                             batch,
                             retry_index + 1,
                             split_depth,
                             time.monotonic() + sleep_secs,
+                            retries_consumed=retries_consumed + 1,
                         )
                     )
 
@@ -712,8 +776,24 @@ def _upsert_worker(
                     )
                     ctx.stats.increment("upsert_batch_splits_total")
                     mid = len(batch) // 2
-                    upsert_queue.put(UpsertQueueItem(batch[:mid], 0, split_depth + 1))
-                    upsert_queue.put(UpsertQueueItem(batch[mid:], 0, split_depth + 1))
+                    # Children inherit the lineage's consumed-retry count so a
+                    # split does not refresh the aggregate retry budget (VECTOR-06).
+                    upsert_queue.put(
+                        UpsertQueueItem(
+                            batch[:mid],
+                            0,
+                            split_depth + 1,
+                            retries_consumed=retries_consumed,
+                        )
+                    )
+                    upsert_queue.put(
+                        UpsertQueueItem(
+                            batch[mid:],
+                            0,
+                            split_depth + 1,
+                            retries_consumed=retries_consumed,
+                        )
+                    )
 
         finally:
             active_batches = getattr(ctx, "active_upsert_batches", None)

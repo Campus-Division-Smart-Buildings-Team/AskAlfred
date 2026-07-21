@@ -33,6 +33,10 @@ class UpsertQueueItem:
     retry_index: int = 0
     split_depth: int = 0
     not_before: float = 0.0  # time.monotonic() deadline; 0 = ready now
+    # Cumulative retries consumed along this batch's split lineage (VECTOR-06).
+    # A split carries this forward to its children so the aggregate retry budget
+    # is not refreshed by splitting.
+    retries_consumed: int = 0
 
 
 # ---------------------------------------------------------------------------

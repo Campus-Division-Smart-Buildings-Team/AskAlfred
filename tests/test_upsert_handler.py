@@ -183,3 +183,162 @@ def test_exhausted_retries_split_batch_into_halves(ctx, monkeypatch):
     assert [len(item.batch) for item in halves] == [12, 12]
     assert all(item.retry_index == 0 for item in halves)
     assert all(item.not_before == 0.0 for item in halves)
+
+
+# ---------------------------------------------------------------------------
+# VECTOR-06: aggregate retry budget across retries and recursive splits
+# ---------------------------------------------------------------------------
+
+
+def test_next_action_fails_when_aggregate_budget_exhausted():
+    """Once the lineage has spent the aggregate retry budget, a retryable error
+    yields an explicit terminal failure rather than another retry or split."""
+    action = upsert_handler.UpsertPolicy.next_action(
+        RetriableError("transient"),
+        retry_index=0,
+        split_depth=0,
+        batch_size=100,
+        retries_consumed=upsert_handler.INGEST_UPSERT_MAX_TOTAL_RETRIES,
+    )
+    assert isinstance(action, upsert_handler._FailAction)
+    assert action.reason == upsert_handler._RETRY_BUDGET_EXHAUSTED_REASON
+
+
+def test_next_action_retries_and_splits_within_budget():
+    """With budget remaining, behaviour is unchanged: retry while per-batch
+    retries remain, then split."""
+    retry = upsert_handler.UpsertPolicy.next_action(
+        RetriableError("transient"),
+        retry_index=0,
+        split_depth=0,
+        batch_size=100,
+        retries_consumed=0,
+    )
+    assert isinstance(retry, upsert_handler._RetryAction)
+
+    split = upsert_handler.UpsertPolicy.next_action(
+        RetriableError("transient"),
+        retry_index=upsert_handler.INGEST_RETRY_ATTEMPTS,
+        split_depth=0,
+        batch_size=100,
+        retries_consumed=upsert_handler.INGEST_RETRY_ATTEMPTS,
+    )
+    assert isinstance(split, upsert_handler._SplitAction)
+
+
+def test_split_children_inherit_consumed_retries(ctx, monkeypatch):
+    """A split carries the lineage's consumed-retry count to both children so
+    splitting cannot refresh the aggregate retry budget."""
+    queue = RecordingQueue()
+    stop_event = threading.Event()
+
+    def fake_upsert(_ctx, batch):
+        if len(batch) == 24:
+            raise RetriableError("persistent failure")
+
+    monkeypatch.setattr(upsert_handler, "upsert_vectors_atomic", fake_upsert)
+    monkeypatch.setattr(upsert_handler, "_mark_batch_failed", Mock())
+
+    batch = [_vector(f"v:{i}") for i in range(24)]
+    queue.put(
+        UpsertQueueItem(
+            batch,
+            retry_index=upsert_handler.INGEST_RETRY_ATTEMPTS,
+            retries_consumed=2,
+        )
+    )
+
+    thread = _start_worker(ctx, queue, stop_event, [])
+    assert _wait_for_drain(queue)
+    queue.put(None)
+    thread.join(timeout=5)
+
+    halves = [
+        item
+        for item in queue.recorded
+        if isinstance(item, UpsertQueueItem) and item.split_depth == 1
+    ]
+    assert [len(item.batch) for item in halves] == [12, 12]
+    assert all(item.retries_consumed == 2 for item in halves)
+
+
+def test_aggregate_retry_budget_exhaustion_is_terminal(ctx, monkeypatch):
+    """A persistently retryable batch that keeps splitting terminates with an
+    explicit budget-exhausted outcome and telemetry instead of spinning."""
+    from core.telemetry import get_telemetry
+
+    get_telemetry().reset()
+    for name in (
+        "INGEST_BACKOFF_BASE",
+        "INGEST_BACKOFF_CAP",
+        "INGEST_BACKOFF_JITTER_MIN",
+        "INGEST_BACKOFF_JITTER_SPAN",
+    ):
+        monkeypatch.setattr(upsert_handler, name, 0.0)
+    # Let batches split to singletons and cap the aggregate retries low so the
+    # scenario resolves quickly and deterministically.
+    monkeypatch.setattr(upsert_handler, "INGEST_UPSERT_SPLIT_MIN_BATCH_SIZE", 1)
+    monkeypatch.setattr(upsert_handler, "INGEST_UPSERT_MAX_TOTAL_RETRIES", 4)
+
+    queue = RecordingQueue()
+    stop_event = threading.Event()
+    attempts = {"count": 0}
+
+    def fake_upsert(_ctx, _batch):
+        attempts["count"] += 1
+        raise RetriableError("always fails")
+
+    monkeypatch.setattr(upsert_handler, "upsert_vectors_atomic", fake_upsert)
+    failed_reasons: list[str] = []
+    monkeypatch.setattr(
+        upsert_handler,
+        "_mark_batch_failed",
+        lambda _ctx, _batch, *, reason: failed_reasons.append(reason),
+    )
+
+    batch = [_vector("v:0"), _vector("v:1")]
+    queue.put(UpsertQueueItem(batch))
+
+    thread = _start_worker(ctx, queue, stop_event, [])
+    assert _wait_for_drain(queue)
+    queue.put(None)
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+
+    # The lineage terminated on the budget, not on min-batch/depth guards.
+    assert upsert_handler._RETRY_BUDGET_EXHAUSTED_REASON in failed_reasons
+    ctx.stats.increment.assert_any_call("upsert_retry_budget_exhausted_total")
+    assert (
+        get_telemetry().get(
+            "ingest_integrity_total",
+            event="upsert",
+            state="retry_budget_exhausted",
+        )
+        >= 1
+    )
+
+
+def test_retry_records_idempotent_rewrite_metric(ctx, fast_backoff, monkeypatch):
+    """A retry re-sends the same vector IDs; that idempotent rewrite volume is
+    published for observability (VECTOR-06)."""
+    queue = Queue()
+    stop_event = threading.Event()
+    first_failure: list[int] = []
+
+    def fake_upsert(_ctx, _batch):
+        if not first_failure:
+            first_failure.append(1)
+            raise RetriableError("transient failure")
+
+    monkeypatch.setattr(upsert_handler, "upsert_vectors_atomic", fake_upsert)
+    monkeypatch.setattr(upsert_handler, "_mark_batch_failed", Mock())
+
+    batch = [_vector("a:0"), _vector("a:1")]
+    queue.put(UpsertQueueItem(batch))
+
+    thread = _start_worker(ctx, queue, stop_event, [])
+    assert _wait_for_drain(queue)
+    queue.put(None)
+    thread.join(timeout=5)
+
+    ctx.stats.increment.assert_any_call("upsert_idempotent_rewrites_total", 2)
