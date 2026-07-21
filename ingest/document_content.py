@@ -18,6 +18,7 @@ import subprocess
 import tempfile
 import time
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -61,6 +62,28 @@ if TYPE_CHECKING:
 
 def _get_logger(logger: logging.Logger | None) -> logging.Logger:
     return logger or logging.getLogger(__name__)
+
+
+# INGEST-06: stable, low-cardinality reasons recorded when text is decoded
+# through a lossy fallback rather than a clean UTF-8 decode. They are safe to
+# use as an operator-facing reason and as a telemetry-adjacent value.
+ENCODING_FALLBACK_LATIN1 = "encoding_fallback_latin1"
+ENCODING_FALLBACK_IGNORE = "encoding_fallback_ignore"
+
+
+@dataclass(frozen=True)
+class TextExtraction:
+    """Extracted document text plus its decoding provenance.
+
+    ``encoding_fallback`` is ``None`` when the bytes decoded cleanly as UTF-8,
+    or one of the ``ENCODING_FALLBACK_*`` reason codes when a lossy fallback
+    (Latin-1 or ``errors="ignore"``) was used and characters may have been
+    lost. Callers use it to mark the file's ingestion outcome degraded so the
+    pipeline does not silently claim full-fidelity extraction (INGEST-06).
+    """
+
+    text: str
+    encoding_fallback: str | None = None
 
 
 _BARE_ADDRESS_NUMBER_RE = re.compile(r"^\d+(?:-\d+)?[A-Za-z]?$")
@@ -244,21 +267,53 @@ def extract_text(
 ) -> str:
     """
     Extract text from standard document formats (not CSV).
+
+    Thin wrapper over :func:`extract_text_with_provenance` for callers that only
+    need the text and not the decoding provenance.
+    """
+    return extract_text_with_provenance(key, data, logger=logger).text
+
+
+def extract_text_with_provenance(
+    key: str,
+    data: bytes,
+    *,
+    logger: logging.Logger | None = None,
+) -> TextExtraction:
+    """
+    Extract text from standard document formats (not CSV), reporting whether a
+    lossy encoding fallback was used.
+
+    When UTF-8 decoding fails and a Latin-1 or ``errors="ignore"`` fallback is
+    used, the returned :class:`TextExtraction` carries a stable
+    ``encoding_fallback`` reason so ingestion can mark the file degraded rather
+    than silently claiming full fidelity (INGEST-06).
     """
     extension = ext(key)
 
     if extension in {"txt", "md"}:
         try:
-            return data.decode("utf-8")
+            return TextExtraction(data.decode("utf-8"))
         except UnicodeDecodeError:
-            return data.decode("latin-1", errors="ignore")
+            # Latin-1 maps every byte, so no character is dropped, but any
+            # multi-byte UTF-8 sequences are misread: fidelity is not
+            # guaranteed, hence the degraded reason.
+            return TextExtraction(
+                data.decode("latin-1", errors="ignore"),
+                ENCODING_FALLBACK_LATIN1,
+            )
 
     if extension == "json":
         try:
             text = data.decode("utf-8")
-            return json.dumps(json.loads(text), ensure_ascii=False, indent=2)
+            return TextExtraction(
+                json.dumps(json.loads(text), ensure_ascii=False, indent=2)
+            )
         except Exception:  # pylint: disable=broad-except
-            return data.decode("utf-8", errors="ignore")
+            return TextExtraction(
+                data.decode("utf-8", errors="ignore"),
+                ENCODING_FALLBACK_IGNORE,
+            )
 
     log = _get_logger(logger)
 
@@ -274,41 +329,44 @@ def extract_text(
                     page_count,
                     INGEST_PDF_MAX_PAGES,
                 )
-                return ""
+                return TextExtraction("")
             text = "\n".join([p.extract_text() or "" for p in reader.pages])
             if text.strip():
-                return text
+                return TextExtraction(text)
         except Exception as ex:  # pylint: disable=broad-except
             log.warning("PDF extract failed for %s: %s", key, ex)
 
         if pdfminer_extract_text is None:
-            return text
+            return TextExtraction(text)
 
         if not is_fire_risk_assessment(key, text):
-            return text
+            return TextExtraction(text)
 
         try:
             log.info("Using PDFMiner fallback for %s", key)
             text = pdfminer_extract_text(io.BytesIO(data)) or ""
-            return text
+            return TextExtraction(text)
         except Exception as ex:  # pylint: disable=broad-except
             log.warning("PDFMiner extract failed for %s: %s", key, ex)
-            return text
+            return TextExtraction(text)
 
     if extension == "docx":
         try:
             if not _docx_archive_within_limits(key, data, log):
-                return ""
+                return TextExtraction("")
             doc = DocxDocument(io.BytesIO(data))
-            return "\n".join(paragraph.text for paragraph in doc.paragraphs)
+            return TextExtraction(
+                "\n".join(paragraph.text for paragraph in doc.paragraphs)
+            )
         except Exception as ex:  # pylint: disable=broad-except
             log.warning("DOCX extract failed for %s: %s", key, ex)
-            return ""
+            return TextExtraction("")
 
     if extension == "doc":
-        return _extract_doc_text(key, data, log)
+        text, encoding_fallback = _extract_doc_text(key, data, log)
+        return TextExtraction(text, encoding_fallback)
 
-    return ""
+    return TextExtraction("")
 
 
 def _docx_archive_within_limits(key: str, data: bytes, log: logging.Logger) -> bool:
@@ -346,9 +404,12 @@ def _docx_archive_within_limits(key: str, data: bytes, log: logging.Logger) -> b
     return True
 
 
-def _extract_doc_text(key: str, data: bytes, log: logging.Logger) -> str:
+def _extract_doc_text(
+    key: str, data: bytes, log: logging.Logger
+) -> tuple[str, str | None]:
+    """Extract ``.doc`` text, returning ``(text, encoding_fallback_reason)``."""
     if not data:
-        return ""
+        return "", None
 
     if textract is not None:
         tmp_path = None
@@ -357,7 +418,11 @@ def _extract_doc_text(key: str, data: bytes, log: logging.Logger) -> str:
                 tmp.write(data)
                 tmp_path = tmp.name
             text_bytes = textract.process(tmp_path)
-            return text_bytes.decode("utf-8", errors="ignore") if text_bytes else ""
+            if not text_bytes:
+                return "", None
+            # textract returns raw bytes; the ``errors="ignore"`` decode can
+            # drop undecodable bytes, so report the lossy fallback.
+            return text_bytes.decode("utf-8", errors="ignore"), ENCODING_FALLBACK_IGNORE
         except Exception as ex:  # pylint: disable=broad-except
             log.warning("DOC extract (textract) failed for %s: %s", key, ex)
         finally:
@@ -381,7 +446,7 @@ def _extract_doc_text(key: str, data: bytes, log: logging.Logger) -> str:
                 check=False,
             )
             if res.returncode == 0:
-                return res.stdout or ""
+                return res.stdout or "", None
             log.warning("DOC extract (antiword) failed for %s: %s", key, res.stderr)
         except Exception as ex:  # pylint: disable=broad-except
             log.warning("DOC extract (antiword) failed for %s: %s", key, ex)
@@ -393,7 +458,7 @@ def _extract_doc_text(key: str, data: bytes, log: logging.Logger) -> str:
                     pass
 
     log.warning("No DOC extractor available for %s", key)
-    return ""
+    return "", None
 
 
 # ---------------------------------------------------------------------------
@@ -595,15 +660,19 @@ def extract_text_and_chunk_in_process(
     embed_model: str,
     chunk_tokens: int,
     chunk_overlap: int,
-) -> tuple[str, list[str]]:
+) -> tuple[str, list[str], str | None]:
     """
     Extract text and chunk it (section-aware) using a local encoder.
 
-    This is designed to run in a process pool to avoid GIL bottlenecks.
+    This is designed to run in a process pool to avoid GIL bottlenecks. The
+    third tuple element carries any lossy encoding-fallback reason back to the
+    parent process, since a subprocess cannot record the outcome directly
+    (INGEST-06).
     """
-    text = extract_text(key, data)
+    extraction = extract_text_with_provenance(key, data)
+    text = extraction.text
     if not text:
-        return text, []
+        return text, [], extraction.encoding_fallback
 
     try:
         encoder = tiktoken.encoding_for_model(embed_model)
@@ -616,7 +685,7 @@ def extract_text_and_chunk_in_process(
         chunk_tokens=chunk_tokens,
         chunk_overlap=chunk_overlap,
     )
-    return text, chunks
+    return text, chunks, extraction.encoding_fallback
 
 
 def chunk_document_text(ctx: "IngestContext", text: str) -> list[str]:
@@ -927,7 +996,10 @@ def extract_text_csv_by_building_enhanced(
                     key,
                     "",
                     data.decode("utf-8", errors="ignore"),
-                    {"document_type": "unknown"},
+                    {
+                        "document_type": "unknown",
+                        "encoding_fallback": ENCODING_FALLBACK_IGNORE,
+                    },
                 )
             ]
 
@@ -1004,7 +1076,10 @@ def extract_text_csv_by_building_enhanced(
                 key,
                 "",
                 data.decode("utf-8", errors="ignore"),
-                {"document_type": "unknown"},
+                {
+                    "document_type": "unknown",
+                    "encoding_fallback": ENCODING_FALLBACK_IGNORE,
+                },
             )
         ]
 

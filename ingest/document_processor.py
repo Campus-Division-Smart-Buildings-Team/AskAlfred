@@ -44,9 +44,9 @@ from .document_content import (
     embed_texts_batch,
     ext,
     extract_maintenance_csv,
-    extract_text,
     extract_text_and_chunk_in_process,
     extract_text_csv_by_building_enhanced,
+    extract_text_with_provenance,
     fetch_bytes_secure,
     is_bms_document,
     is_fire_risk_assessment,
@@ -76,6 +76,15 @@ def _should_skip_existing(config) -> bool:
 
 def _is_timeout_exceeded(start_time: float, max_seconds: float) -> bool:
     return max_seconds > 0 and (time.perf_counter() - start_time) > max_seconds
+
+
+def _first_encoding_fallback(docs: list[DocTuple]) -> str | None:
+    """Return the first lossy encoding-fallback reason recorded on any doc."""
+    for _doc_key, _canonical, _text, extra_metadata in docs:
+        reason = (extra_metadata or {}).get("encoding_fallback")
+        if reason:
+            return str(reason)
+    return None
 
 
 def _resolve_document_type_policy(
@@ -200,9 +209,15 @@ class DocumentProcessor:
         self.ctx.stats.record_file_terminal(key, status)
 
     def note_file_outcome(self, file_id: str, status: str, reason: str) -> None:
-        """Retain extraction degradation until all file vectors are assembled."""
+        """Retain extraction degradation until all file vectors are assembled.
 
-        priority = {"needs_review": 1, "partial": 2}
+        When several outcomes are noted for one file the highest-severity one
+        wins: a lossy encoding fallback (``degraded``) is the mildest — all
+        vectors were still produced — so it yields to ``needs_review`` and to
+        ``partial`` (missing vectors), which represent worse fidelity loss.
+        """
+
+        priority = {"degraded": 1, "needs_review": 2, "partial": 3}
         with self._active_lock:
             current = self._outcome_overrides.get(file_id)
             if current and priority.get(current[0], 0) >= priority.get(status, 0):
@@ -219,7 +234,9 @@ class DocumentProcessor:
     ) -> tuple[bytes | None, str | None, str | None, str | None]:
         return self._load_bytes_and_ids(key)
 
-    def extract_text_and_chunks(self, key: str, data: bytes) -> tuple[str, list[str]]:
+    def extract_text_and_chunks(
+        self, key: str, data: bytes
+    ) -> tuple[str, list[str], str | None]:
         return self._extract_text_and_chunks(key, data)
 
     def extract_docs_for_file(
@@ -296,7 +313,9 @@ class DocumentProcessor:
             precomputed_chunks=precomputed_chunks,
         )
 
-    def _extract_text_and_chunks(self, key: str, data: bytes) -> tuple[str, list[str]]:
+    def _extract_text_and_chunks(
+        self, key: str, data: bytes
+    ) -> tuple[str, list[str], str | None]:
         start = time.perf_counter()
         if self.cpu_pool is not None:
             future = self.cpu_pool.submit(
@@ -307,7 +326,7 @@ class DocumentProcessor:
                 chunk_tokens=self.ctx.config.chunk_tokens,
                 chunk_overlap=self.ctx.config.chunk_overlap,
             )
-            text_sample, chunks = future.result()
+            text_sample, chunks, encoding_fallback = future.result()
             elapsed = time.perf_counter() - start
             self.ctx.logger.debug(
                 "Extract+chunk (process) %s: %.3fs (%d chunks)",
@@ -315,13 +334,14 @@ class DocumentProcessor:
                 elapsed,
                 len(chunks),
             )
-            return text_sample, chunks
+            return text_sample, chunks, encoding_fallback
 
-        text_sample = extract_text(
+        extraction = extract_text_with_provenance(
             key,
             data,
             logger=self.ctx.logger,
         )
+        text_sample = extraction.text
         chunks = chunk_document_text(self.ctx, text_sample)
         elapsed = time.perf_counter() - start
         self.ctx.logger.debug(
@@ -330,7 +350,7 @@ class DocumentProcessor:
             elapsed,
             len(chunks),
         )
-        return text_sample, chunks
+        return text_sample, chunks, extraction.encoding_fallback
 
     def skip_large_file(self, key: str, size_mb: float) -> bool:
         if self.ctx.config.max_file_mb > 0 and size_mb > self.ctx.config.max_file_mb:
@@ -434,12 +454,15 @@ class DocumentProcessor:
                     logger=self.ctx.logger,
                 )
         else:
+            encoding_fallback: str | None = None
             if text_sample is None:
-                text_sample = extract_text(
+                extraction = extract_text_with_provenance(
                     key,
                     data,
                     logger=self.ctx.logger,
                 )
+                text_sample = extraction.text
+                encoding_fallback = extraction.encoding_fallback
             resolution = self.building_resolver.resolve(key, text_sample)
             building = resolution.canonical
             confidence = resolution.confidence
@@ -452,6 +475,8 @@ class DocumentProcessor:
                 "building_source": source,
                 "building_flag_review": flag_review,
             }
+            if encoding_fallback:
+                building_metadata["encoding_fallback"] = encoding_fallback
 
             if confidence < INGEST_LOW_CONFIDENCE_WARN:
                 self.ctx.logger.warning(
@@ -1038,11 +1063,19 @@ class Extractor:
         extension: str,
         data: bytes,
     ) -> tuple[
-        list[DocTuple], str | None, str | None, bool, dict[str, list[str]] | None
+        list[DocTuple],
+        str | None,
+        str | None,
+        bool,
+        dict[str, list[str]] | None,
+        str | None,
     ]:
         precomputed_chunks: dict[str, list[str]] | None = None
+        encoding_fallback: str | None = None
         if extension not in ("csv", "xlsx", "xls"):
-            text_sample, chunks = self._processor.extract_text_and_chunks(key, data)
+            text_sample, chunks, encoding_fallback = (
+                self._processor.extract_text_and_chunks(key, data)
+            )
             precomputed_chunks = {key: chunks}
         else:
             text_sample = None
@@ -1056,7 +1089,19 @@ class Extractor:
             )
         )
 
-        return docs, text_sample, building, is_fra_candidate, precomputed_chunks
+        # Tabular (CSV/Excel) fallbacks and standalone extraction record the
+        # lossy decode on the document metadata; surface it uniformly.
+        if encoding_fallback is None:
+            encoding_fallback = _first_encoding_fallback(docs)
+
+        return (
+            docs,
+            text_sample,
+            building,
+            is_fra_candidate,
+            precomputed_chunks,
+            encoding_fallback,
+        )
 
 
 class Vectoriser:
@@ -1177,13 +1222,24 @@ class FileIngestOrchestrator:
         key, extension, data, content_hash, file_id, processing_token = prepared
         max_seconds = getattr(self._processor.ctx.config, "max_file_seconds", 0)
 
-        docs, text_sample, building, is_fra_candidate, precomputed_chunks = (
-            self._extractor.extract(
-                key=key,
-                extension=extension,
-                data=data,
-            )
+        (
+            docs,
+            text_sample,
+            building,
+            is_fra_candidate,
+            precomputed_chunks,
+            encoding_fallback,
+        ) = self._extractor.extract(
+            key=key,
+            extension=extension,
+            data=data,
         )
+        # INGEST-06: a lossy encoding fallback means the extracted text may have
+        # lost characters. Record it so the file's terminal state finishes
+        # `degraded` instead of claiming full-fidelity `success`. Dry runs write
+        # no registry state, so there is nothing to downgrade.
+        if encoding_fallback and not _is_dry_run(self._processor.ctx.config):
+            self._processor.note_file_outcome(file_id, "degraded", encoding_fallback)
         if _is_timeout_exceeded(start, max_seconds):
             self._processor.ctx.file_registry.mark_state(
                 file_id=file_id,

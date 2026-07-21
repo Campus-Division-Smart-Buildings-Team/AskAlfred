@@ -8,14 +8,6 @@ rollout.
 
 ## Structured-outcome gaps
 
-### ROUTE-05 — Attach classifier degradation to the result
-
-- Add the intent classifier to `degraded_components` when its failure affects
-  routing.
-- Downgrade otherwise trustworthy affected results to `degraded`.
-- Current code updates global readiness and fallback telemetry but does not
-  consistently change the request result.
-
 ### ROUTE-10 — Represent conversation-memory failure
 
 - Mark the turn `degraded/conversation_memory` when persistence fails.
@@ -23,14 +15,6 @@ rollout.
 - Current behavior only logs the persistence error.
 
 ## Ingestion and vector gaps
-
-### INGEST-06 — Report decoding degradation
-
-- Record when Latin-1 or ignored-error decoding is used.
-- Mark extraction degraded so ingestion does not claim full fidelity.
-- Preserve a stable encoding-fallback reason for operators.
-- Evidence: `ingest/document_content.py:254` and related paths still use
-  fallback decoding or `errors="ignore"` without an outcome.
 
 ### INGEST-08 — Complete empty/review outcomes
 
@@ -108,6 +92,19 @@ plan and have not been completed by repository code alone:
 
 ## Recently completed
 
+- **INGEST-06:** Text extraction now reports lossy decoding. When UTF-8 fails
+  and a Latin-1 or `errors="ignore"` fallback is used (txt/md, json, doc, and
+  the CSV raw-text fallbacks), `extract_text_with_provenance` returns a stable
+  reason (`encoding_fallback_latin1` / `encoding_fallback_ignore`) that survives
+  the extract/chunk process-pool boundary. The reason is recorded via
+  `note_file_outcome(file_id, "degraded", reason)`, so the file finishes on a
+  new `degraded` terminal status instead of claiming full-fidelity `success`;
+  `partial` (missing vectors) and `needs_review` still outrank it. The registry
+  Lua and `record_file_terminal` prevent a later `success` from erasing a
+  `degraded` file and stop `degraded` from masking a worse `partial`/`failed`.
+  Run aggregation surfaces a `DEGRADED` run status (exit code `0`, since all
+  vectors were committed) and an operator-visible `files_degraded` count. The
+  legacy `extract_text` string API is retained for non-ingestion callers.
 - **ROUTE-04:** Exceptions from rule-layer and ML handler negotiation now create
   safe request-scoped records with the failed handler and phase, routing notes,
   and fallback telemetry; exception details remain in logs only. A rule failure

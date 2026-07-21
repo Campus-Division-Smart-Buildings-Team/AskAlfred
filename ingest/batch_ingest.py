@@ -77,6 +77,7 @@ class IngestReport:
     status: IngestTerminalStatus = IngestTerminalStatus.SUCCESS
     files_partial: int = 0
     files_unavailable: int = 0
+    files_degraded: int = 0
     file_outcomes: dict[str, str] = field(default_factory=dict)
     worker_queue_timed_out: bool = False
     lingering_workers: tuple[str, ...] = ()
@@ -131,7 +132,9 @@ def _derive_run_status(
         return IngestTerminalStatus.CRITICAL_INCONSISTENT
     if teardown.cancelled:
         return IngestTerminalStatus.CANCELLED
-    successful = bool(states & {"success", "success_with_skips", "skipped"})
+    successful = bool(
+        states & {"success", "success_with_skips", "skipped", "degraded"}
+    )
     incomplete = bool(states & {"partial", "unavailable", "failed", "cancelled"})
     stats = ctx.stats.get_stats()
     if stats.get("registry_divergence_total", 0):
@@ -150,6 +153,11 @@ def _derive_run_status(
         return IngestTerminalStatus.NEEDS_REVIEW
     if "needs_review" in states and successful:
         return IngestTerminalStatus.PARTIAL
+    # Every file completed, but at least one only through a lossy encoding
+    # fallback: the run committed all its vectors yet cannot claim full
+    # fidelity (INGEST-06).
+    if "degraded" in states:
+        return IngestTerminalStatus.DEGRADED
     if "skipped" in states or int(stats.get("files_skipped", 0)):
         return IngestTerminalStatus.SUCCESS_WITH_SKIPS
     return IngestTerminalStatus.SUCCESS
@@ -401,6 +409,9 @@ def run_ingest(
         files_partial=sum(status == "partial" for status in file_outcomes.values()),
         files_unavailable=sum(
             status == "unavailable" for status in file_outcomes.values()
+        ),
+        files_degraded=sum(
+            status == "degraded" for status in file_outcomes.values()
         ),
         file_outcomes=file_outcomes,
         worker_queue_timed_out=teardown.queue_timed_out,
@@ -693,6 +704,7 @@ def _log_ingest_summary(ctx: IngestContext, report: IngestReport) -> None:
             Files processed:      %d
             Files skipped:        %d
             Files failed:         %d
+            Files degraded:       %d
             Total vectors:        %d
             Duration:             %.2fs
             Avg speed:            %.1f vectors/sec
@@ -703,6 +715,7 @@ def _log_ingest_summary(ctx: IngestContext, report: IngestReport) -> None:
         report.files_processed,
         report.files_skipped,
         report.files_failed,
+        report.files_degraded,
         report.total_vectors,
         report.duration_seconds,
         report.vectors_per_second,

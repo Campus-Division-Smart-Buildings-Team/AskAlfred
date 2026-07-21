@@ -119,11 +119,22 @@ class ThreadSafeStats(MetricsReader):
             previous = states.get(file_key)
             if previous == status:
                 return
-            # Success must never promote an already incomplete/failed file.
-            if previous in {"partial", "failed", "critical_inconsistent"} and status in {
-                "success",
-                "success_with_skips",
-            }:
+            # Success must never promote an already incomplete/failed/degraded
+            # file: a lossy encoding fallback (degraded) is a real signal that
+            # a later clean-looking success in the same run must not erase.
+            if previous in {
+                "partial",
+                "failed",
+                "critical_inconsistent",
+                "degraded",
+            } and status in {"success", "success_with_skips"}:
+                return
+            # A milder degraded outcome must never overwrite a worse
+            # partial/failed/critical one.
+            if (
+                previous in {"partial", "failed", "critical_inconsistent"}
+                and status == "degraded"
+            ):
                 return
             if previous == "critical_inconsistent":
                 return

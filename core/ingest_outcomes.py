@@ -14,6 +14,7 @@ class IngestTerminalStatus(str, Enum):
     SKIPPED = "skipped"
     DRY_RUN = "dry_run"
     NEEDS_REVIEW = "needs_review"
+    DEGRADED = "degraded"
     PARTIAL = "partial"
     UNAVAILABLE = "unavailable"
     FAILED = "failed"
@@ -42,6 +43,11 @@ _EXIT_CODE_BY_STATUS = {
     IngestTerminalStatus.EMPTY_INPUT: IngestExitCode.EMPTY_OR_VALIDATION,
     IngestTerminalStatus.DRY_RUN: IngestExitCode.EMPTY_OR_VALIDATION,
     IngestTerminalStatus.NEEDS_REVIEW: IngestExitCode.EMPTY_OR_VALIDATION,
+    # A degraded file/run committed all of its vectors through a
+    # reduced-fidelity fallback (e.g. lossy text decoding). It completed, so it
+    # maps to the success exit code, but the terminal status still records that
+    # full fidelity was not claimed.
+    IngestTerminalStatus.DEGRADED: IngestExitCode.SUCCESS,
     IngestTerminalStatus.PARTIAL: IngestExitCode.PARTIAL,
     IngestTerminalStatus.UNAVAILABLE: IngestExitCode.UNAVAILABLE,
     IngestTerminalStatus.FAILED: IngestExitCode.FAILED,

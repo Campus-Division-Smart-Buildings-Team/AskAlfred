@@ -200,6 +200,7 @@ class RedisIngestFileRegistry:
                 current_status == "skipped" or
                 current_status == "dry_run" or
                 current_status == "needs_review" or
+                current_status == "degraded" or
                 current_status == "partial" or
                 current_status == "unavailable" or
                 current_status == "failed" or
@@ -219,7 +220,10 @@ class RedisIngestFileRegistry:
                 if current_status == "failed" and status ~= "failed" and status ~= "critical_inconsistent" then
                     return 0
                 end
-                if current_status == "partial" and status == "success" then
+                if current_status == "partial" and (status == "success" or status == "degraded") then
+                    return 0
+                end
+                if current_status == "degraded" and status == "success" then
                     return 0
                 end
             end
