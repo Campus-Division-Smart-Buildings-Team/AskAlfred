@@ -21,7 +21,7 @@ from config import (
     QUERY_RULE_OVERRIDE_THRESHOLD,
 )
 from core.failure_codes import FailureCode
-from core.outcomes import OutcomeStatus, is_successful
+from core.outcomes import FailureInfo, OutcomeStatus, is_successful
 from core.session_manager import SessionManager
 from core.telemetry import (
     COMPONENT_BUILDING_DIRECTORY,
@@ -70,6 +70,20 @@ _CACHEABLE_STATUSES = frozenset(
         OutcomeStatus.LOW_CONFIDENCE,
     }
 )
+
+_QUERY_ROUTING_COMPONENT = "query_routing"
+
+_HANDLER_TYPES = {
+    handler_type.__name__: handler_type
+    for handler_type in (
+        ConversationalHandler,
+        MaintenanceHandler,
+        RankingHandler,
+        PropertyHandler,
+        CountingHandler,
+        SemanticSearchHandler,
+    )
+}
 
 FOLLOWUP_PREFIXES = {
     "and",
@@ -130,6 +144,7 @@ class QueryManager:
         """
         self.logger = logging.getLogger(self.__class__.__name__)
         self.config = config
+        self._handler_configuration_errors: list[str] = []
 
         # Merge routing config with defaults for tunability
         self.routing_config = self.DEFAULT_CONFIG.copy()
@@ -142,13 +157,14 @@ class QueryManager:
                     self.routing_config[key] = config[key]
 
         # Build handler list
-        if config:
+        if config is not None:
             self.handlers = self._load_handlers_from_config(config)
         else:
             self.handlers = self._initialise_default_handlers()
 
         # Sort handlers by priority (lower = higher priority)
         self.handlers.sort(key=lambda h: h.priority)
+        self._semantic_fallback = self._validate_handler_graph()
 
         # Preprocessors
         self.preprocessors = self._initialise_preprocessors()
@@ -216,21 +232,62 @@ class QueryManager:
         for handler_cls_name, settings in config.items():
             if handler_cls_name in reserved_keys:
                 continue
+            handler_cls = _HANDLER_TYPES.get(handler_cls_name)
+            if handler_cls is None:
+                self._handler_configuration_errors.append("unknown_handler")
+                self.logger.error("Unknown handler in configuration: %s", handler_cls_name)
+                continue
             if not isinstance(settings, dict):
+                self._handler_configuration_errors.append("invalid_handler_settings")
+                self.logger.error(
+                    "Invalid settings for handler: %s", handler_cls_name
+                )
                 continue
             if not settings.get("enabled", True):
                 continue
 
             try:
-                handler_cls = globals().get(handler_cls_name)
-                if handler_cls:
-                    handlers.append(handler_cls())
-                else:
-                    self.logger.warning("Unknown handler: %s", handler_cls_name)
+                handlers.append(handler_cls())
             except Exception as e:
+                self._handler_configuration_errors.append(
+                    "handler_initialisation_failed"
+                )
                 self.logger.error("Could not load %s: %s", handler_cls_name, e)
 
         return handlers
+
+    def _validate_handler_graph(self) -> SemanticSearchHandler | None:
+        """Validate that routing has one final semantic fallback.
+
+        Configuration problems are retained as low-cardinality validation
+        reasons. ``process_query`` converts the invalid startup state into the
+        public typed failure contract instead of attempting to execute a
+        missing handler.
+        """
+        validation_errors = list(self._handler_configuration_errors)
+        if not self.handlers:
+            validation_errors.append("empty_handler_list")
+
+        semantic_fallbacks = [
+            handler
+            for handler in self.handlers
+            if isinstance(handler, SemanticSearchHandler)
+        ]
+        if not semantic_fallbacks:
+            validation_errors.append("semantic_fallback_missing")
+        elif len(semantic_fallbacks) > 1:
+            validation_errors.append("semantic_fallback_duplicate")
+        elif self.handlers[-1] is not semantic_fallbacks[0]:
+            validation_errors.append("semantic_fallback_not_terminal")
+
+        self._routing_graph_validation_errors = tuple(validation_errors)
+        if validation_errors:
+            self.logger.error(
+                "Invalid query handler graph: %s",
+                ",".join(validation_errors),
+            )
+            return None
+        return semantic_fallbacks[0]
 
     @staticmethod
     def is_followup_query(
@@ -349,6 +406,12 @@ class QueryManager:
         self.logger.debug("Raw query received (%d chars)", len(query or ""))
 
         start_time = time.time()  # timing for this request
+
+        if (
+            hasattr(self, "_semantic_fallback")
+            and self._semantic_fallback is None
+        ):
+            return self._routing_graph_invalid_result(query, start_time)
 
         # Create context
         context = QueryContext(query=query, **kwargs)
@@ -486,6 +549,9 @@ class QueryManager:
         # ---------------------------------------------------
         route = self._route_query_hybrid(context)
 
+        if route.handler is None:
+            return self._routing_graph_invalid_result(query, start_time)
+
         # ---------------------------------------------------
         # Execute handler
         # ---------------------------------------------------
@@ -558,6 +624,40 @@ class QueryManager:
     # =========================================================================
     # Degraded-mode telemetry (plan section H, ROUTE-03, ROUTE-05)
     # =========================================================================
+
+    def _routing_graph_invalid_result(
+        self, query: str, start_time: float
+    ) -> QueryResult:
+        """Return the stable ROUTE-08 outcome for an invalid handler graph."""
+        failure = FailureInfo.from_code(
+            FailureCode.ROUTING_GRAPH_INVALID,
+            _QUERY_ROUTING_COMPONENT,
+            safe_context={"validation": "handler_graph"},
+        )
+        elapsed_ms = (time.time() - start_time) * 1000
+        result = QueryResult(
+            query=query,
+            answer=None,
+            results=[],
+            status=OutcomeStatus.FAILED,
+            failure=failure,
+            processing_time_ms=elapsed_ms,
+            metadata={"route": "graph_invalid"},
+        )
+        self.logger.error(
+            "routing_graph_invalid code=%s correlation_id=%s component=%s",
+            failure.code.value,
+            failure.correlation_id,
+            failure.component,
+        )
+        self._update_stats(
+            handler_class_name=_QUERY_ROUTING_COMPONENT,
+            query_type=_QUERY_ROUTING_COMPONENT,
+            elapsed_ms=elapsed_ms,
+            success=False,
+        )
+        self._record_outcome_telemetry(result)
+        return result
 
     def _record_building_directory_readiness(self, context: QueryContext) -> bool:
         """Publish building-directory readiness; return True if it degrades this query.
@@ -723,16 +823,8 @@ class QueryManager:
         CONF_THRESHOLD = self.routing_config["CONF_THRESHOLD"]
         if ml is None or ml.confidence < CONF_THRESHOLD:
             context.routing_notes.append("ml_low_confidence_to_semantic")
-            sem = next(
-                (
-                    h
-                    for h in self.handlers
-                    if h.__class__.__name__ == "SemanticSearchHandler"
-                ),
-                None,
-            )
             return QueryRoute(
-                handler=sem,
+                handler=self._semantic_fallback,
                 metadata={
                     "route": "semantic_fallback_low_conf",
                     "ml_intent": ml.intent.value if ml else None,
@@ -748,16 +840,8 @@ class QueryManager:
         if target_handler is None:
             # No dedicated handler? Default to SemanticSearch.
             context.routing_notes.append("ml_handler_missing_to_semantic")
-            sem = next(
-                (
-                    h
-                    for h in self.handlers
-                    if h.__class__.__name__ == "SemanticSearchHandler"
-                ),
-                None,
-            )
             return QueryRoute(
-                handler=sem,
+                handler=self._semantic_fallback,
                 metadata={
                     "route": "ml_missing_semantic",
                     "ml_intent": (
@@ -797,16 +881,8 @@ class QueryManager:
             context.routing_notes.append("ml_selected_handler_error")
 
         # Final fallback: SemanticSearch
-        sem = next(
-            (
-                h
-                for h in self.handlers
-                if h.__class__.__name__ == "SemanticSearchHandler"
-            ),
-            None,
-        )
         return QueryRoute(
-            handler=sem,
+            handler=self._semantic_fallback,
             metadata={
                 "route": "semantic_fallback_negotiation",
                 "ml_intent": ml.intent.value if ml else None,

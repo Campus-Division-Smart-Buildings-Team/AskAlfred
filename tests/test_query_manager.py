@@ -5,11 +5,13 @@ ensuring correct routing of queries to handlers and backward compatibility of re
 
 import pytest
 
-from core.outcomes import is_successful
+from core.failure_codes import FailureCode
+from core.outcomes import OutcomeStatus, is_successful
 from query_core import query_context
 from query_core.query_manager import QueryManager, process_query_unified
 from query_core.query_result import QueryResult
 from query_core.query_types import QueryType
+from query_handlers.semantic_search_handler import SemanticSearchHandler
 
 
 @pytest.fixture(autouse=True)
@@ -153,6 +155,57 @@ class TestQueryManager:
         assert second is not None
         assert second.results == [{"items": [1]}]
         assert second.metadata == {"nested": {"value": 1}}
+
+
+class TestHandlerGraphValidation:
+    """ROUTE-08 custom handler graphs fail with a typed outcome."""
+
+    @pytest.mark.parametrize(
+        "config",
+        [
+            {},
+            {
+                "ConversationalHandler": {"enabled": True},
+                "SemanticSearchHandler": {"enabled": False},
+            },
+            {
+                "UnknownHandler": {"enabled": True},
+                "SemanticSearchHandler": {"enabled": True},
+            },
+        ],
+        ids=["empty-handler-list", "disabled-semantic", "unknown-handler"],
+    )
+    def test_invalid_custom_graph_returns_typed_failure(self, config):
+        manager = QueryManager(config=config, intent_classifier=object())
+
+        result = manager.process_query("Tell me about HVAC systems")
+
+        assert result.status is OutcomeStatus.FAILED
+        assert result.failure is not None
+        assert result.failure.code is FailureCode.ROUTING_GRAPH_INVALID
+        assert result.failure.component == "query_routing"
+        assert result.failure.retryable is False
+        assert result.handler_used is None
+        assert result.answer is None
+        assert result.results == []
+        assert result.metadata["route"] == "graph_invalid"
+
+    def test_duplicate_terminal_fallbacks_return_typed_failure(self, monkeypatch):
+        monkeypatch.setattr(
+            QueryManager,
+            "_load_handlers_from_config",
+            lambda self, config: [SemanticSearchHandler(), SemanticSearchHandler()],
+        )
+        manager = QueryManager(
+            config={"SemanticSearchHandler": {"enabled": True}},
+            intent_classifier=object(),
+        )
+
+        result = manager.process_query("Tell me about HVAC systems")
+
+        assert result.status is OutcomeStatus.FAILED
+        assert result.failure is not None
+        assert result.failure.code is FailureCode.ROUTING_GRAPH_INVALID
 
 
 class TestBackwardCompatibility:
