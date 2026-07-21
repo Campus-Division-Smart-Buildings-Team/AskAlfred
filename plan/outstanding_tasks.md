@@ -8,13 +8,6 @@ rollout.
 
 ## Structured-outcome gaps
 
-### ROUTE-04 — Preserve handler-negotiation failure
-
-- Record failures from `can_handle()` as partial routing degradation.
-- Prevent a fully healthy outcome when the failed handler could have been
-  authoritative.
-- Current behavior logs the error and skips the handler.
-
 ### ROUTE-05 — Attach classifier degradation to the result
 
 - Add the intent classifier to `degraded_components` when its failure affects
@@ -115,6 +108,15 @@ plan and have not been completed by repository code alone:
 
 ## Recently completed
 
+- **ROUTE-04:** Exceptions from rule-layer and ML handler negotiation now create
+  safe request-scoped records with the failed handler and phase, routing notes,
+  and fallback telemetry; exception details remain in logs only. A rule failure
+  is material when that handler outranks the selected fallback, while an
+  ML-selected handler failure is always material. Material uncertainty
+  downgrades otherwise trustworthy results to `degraded`; lower-priority or
+  transient failures are retained without a user warning, and affected requests
+  are never cached. Normal handler rejection remains a healthy fallback and is
+  distinguished from `handler_error` in route metadata.
 - **ROUTE-02:** Invalid or maintenance-like extracted building scope is now
   removed without clearing a separate valid explicit filter and recorded as
   `building_scope_discarded` in request context, routing notes, fallback

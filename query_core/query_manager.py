@@ -77,6 +77,7 @@ _CACHEABLE_STATUSES = frozenset(
 _QUERY_ROUTING_COMPONENT = "query_routing"
 _DEPENDENCY_READINESS_COMPONENT = "dependency_readiness"
 _BUILDING_SCOPE_DISCARDED_COMPONENT = "building_scope_discarded"
+_HANDLER_NEGOTIATION_COMPONENT = "handler_negotiation"
 
 _PREPROCESSOR_COMPONENTS = {
     SpellCheckPreprocessor: "spell_check_preprocessor",
@@ -101,6 +102,14 @@ _HANDLER_TYPES = {
         CountingHandler,
         SemanticSearchHandler,
     )
+}
+_HANDLER_COMPONENTS = {
+    ConversationalHandler: "conversational",
+    MaintenanceHandler: "maintenance",
+    RankingHandler: "ranking",
+    PropertyHandler: "property_condition",
+    CountingHandler: "counting",
+    SemanticSearchHandler: "semantic_search",
 }
 
 FOLLOWUP_PREFIXES = {
@@ -592,6 +601,10 @@ class QueryManager:
         if route.handler is None:
             return self._routing_graph_invalid_result(query, start_time)
 
+        handler_negotiation_failures = self._resolve_handler_negotiation_failures(
+            context, route.handler
+        )
+
         # ---------------------------------------------------
         # Execute handler
         # ---------------------------------------------------
@@ -638,6 +651,9 @@ class QueryManager:
         self._apply_building_scope_discarded(
             query_result, building_scope_discarded
         )
+        self._apply_handler_negotiation_degradation(
+            query_result, handler_negotiation_failures
+        )
 
         # A building-scoped query answered while the building directory is
         # degraded may have reduced recall; mark it degraded so the UI can warn
@@ -663,6 +679,7 @@ class QueryManager:
             self.cache_enabled
             and query_result.status in _CACHEABLE_STATUSES
             and not preprocessor_degradations
+            and not handler_negotiation_failures
         ):
             self._store_cached_result(cache_key, query_result)
 
@@ -894,6 +911,27 @@ class QueryManager:
         if discarded:
             query_result.metadata["building_scope_discarded"] = True
 
+    @staticmethod
+    def _apply_handler_negotiation_degradation(
+        query_result: QueryResult,
+        failures: list[dict[str, object]],
+    ) -> None:
+        """Attach ROUTE-04 evidence and downgrade materially uncertain routing."""
+        if not failures:
+            return
+
+        if _HANDLER_NEGOTIATION_COMPONENT not in query_result.degraded_components:
+            query_result.degraded_components.append(_HANDLER_NEGOTIATION_COMPONENT)
+        query_result.metadata["handler_negotiation_failures"] = [
+            dict(failure) for failure in failures
+        ]
+
+        materially_uncertain = any(
+            bool(failure["authoritative"]) for failure in failures
+        )
+        if materially_uncertain and query_result.status in _CACHEABLE_STATUSES:
+            query_result.status = OutcomeStatus.DEGRADED
+
     def _record_outcome_telemetry(self, query_result: QueryResult) -> None:
         """Record the terminal request outcome by status and failure code."""
         failure_code = (
@@ -1008,6 +1046,57 @@ class QueryManager:
     # Query routing
     # =========================================================================
 
+    def _record_handler_negotiation_failure(
+        self,
+        context: QueryContext,
+        handler: object,
+        *,
+        phase: str,
+        authoritative: bool,
+    ) -> None:
+        """Retain one safe, low-cardinality ROUTE-04 routing failure."""
+        component = _HANDLER_COMPONENTS.get(type(handler), "query_handler")
+        failures = list(
+            context.get_from_cache("handler_negotiation_failures", [])
+        )
+        failures.append(
+            {
+                "handler": component,
+                "phase": phase,
+                "priority": int(getattr(handler, "priority", 100)),
+                "authoritative": authoritative,
+            }
+        )
+        context.add_to_cache("handler_negotiation_failures", failures)
+        context.routing_notes.append(
+            f"handler_negotiation_failed:{component}:{phase}"
+        )
+        get_telemetry().record_fallback(component)
+
+    @staticmethod
+    def _resolve_handler_negotiation_failures(
+        context: QueryContext, selected_handler: object
+    ) -> list[dict[str, object]]:
+        """Resolve whether each failed rule candidate could have outranked the route."""
+        selected_priority = int(getattr(selected_handler, "priority", 100))
+        resolved: list[dict[str, object]] = []
+        for failure in context.get_from_cache(
+            "handler_negotiation_failures", []
+        ):
+            authoritative = bool(failure["authoritative"])
+            if failure["phase"] == "rule":
+                authoritative = authoritative or int(failure["priority"]) < (
+                    selected_priority
+                )
+            resolved.append(
+                {
+                    "handler": failure["handler"],
+                    "phase": failure["phase"],
+                    "authoritative": authoritative,
+                }
+            )
+        return resolved
+
     def _route_query_hybrid(self, context: QueryContext) -> QueryRoute:
         """
         Option D (Hybrid) routing:
@@ -1030,8 +1119,14 @@ class QueryManager:
                         best_priority = h.priority
                         best_handler = h
             except Exception as e:
+                self._record_handler_negotiation_failure(
+                    context,
+                    h,
+                    phase="rule",
+                    authoritative=False,
+                )
                 self.logger.error(
-                    "Handler %s failed during can_handle(): %s",
+                    "handler_negotiation_failed handler=%s phase=rule error=%s",
                     h.__class__.__name__,
                     sanitise_error(e),
                     exc_info=False,
@@ -1132,6 +1227,7 @@ class QueryManager:
             )
 
         # Give the handler a chance to reject based on enriched context
+        negotiation_failed = False
         try:
             if target_handler.can_handle(context):
                 context.routing_notes.append("ml_selected_handler_accepted")
@@ -1150,8 +1246,16 @@ class QueryManager:
             else:
                 context.routing_notes.append("ml_selected_handler_rejected")
         except Exception as e:
+            negotiation_failed = True
+            self._record_handler_negotiation_failure(
+                context,
+                target_handler,
+                phase="ml_negotiation",
+                authoritative=True,
+            )
             self.logger.error(
-                "Handler %s failed during negotiation: %s",
+                "handler_negotiation_failed handler=%s "
+                "phase=ml_negotiation error=%s",
                 target_handler.__class__.__name__,
                 sanitise_error(e),
                 exc_info=False,
@@ -1165,7 +1269,9 @@ class QueryManager:
                 "route": "semantic_fallback_negotiation",
                 "ml_intent": ml.intent.value if ml else None,
                 "ml_confidence": ml.confidence if ml else None,
-                "ml_route_reason": "handler_rejected_or_missing",
+                "ml_route_reason": (
+                    "handler_error" if negotiation_failed else "handler_rejected"
+                ),
             },
         )
 
