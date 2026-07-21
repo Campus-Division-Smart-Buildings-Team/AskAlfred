@@ -6,14 +6,6 @@ The plan currently marks Phases 0–5 as complete, but the items below are eithe
 not implemented, only partially implemented, or still require operational
 rollout.
 
-## Structured-outcome gaps
-
-### ROUTE-10 — Represent conversation-memory failure
-
-- Mark the turn `degraded/conversation_memory` when persistence fails.
-- Notify the user only when a later follow-up depends on the missing context.
-- Current behavior only logs the persistence error.
-
 ## Ingestion and vector gaps
 
 ### INGEST-08 — Complete empty/review outcomes
@@ -92,6 +84,12 @@ plan and have not been completed by repository code alone:
 
 ## Recently completed
 
+- **ROUTE-10:** Conversation-memory persistence failures now mark the turn
+  `degraded/conversation_memory` with safe structured metadata and prevent it
+  from being cached as healthy. A session-scoped marker prevents stale context
+  from being inherited; standalone questions continue without a notice, while
+  an explicit later follow-up receives concise guidance to restate the missing
+  details. Memory reads and cached-result persistence use the same boundary.
 - **INGEST-06:** Text extraction now reports lossy decoding. When UTF-8 fails
   and a Latin-1 or `errors="ignore"` fallback is used (txt/md, json, doc, and
   the CSV raw-text fallbacks), `extract_text_with_provenance` returns a stable

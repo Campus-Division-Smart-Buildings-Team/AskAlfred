@@ -27,6 +27,7 @@ from core.session_manager import SessionManager
 from core.startup_readiness import missing_required_query_dependency
 from core.telemetry import (
     COMPONENT_BUILDING_DIRECTORY,
+    COMPONENT_CONVERSATION_MEMORY,
     COMPONENT_INTENT_CLASSIFIER,
     get_readiness,
     get_telemetry,
@@ -402,6 +403,22 @@ class QueryManager:
                 "building" in prev,
             )
 
+    @staticmethod
+    def _query_explicitly_depends_on_previous_turn(query: str) -> bool:
+        """Detect a follow-up even when the previous context failed to persist."""
+
+        q = (query or "").strip().lower()
+        if not q:
+            return False
+        tokens = q.split()
+        return (
+            q in FOLLOWUP_EXACT
+            or q in {"next", "continue"}
+            or any(q.startswith(prefix + " ") for prefix in FOLLOWUP_PREFIXES)
+            or any(q.endswith(" " + suffix) for suffix in FOLLOWUP_SUFFIXES)
+            or bool(tokens and tokens[0] in FOLLOWUP_PRONOUNS)
+        )
+
     # =========================================================================
     # Preprocessor initialisation
     # =========================================================================
@@ -501,8 +518,35 @@ class QueryManager:
         # ---------------------------------------------------
         # Load previous conversational memory from SessionManager
         # ---------------------------------------------------
-        prev_context_dict = SessionManager.get_last_query_context()
-        prev_intent, prev_conf = SessionManager.get_last_intent()
+        conversation_memory_unavailable = False
+        try:
+            conversation_memory_unavailable = (
+                SessionManager.conversation_memory_persistence_failed()
+            )
+            prev_context_dict = SessionManager.get_last_query_context()
+            prev_intent, prev_conf = SessionManager.get_last_intent()
+        except Exception as exc:
+            conversation_memory_unavailable = True
+            prev_context_dict = None
+            prev_intent, prev_conf = None, None
+            self.logger.error(
+                "Failed to load session memory: %s",
+                sanitise_error(exc),
+                exc_info=False,
+            )
+            get_telemetry().record_fallback(COMPONENT_CONVERSATION_MEMORY)
+
+        # Never inherit an older, partially updated snapshot after the latest
+        # turn failed to persist. Route without it and warn only if this request
+        # explicitly depends on that missing context.
+        if conversation_memory_unavailable:
+            prev_context_dict = None
+            prev_intent, prev_conf = None, None
+
+        conversation_memory_followup_affected = (
+            conversation_memory_unavailable
+            and self._query_explicitly_depends_on_previous_turn(query)
+        )
 
         # Defensive Logging
         if prev_context_dict:
@@ -574,11 +618,20 @@ class QueryManager:
                 query_result, building_scope_discarded
             )
 
-            # persist context snapshot
-            SessionManager.set_last_query_context(context)
+            # Surface missing prior context before persisting this cached turn.
+            self._apply_conversation_memory_degradation(
+                query_result,
+                previous_turn_unavailable=conversation_memory_followup_affected,
+                user_notice_required=conversation_memory_followup_affected,
+            )
 
             # use cached result’s query_type + no confidence (confidence was for ML path)
-            SessionManager.set_last_intent(query_result.query_type, None)
+            self._persist_conversation_memory(
+                query_result,
+                context,
+                final_intent=query_result.query_type,
+                confidence=None,
+            )
 
             elapsed_ms = (time.time() - start_time) * 1000
 
@@ -663,6 +716,11 @@ class QueryManager:
         self._apply_intent_classifier_degradation(
             query_result, intent_classifier_degradation
         )
+        self._apply_conversation_memory_degradation(
+            query_result,
+            previous_turn_unavailable=conversation_memory_followup_affected,
+            user_notice_required=conversation_memory_followup_affected,
+        )
 
         # A building-scoped query answered while the building directory is
         # degraded may have reduced recall; mark it degraded so the UI can warn
@@ -681,9 +739,26 @@ class QueryManager:
             success=is_successful(query_result.status),
         )
 
-        # Cache result. Only cache trustworthy terminal outcomes: a transient
-        # failed/unavailable/partial/degraded result must not be replayed from
-        # cache until its TTL expires (plan section A / ROUTE-12).
+        # ---------------------------------------------------
+        # 5. CONVERSATIONAL MEMORY PERSISTENCE
+        # ---------------------------------------------------
+        self.logger.debug(
+            "Memory persistence check: context.building is %r", context.building
+        )
+        final_intent = (
+            context.predicted_intent
+            if context.predicted_intent
+            else route.handler.query_type
+        )
+        self._persist_conversation_memory(
+            query_result,
+            context,
+            final_intent=final_intent,
+            confidence=context.ml_intent_confidence,
+        )
+
+        # Cache only after persistence has had a chance to change the terminal
+        # outcome. A turn whose context was lost must not be replayed as healthy.
         if (
             self.cache_enabled
             and query_result.status in _CACHEABLE_STATUSES
@@ -692,26 +767,6 @@ class QueryManager:
             and not intent_classifier_degradation
         ):
             self._store_cached_result(cache_key, query_result)
-
-        # ---------------------------------------------------
-        # 5. CONVERSATIONAL MEMORY PERSISTENCE
-        # ---------------------------------------------------
-        self.logger.debug(
-            "Memory persistence check: context.building is %r", context.building
-        )
-        try:
-            # Save compact QueryContext into session memory
-            SessionManager.set_last_query_context(context)
-
-            # Save ML intent (if available) otherwise fallback to handler type
-            final_intent = (
-                context.predicted_intent
-                if context.predicted_intent
-                else route.handler.query_type
-            )
-            SessionManager.set_last_intent(final_intent, context.ml_intent_confidence)
-        except Exception as e:
-            self.logger.error("Failed to persist session memory: %s", e)
 
         # Total round-trip time for everything
         total_elapsed_ms = (time.time() - start_time) * 1000
@@ -918,6 +973,75 @@ class QueryManager:
         # Never upgrade a failed, unavailable, partial, or rejected outcome.
         if query_result.status in _CACHEABLE_STATUSES:
             query_result.status = OutcomeStatus.DEGRADED
+
+    @staticmethod
+    def _apply_conversation_memory_degradation(
+        query_result: QueryResult,
+        *,
+        persistence_failed: bool = False,
+        previous_turn_unavailable: bool = False,
+        user_notice_required: bool = False,
+    ) -> None:
+        """Attach ROUTE-10 state without exposing persistence exception text."""
+        if not persistence_failed and not previous_turn_unavailable:
+            return
+
+        if COMPONENT_CONVERSATION_MEMORY not in query_result.degraded_components:
+            query_result.degraded_components.append(COMPONENT_CONVERSATION_MEMORY)
+
+        existing = query_result.metadata.get("conversation_memory_degradation", {})
+        existing = existing if isinstance(existing, dict) else {}
+        query_result.metadata["conversation_memory_degradation"] = {
+            "persistence_failed": bool(
+                persistence_failed or existing.get("persistence_failed")
+            ),
+            "previous_turn_unavailable": bool(
+                previous_turn_unavailable
+                or existing.get("previous_turn_unavailable")
+            ),
+            "user_notice_required": bool(
+                user_notice_required or existing.get("user_notice_required")
+            ),
+        }
+
+        if query_result.status in _CACHEABLE_STATUSES:
+            query_result.status = OutcomeStatus.DEGRADED
+
+    def _persist_conversation_memory(
+        self,
+        query_result: QueryResult,
+        context: QueryContext,
+        *,
+        final_intent: object,
+        confidence: float | None,
+    ) -> bool:
+        """Persist turn context and retain a session-scoped failure marker."""
+        try:
+            SessionManager.set_last_query_context(context)
+            SessionManager.set_last_intent(final_intent, confidence)
+            SessionManager.set_conversation_memory_persistence_failed(False)
+            return True
+        except Exception as exc:
+            self.logger.error(
+                "Failed to persist session memory: %s",
+                sanitise_error(exc),
+                exc_info=False,
+            )
+            try:
+                SessionManager.set_conversation_memory_persistence_failed(True)
+            except Exception as marker_exc:  # pragma: no cover - defensive
+                self.logger.error(
+                    "Failed to retain session-memory failure marker: %s",
+                    sanitise_error(marker_exc),
+                    exc_info=False,
+                )
+            get_telemetry().record_fallback(COMPONENT_CONVERSATION_MEMORY)
+            self._apply_conversation_memory_degradation(
+                query_result,
+                persistence_failed=True,
+                user_notice_required=False,
+            )
+            return False
 
     def _apply_preprocessor_degradation(
         self,

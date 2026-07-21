@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 
 from core.failure_codes import FailureCode
 from core.outcomes import FailureInfo, OutcomeStatus, new_correlation_id
+from core.telemetry import COMPONENT_CONVERSATION_MEMORY
 
 logger = logging.getLogger(__name__)
 
@@ -198,7 +199,39 @@ def present_outcome(
 def present_query_failure(result: "QueryResult") -> PresentedOutcome:
     """Presentation for a completed query result's structured outcome."""
 
+    degradation = result.metadata.get("conversation_memory_degradation", {})
+    if (
+        result.status is OutcomeStatus.DEGRADED
+        and COMPONENT_CONVERSATION_MEMORY in result.degraded_components
+        and isinstance(degradation, dict)
+        and degradation.get("user_notice_required")
+    ):
+        return PresentedOutcome(
+            severity="warning",
+            message="I couldn't use context from your previous question.",
+            action="Please restate the missing details in this question.",
+            retry_suggested=False,
+            reference=None,
+            render_as_notice=True,
+        )
+
     return present_outcome(result.status, result.failure)
+
+
+def query_degradation_notice_required(result: "QueryResult") -> bool:
+    """Suppress memory-only warnings until missing context affects a follow-up."""
+
+    if result.status is not OutcomeStatus.DEGRADED:
+        return result.status is OutcomeStatus.PARTIAL
+
+    components = set(result.degraded_components)
+    if components != {COMPONENT_CONVERSATION_MEMORY}:
+        return True
+
+    degradation = result.metadata.get("conversation_memory_degradation", {})
+    return not isinstance(degradation, dict) or bool(
+        degradation.get("user_notice_required", True)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -250,8 +283,12 @@ def safe_present_outcome(
 def safe_present_query_failure(result: "QueryResult") -> PresentedOutcome:
     """Kill-switch-protected presentation for a completed query result."""
 
+    from config import feature_flags
+
+    if not feature_flags.use_structured_presenter():
+        return _fallback_presented()
     try:
-        return safe_present_outcome(result.status, result.failure)
+        return present_query_failure(result)
     except Exception:  # pylint: disable=broad-except
         logger.exception("error_presenter.present_query_failure failed; fallback")
         return _fallback_presented()
@@ -301,6 +338,7 @@ __all__ = [
     "PresentedOutcome",
     "present_outcome",
     "present_query_failure",
+    "query_degradation_notice_required",
     "render_query_failure",
     "safe_present_outcome",
     "safe_present_query_failure",

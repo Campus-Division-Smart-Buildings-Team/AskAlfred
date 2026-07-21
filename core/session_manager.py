@@ -48,6 +48,7 @@ class ConversationState:
     last_handler: Optional[str] = None
     last_query_context: Optional[dict[str, Any]] = None
     last_intent_confidence: Optional[float] = None
+    conversation_memory_persistence_failed: bool = False
 
 
 def _get_store() -> dict[str, Any]:
@@ -410,3 +411,17 @@ class SessionManager:
         """
         with _get_conversation_state() as state:
             return state.last_intent, state.last_intent_confidence
+
+    @staticmethod
+    def set_conversation_memory_persistence_failed(failed: bool) -> None:
+        """Remember whether the latest turn could not be stored completely."""
+
+        with _get_conversation_state() as state:
+            state.conversation_memory_persistence_failed = bool(failed)
+
+    @staticmethod
+    def conversation_memory_persistence_failed() -> bool:
+        """Return whether follow-up context from the latest turn may be missing."""
+
+        with _get_conversation_state() as state:
+            return bool(getattr(state, "conversation_memory_persistence_failed", False))

@@ -58,6 +58,7 @@ from security.sanitise_context import (
 )
 from ui.emojis import EMOJI_BOOKS, EMOJI_CAUTION, EMOJI_GORILLA, EMOJI_TIME
 from ui.error_presenter import (
+    query_degradation_notice_required,
     render_query_failure,
     safe_present_outcome,
     safe_present_query_failure,
@@ -447,7 +448,7 @@ def render_manager_result(result) -> tuple[str, list[Any]]:
 
     # Concise capability warning for incomplete coverage. low_confidence already
     # shows a low-score note above, and success needs no notice.
-    if status in (OutcomeStatus.PARTIAL, OutcomeStatus.DEGRADED):
+    if query_degradation_notice_required(result):
         render_query_failure(safe_present_query_failure(result))
 
     return history_content, result.results
