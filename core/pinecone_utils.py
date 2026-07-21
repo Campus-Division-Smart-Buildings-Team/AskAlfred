@@ -9,16 +9,18 @@ import logging
 from typing import Any, Optional
 
 from config import normalise_ns
+from core.alfred_exceptions import SearchError
 from core.clients import get_oai, get_pc
 
 
 def list_index_names() -> list[str]:
-    """Get list of available Pinecone index names."""
-    try:
-        pc = get_pc()
-        idxs = pc.list_indexes()
-    except Exception:  # pylint: disable=broad-except
-        return []
+    """Get available Pinecone index names.
+
+    Provider failures deliberately propagate: an unavailable index catalogue
+    is not the same thing as a healthy catalogue containing no indexes.
+    """
+    pc = get_pc()
+    idxs = pc.list_indexes()
     if hasattr(idxs, "names"):
         return list(idxs.names())
     if isinstance(idxs, dict) and "indexes" in idxs:
@@ -37,33 +39,30 @@ def list_namespaces_for_index(idx) -> list[Optional[str]]:
     Return available namespaces for an index.
     None represents the default namespace.
     """
-    try:
-        stats = idx.describe_index_stats()
-        # Pinecone clients may return dict-like or object-like stats.
-        if hasattr(stats, "namespaces"):
-            ns_dict = stats.namespaces or {}
-        else:
-            ns_dict = (stats or {}).get("namespaces") or {}
+    stats = idx.describe_index_stats()
+    # Pinecone clients may return dict-like or object-like stats.
+    if hasattr(stats, "namespaces"):
+        ns_dict = stats.namespaces or {}
+    else:
+        ns_dict = (stats or {}).get("namespaces") or {}
 
-        # Get namespace names, converting empty strings to None
-        names = []
-        for key in ns_dict.keys():
-            if key == "" or key is None:
-                names.append(None)
-            elif isinstance(key, str):
-                names.append(key)
-
-        # If no namespaces found, include default
-        if not names:
+    # Get namespace names, converting empty strings to None
+    names = []
+    for key in ns_dict.keys():
+        if key == "" or key is None:
             names.append(None)
+        elif isinstance(key, str):
+            names.append(key)
 
-        # Remove duplicates and sort (None first)
-        unique_names = list(set(names))
-        unique_names.sort(key=lambda x: (x is not None, x or ""))
+    # If no namespaces found, include default
+    if not names:
+        names.append(None)
 
-        return unique_names
-    except Exception:  # pylint: disable=broad-except
-        return [None]
+    # Remove duplicates and sort (None first)
+    unique_names = list(set(names))
+    unique_names.sort(key=lambda x: (x is not None, x or ""))
+
+    return unique_names
 
 
 def embed_texts(texts: list[str], model: str) -> list[list[float]]:
@@ -142,53 +141,48 @@ def query_all_chunks(
     Returns:
         list of match dictionaries with id, score, and metadata
     """
-    try:
-        # Build query parameters
-        query_params = {
-            "vector": query_vector,
-            "top_k": min(top_k, 10000),  # Pinecone max limit
-            "include_metadata": include_metadata,
-        }
-        namespace = normalise_ns(namespace)
-        if namespace is not None:
-            query_params["namespace"] = namespace
+    # Build query parameters
+    query_params = {
+        "vector": query_vector,
+        "top_k": min(top_k, 10000),  # Pinecone max limit
+        "include_metadata": include_metadata,
+    }
+    namespace = normalise_ns(namespace)
+    if namespace is not None:
+        query_params["namespace"] = namespace
 
-        if filter_dict:
-            query_params["filter"] = filter_dict
+    if filter_dict:
+        query_params["filter"] = filter_dict
 
-        # Execute query
-        response = index.query(**query_params)
+    # Execute query. Provider exceptions propagate so callers can classify the
+    # source as unavailable rather than interpreting [] as genuine emptiness.
+    response = index.query(**query_params)
 
-        # Extract matches
-        if hasattr(response, "matches"):
-            matches = response.matches
-        elif isinstance(response, dict) and "matches" in response:
-            matches = response["matches"]
+    # Extract matches
+    if hasattr(response, "matches"):
+        matches = response.matches
+    elif isinstance(response, dict) and "matches" in response:
+        matches = response["matches"]
+    else:
+        raise SearchError("Pinecone query returned an invalid response contract")
+
+    # Convert to list of dicts
+    results = []
+    for match in matches:
+        if hasattr(match, "to_dict"):
+            match_dict = match.to_dict()
+        elif isinstance(match, dict):
+            match_dict = match
         else:
-            logging.warning("Unexpected response format from Pinecone query")
-            return []
+            match_dict = {
+                "id": getattr(match, "id", None),
+                "score": getattr(match, "score", 0.0),
+                "metadata": getattr(match, "metadata", {}),
+            }
+        results.append(match_dict)
 
-        # Convert to list of dicts
-        results = []
-        for match in matches:
-            if hasattr(match, "to_dict"):
-                match_dict = match.to_dict()
-            elif isinstance(match, dict):
-                match_dict = match
-            else:
-                match_dict = {
-                    "id": getattr(match, "id", None),
-                    "score": getattr(match, "score", 0.0),
-                    "metadata": getattr(match, "metadata", {}),
-                }
-            results.append(match_dict)
-
-        logging.info("Retrieved %d matches from index", len(results))
-        return results
-
-    except Exception as e:
-        logging.error("Error in query_all_chunks: %s", e)
-        return []
+    logging.info("Retrieved %d matches from index", len(results))
+    return results
 
 
 def _as_dict(obj: Any) -> dict[str, Any]:

@@ -492,7 +492,7 @@ class Dispatcher:
             upsert_start = time.perf_counter()
             try:
                 executor.execute_once(batch, retry_index=retry_index)
-                return  # Success
+                break  # Success
             except Exception as error:  # pylint: disable=broad-except
                 elapsed = time.perf_counter() - upsert_start
                 self._ctx.logger.warning(
@@ -561,7 +561,7 @@ class Dispatcher:
                         split_depth=split_depth + 1,
                         retries_consumed=retries_consumed,
                     )
-                    return
+                    break
 
 
 class VectorWriteCoordinator:

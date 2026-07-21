@@ -185,10 +185,9 @@ def summarize_path(
         if _is_sensitive_file(path):
             return _build_result(entry, None, "skipped_sensitive")
 
-        if _is_binary_file(path) and not _is_text_extractable_binary(path):
-            return _build_result(entry, None, "skipped_binary")
-
         try:
+            if _is_binary_file(path) and not _is_text_extractable_binary(path):
+                return _build_result(entry, None, "skipped_binary")
             content = _read_text(
                 path,
                 root_resolved=root_resolved,
@@ -288,20 +287,17 @@ def _is_sensitive_file(path: Path) -> bool:
 
 def _is_binary_file(path: Path) -> bool:
     """Enhanced binary file detection."""
-    try:
-        with path.open("rb") as handle:
-            chunk = handle.read(8192)  # Increased chunk size
-        # Check for null bytes (strong binary indicator)
-        if b"\x00" in chunk:
+    with path.open("rb") as handle:
+        chunk = handle.read(8192)  # Increased chunk size
+    # Check for null bytes (strong binary indicator)
+    if b"\x00" in chunk:
+        return True
+    # Check for high proportion of non-text bytes
+    if len(chunk) > 0:
+        non_text = sum(1 for b in chunk if b < 0x20 and b not in (0x09, 0x0A, 0x0D))
+        if non_text / len(chunk) > 0.3:
             return True
-        # Check for high proportion of non-text bytes
-        if len(chunk) > 0:
-            non_text = sum(1 for b in chunk if b < 0x20 and b not in (0x09, 0x0A, 0x0D))
-            if non_text / len(chunk) > 0.3:
-                return True
-        return False
-    except Exception:
-        return True  # Skip on any error
+    return False
 
 
 def _is_text_extractable_binary(path: Path) -> bool:

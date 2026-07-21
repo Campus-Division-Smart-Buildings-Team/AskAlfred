@@ -1324,4 +1324,4 @@ def extract_maintenance_csv(
             ex,
             exc_info=True,
         )
-        return []
+        raise ParseError("Maintenance CSV extraction failed") from ex

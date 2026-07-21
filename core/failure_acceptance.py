@@ -406,7 +406,7 @@ P0_P1_FAILURE_ACCEPTANCE = {
         contract,
         owning_test=(
             "tests/test_failure_acceptance_inventory.py::"
-            f"test_p0_p1_state_contract[{state_id}]"
+            f"test_p0_p1_failure_behaviour[{state_id}]"
         ),
     )
     for state_id, contract in P0_P1_FAILURE_ACCEPTANCE.items()

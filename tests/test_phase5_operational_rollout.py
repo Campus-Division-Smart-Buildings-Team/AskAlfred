@@ -13,11 +13,16 @@ Covers the rollout machinery and the legacy-path removal:
 from __future__ import annotations
 
 import importlib
+import logging
+import threading
+from queue import Queue
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
 from core.failure_codes import FailureCode
-from core.outcomes import OutcomeStatus, is_successful
+from core.outcomes import OutcomeStatus, SourceOutcome, is_successful
 from core.telemetry import ReadinessRegistry, Telemetry
 from query_core.query_result import QueryResult
 
@@ -302,6 +307,204 @@ def test_fault_injection_redis_seam(monkeypatch):
     get_fault_injector().arm(FaultPoint.REDIS, RuntimeError)
     with pytest.raises(RuntimeError):
         ClientManager.get_redis()
+
+
+def test_fault_injection_embedding_seam_has_typed_retryable_outcome(monkeypatch):
+    from core.fault_injection import FaultPoint, get_fault_injector
+    from search_core import search_utils
+
+    monkeypatch.setattr(search_utils, "open_index", lambda _name: object())
+    monkeypatch.setattr(
+        search_utils, "get_index_config", lambda _name: {"model": "test-model"}
+    )
+    monkeypatch.setattr(
+        search_utils, "_namespaces_to_search", lambda _idx, _name: [None]
+    )
+    get_fault_injector().arm(FaultPoint.OPENAI_EMBEDDING, TimeoutError, count=1)
+
+    hits, outcome = search_utils.search_one_index_with_outcome("index", "query")
+
+    assert hits == []
+    assert outcome.status is OutcomeStatus.UNAVAILABLE
+    assert outcome.failure.code is FailureCode.SEARCH_EMBEDDING_UNAVAILABLE
+    assert outcome.failure.retryable is True
+
+
+def test_fault_injection_query_seam_is_unavailable_not_empty(monkeypatch):
+    from core.fault_injection import FaultPoint, get_fault_injector
+    from search_core import search_utils
+
+    monkeypatch.setattr(search_utils, "open_index", lambda _name: object())
+    monkeypatch.setattr(
+        search_utils, "get_index_config", lambda _name: {"model": "test-model"}
+    )
+    monkeypatch.setattr(
+        search_utils, "_namespaces_to_search", lambda _idx, _name: [None]
+    )
+    get_fault_injector().arm(FaultPoint.PINECONE_QUERY, TimeoutError, count=1)
+
+    hits, outcome = search_utils.search_one_index_with_outcome(
+        "index", "query", query_vector=[0.0]
+    )
+
+    assert hits == []
+    assert outcome.status is OutcomeStatus.UNAVAILABLE
+    assert outcome.failure.code is FailureCode.SEARCH_NAMESPACE_UNAVAILABLE
+    assert outcome.failure.retryable is True
+
+
+def test_fault_injection_answer_seam_retains_results_as_partial(monkeypatch):
+    from core.fault_injection import FaultPoint, get_fault_injector
+    from search_core import semantic_search
+
+    monkeypatch.setattr(semantic_search, "TARGET_INDEXES", ["index"])
+    monkeypatch.setattr(
+        semantic_search, "get_index_config", lambda _name: {"model": "test-model"}
+    )
+    monkeypatch.setattr(semantic_search, "embed_texts", lambda *_args: [[0.0]])
+    monkeypatch.setattr(semantic_search, "extract_building_from_query", lambda _q: None)
+    monkeypatch.setattr(semantic_search, "resolve_building_name_fuzzy", lambda _b: None)
+    monkeypatch.setattr(
+        semantic_search.BusinessTermMapper,
+        "enhance_query_with_terms",
+        lambda query: (query, None),
+    )
+    hit = {"id": "doc:1", "score": 1.0, "metadata": {}}
+    monkeypatch.setattr(
+        semantic_search,
+        "search_one_index_with_outcome",
+        lambda *_args, **_kwargs: (
+            [hit],
+            SourceOutcome(
+                source="index", status=OutcomeStatus.SUCCESS, result_count=1
+            ),
+        ),
+    )
+    monkeypatch.setattr(semantic_search, "deduplicate_results", lambda values: values)
+    monkeypatch.setattr(
+        semantic_search, "apply_occupancy_capacity_boost", lambda values, _q: values
+    )
+    monkeypatch.setattr(semantic_search, "get_effective_score", lambda value: value["score"])
+    get_fault_injector().arm(FaultPoint.OPENAI_ANSWER, TimeoutError, count=1)
+
+    outcome = semantic_search.semantic_search_with_outcome("query", 5)
+
+    assert outcome.results == [hit]
+    assert outcome.status is OutcomeStatus.PARTIAL
+    assert outcome.failure.code is FailureCode.ANSWER_GENERATION_UNAVAILABLE
+    assert outcome.failure.retryable is True
+
+
+def test_fault_injection_auth_callback_has_terminal_code_and_telemetry(monkeypatch):
+    from auth import auth_manager
+    from core.fault_injection import FaultPoint, get_fault_injector
+    from core.telemetry import METRIC_AUTH_OUTCOME, get_telemetry
+
+    fake_streamlit = SimpleNamespace(
+        session_state={auth_manager.AUTH_FLOW_SESSION_KEY: {"auth_uri": "https://test"}}
+    )
+    monkeypatch.setattr(auth_manager, "st", fake_streamlit)
+    monkeypatch.setattr(
+        auth_manager,
+        "_get_query_params",
+        lambda: {"code": "code", "state": "state"},
+    )
+    monkeypatch.setattr(auth_manager, "_clear_auth_query_params", lambda: None)
+    get_fault_injector().arm(FaultPoint.AUTH_CALLBACK, TimeoutError, count=1)
+
+    assert auth_manager._try_complete_authentication() is None
+    failure = fake_streamlit.session_state[auth_manager.AUTH_FAILURE_SESSION_KEY]
+    assert failure["code"] == FailureCode.AUTH_PROVIDER_UNAVAILABLE.value
+    assert failure["retryable"] is True
+    assert get_telemetry().get(
+        METRIC_AUTH_OUTCOME,
+        status=OutcomeStatus.UNAVAILABLE,
+        code=FailureCode.AUTH_PROVIDER_UNAVAILABLE,
+    ) == 1
+
+
+def test_fault_injection_registry_write_seam_is_not_nominal_success():
+    from core.fault_injection import FaultPoint, get_fault_injector
+    from ingest.transaction import _record_ingested_files
+
+    ctx = SimpleNamespace(config=SimpleNamespace(dry_run=False))
+    get_fault_injector().arm(FaultPoint.REGISTRY_WRITE, RuntimeError, count=1)
+
+    with pytest.raises(RuntimeError, match="registry_write"):
+        _record_ingested_files(ctx, [{"id": "file:1"}], status="success")
+
+
+def test_fault_injection_queue_drain_seam_has_terminal_report():
+    from core.fault_injection import FaultPoint, get_fault_injector
+    from ingest.batch_ingest import _teardown_worker
+    from ingest.transaction import ThreadSafeStats
+
+    ctx = SimpleNamespace(
+        config=SimpleNamespace(
+            upsert_join_timeout_seconds=0.01,
+            upsert_join_poll_seconds=0.001,
+        ),
+        stats=ThreadSafeStats(),
+        logger=logging.getLogger("fault-queue-drain"),
+    )
+    worker = Mock(name="worker")
+    worker.name = "worker"
+    worker.is_alive.return_value = False
+    queue = Queue()
+    get_fault_injector().arm(FaultPoint.QUEUE_DRAIN, TimeoutError, count=1)
+
+    report = _teardown_worker(
+        ctx,
+        upsert_stop_event=threading.Event(),
+        upsert_queue=queue,
+        upsert_threads=[worker],
+    )
+
+    assert report.queue_timed_out is True
+    assert ctx.stats.get_stats()["worker_queue_timeout_total"] == 1
+
+
+def test_fault_injection_fra_rollback_seam_is_critical_and_observable():
+    from core.alfred_exceptions import CriticalInconsistentError
+    from core.fault_injection import FaultPoint, get_fault_injector
+    from core.telemetry import METRIC_INGEST_INTEGRITY, get_telemetry
+    from ingest.transaction import FraTransaction, ThreadSafeStats
+    from interfaces import (
+        FraJournalState,
+        InMemoryFraTransactionJournal,
+        new_fra_journal_record,
+    )
+
+    journal = InMemoryFraTransactionJournal()
+    record = new_fra_journal_record(
+        tx_id="tx-fault",
+        buildings=["Test Building"],
+        requests=[("Test Building", "2026-01-01")],
+        vector_ids=["risk:1"],
+    )
+    journal.begin(record)
+    journal.append_superseded("tx-fault", ["old-risk"])
+    ctx = SimpleNamespace(
+        upsert_stop_event=None,
+        fra_journal=journal,
+        stats=ThreadSafeStats(),
+        logger=logging.getLogger("fault-fra-rollback"),
+        event_sink=SimpleNamespace(emit_event=lambda _event: None),
+    )
+    txn = FraTransaction(ctx, [])
+    txn._tx_id = "tx-fault"
+    txn._supersede_requests = [("Test Building", "2026-01-01")]
+    get_fault_injector().arm(FaultPoint.FRA_ROLLBACK, TimeoutError, count=1)
+
+    with pytest.raises(CriticalInconsistentError):
+        txn.rollback("injected_failure")
+
+    assert journal.get("tx-fault").state is FraJournalState.CRITICAL_INCONSISTENT
+    assert get_telemetry().get(
+        METRIC_INGEST_INTEGRITY,
+        event="rollback",
+        state="critical_inconsistent",
+    ) == 1
 
 
 # ---------------------------------------------------------------------------

@@ -26,7 +26,8 @@ from config import (
 from core.alfred_exceptions import ConfigError
 from core.failure_codes import FailureCode
 from core.fault_injection import FaultPoint, maybe_fail
-from core.outcomes import FailureInfo
+from core.outcomes import FailureInfo, OutcomeStatus
+from core.telemetry import get_telemetry
 from query_core.query_context import auth_is_mandatory
 from security.log_sanitiser import sanitise_error
 
@@ -44,6 +45,12 @@ AUTH_UNAVAILABLE_MESSAGE = (
 AUTH_INVALID_ACCOUNT_MESSAGE = (
     "We couldn't verify the details returned for your account. Please try signing in again."
 )
+_AUTH_FAILURE_STATUSES = {
+    FailureCode.AUTH_PROVIDER_UNAVAILABLE: OutcomeStatus.UNAVAILABLE,
+    FailureCode.AUTH_PROVIDER_RESPONSE_INVALID: OutcomeStatus.FAILED,
+    FailureCode.AUTH_CLAIMS_INVALID: OutcomeStatus.FAILED,
+    FailureCode.AUTH_CONFIGURATION_INVALID: OutcomeStatus.UNAVAILABLE,
+}
 AUTH_FLOW_CACHE_TTL_SECONDS = 900
 MICROSOFT_SIGN_IN_BUTTON_MAX_WIDTH_PX = 360
 MICROSOFT_LOGO_SVG = (
@@ -73,6 +80,9 @@ def _record_auth_failure(
     """Store and log one safe, structured authentication failure."""
 
     failure = FailureInfo.from_code(code, AUTH_COMPONENT)
+    get_telemetry().record_auth_outcome(
+        _AUTH_FAILURE_STATUSES.get(code, OutcomeStatus.FAILED), code
+    )
     st.session_state[AUTH_ERROR_SESSION_KEY] = user_message
     st.session_state[AUTH_FAILURE_SESSION_KEY] = failure.to_dict()
     if error is None:
@@ -403,6 +413,8 @@ def _try_complete_authentication() -> AuthContext | None:
         _clear_auth_query_params()
         return None
 
+    result: Any = None
+    callback_failed = False
     try:
         maybe_fail(FaultPoint.AUTH_CALLBACK)
         app = build_msal_app(allow_common_fallback=not AUTH_STRICT_TENANT)
@@ -414,6 +426,9 @@ def _try_complete_authentication() -> AuthContext | None:
             error=error,
         )
         _clear_auth_query_params()
+        callback_failed = True
+
+    if callback_failed:
         return None
 
     _clear_auth_query_params()

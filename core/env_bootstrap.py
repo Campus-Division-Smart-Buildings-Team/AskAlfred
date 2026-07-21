@@ -38,7 +38,7 @@ def load_local_env() -> None:
     if env_path.exists():
         try:
             from dotenv import dotenv_values, load_dotenv
-        except Exception:  # pylint: disable=broad-except
+        except ImportError:
             logger.info(
                 "Skipping local .env load: python-dotenv is unavailable in this environment."
             )
@@ -47,7 +47,7 @@ def load_local_env() -> None:
 
         try:
             dotenv_values_result = dotenv_values(env_path)
-        except Exception as exc:  # pylint: disable=broad-except
+        except (OSError, TypeError, ValueError) as exc:
             logger.warning("Failed to inspect local .env from %s: %s", env_path, exc)
             _ENV_BOOTSTRAP_COMPLETE = True
             return
@@ -88,7 +88,7 @@ def load_local_env() -> None:
 
     try:
         load_dotenv(env_path, override=False)
-    except Exception as exc:  # pylint: disable=broad-except
+    except (OSError, TypeError, ValueError) as exc:
         logger.warning("Failed to load local .env from %s: %s", env_path, exc)
         _ENV_BOOTSTRAP_COMPLETE = True
         return

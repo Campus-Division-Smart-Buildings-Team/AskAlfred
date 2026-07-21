@@ -626,20 +626,14 @@ def _query_index_with_batches(
     access_filter: Optional[dict[str, Any]] = None,
     top_k: int = DEFAULT_BATCH_TOP_K,
 ) -> list[dict[str, Any]]:
-    """
-    Best-effort index query returning matches only (empty list on failure).
-
-    Retained for callers that do not aggregate source health; callers that must
-    distinguish a backend outage from genuinely empty data should use
-    :func:`_query_index_with_outcome`.
-    """
-    try:
-        return _fetch_index_matches(
-            idx_name, namespace, filter_dict, access_filter, top_k
-        )
-    except Exception as e:
-        logging.error("Error querying %s: %s", idx_name, sanitise_error(e))
-        return []
+    """Return matches while preserving backend failure as a typed exception."""
+    matches, outcome = _query_index_with_outcome(
+        idx_name, namespace, filter_dict, access_filter, top_k
+    )
+    if outcome.status is OutcomeStatus.UNAVAILABLE:
+        assert outcome.failure is not None
+        raise StructuredSearchUnavailable(outcome.failure)
+    return matches
 
 
 def _query_index_with_outcome(

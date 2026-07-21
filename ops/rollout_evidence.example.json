@@ -1,0 +1,37 @@
+{
+  "environment": "non-production-environment-name",
+  "captured_at": "2026-01-01T00:00:00Z",
+  "monitoring": {
+    "prometheus_connected": false,
+    "alertmanager_connected": false,
+    "grafana_connected": false,
+    "evidence_ref": ""
+  },
+  "fault_injection": {
+    "openai_embedding": {"passed": false, "evidence_ref": ""},
+    "openai_answer": {"passed": false, "evidence_ref": ""},
+    "pinecone_index_open": {"passed": false, "evidence_ref": ""},
+    "pinecone_query": {"passed": false, "evidence_ref": ""},
+    "redis": {"passed": false, "evidence_ref": ""},
+    "auth_callback": {"passed": false, "evidence_ref": ""},
+    "registry_write": {"passed": false, "evidence_ref": ""},
+    "queue_drain": {"passed": false, "evidence_ref": ""},
+    "fra_rollback": {"passed": false, "evidence_ref": ""}
+  },
+  "traffic_baseline": {
+    "baseline_snapshot": "",
+    "current_snapshot": "",
+    "comparison_passed": false,
+    "evidence_ref": ""
+  },
+  "approvals": {
+    "user_copy": {"approved": false, "approved_at": "", "evidence_ref": ""},
+    "alert_thresholds": {"approved": false, "approved_at": "", "evidence_ref": ""}
+  },
+  "acl": {
+    "threshold": 1.0,
+    "measured_conformance": 0.0,
+    "remediation_complete": false,
+    "evidence_ref": ""
+  }
+}

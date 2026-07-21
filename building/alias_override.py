@@ -214,18 +214,14 @@ def validate_overrides(property_csv_path: str) -> dict[str, bool]:
         dictionary mapping canonical names to validation status
     """
 
-    try:
-        df = pd.read_csv(property_csv_path)
-        property_names = set(df["Property name"].values)
+    df = pd.read_csv(property_csv_path)
+    property_names = set(df["Property name"].values)
 
-        validation_results = {}
-        for extracted, canonical in ALIAS_OVERRIDES.items():
-            validation_results[canonical] = canonical in property_names
+    validation_results = {}
+    for _extracted, canonical in ALIAS_OVERRIDES.items():
+        validation_results[canonical] = canonical in property_names
 
-        return validation_results
-    except Exception as e:
-        print(f"Error validating overrides: {e}")
-        return {}
+    return validation_results
 
 
 # ============================================================================

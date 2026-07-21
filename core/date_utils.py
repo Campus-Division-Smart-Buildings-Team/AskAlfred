@@ -11,7 +11,9 @@ from datetime import date, datetime
 from typing import Any, Optional
 
 from config import DEFAULT_EMBED_MODEL, DIMENSION
+from core.alfred_exceptions import SearchError
 from core.pinecone_utils import normalise_matches, vector_query
+from core.telemetry import get_telemetry
 
 logger = logging.getLogger(__name__)
 # ============================================================================
@@ -516,7 +518,7 @@ def search_source_for_latest_date(
         logging.error(
             "Error searching dates for key='%s': %s", key_value, e, exc_info=True
         )
-        return None, []
+        raise SearchError("Document date lookup failed") from e
 
 
 def _fetch_document_chunks(
@@ -559,15 +561,16 @@ def _fetch_document_chunks(
 
     except Exception as e:  # pylint: disable=broad-except
         logging.debug("Metadata filter failed: %s", e)
+        get_telemetry().record_fallback("date_lookup")
 
     # Strategy 2: Semantic search fallback
     logging.debug("Falling back to semantic search...")
 
     try:
         raw = vector_query(idx, namespace, key_value, 50, DEFAULT_EMBED_MODEL)
-    except Exception:  # pylint: disable=broad-except
+    except Exception as error:  # pylint: disable=broad-except
         logging.warning("Semantic search also failed for key='%s'", key_value)
-        return []
+        raise SearchError("Document chunk retrieval unavailable") from error
 
     results = normalise_matches(raw)
 
@@ -599,29 +602,26 @@ def extract_date_from_single_result(result: dict[str, Any]) -> Optional[str]:
     Returns:
         Date string if found, None otherwise
     """
-    try:
-        metadata = result.get("metadata", {})
-        text = result.get("text", "")
+    if not isinstance(result, dict):
+        raise TypeError("result must be a dictionary")
+    metadata = result.get("metadata", {})
+    text = result.get("text", "")
 
-        # Check metadata first
-        metadata_date = extract_date_from_metadata(metadata)
-        if metadata_date:
-            return metadata_date
+    # Check metadata first
+    metadata_date = extract_date_from_metadata(metadata)
+    if metadata_date:
+        return metadata_date
 
-        # Quick text search using pre-compiled patterns
-        for pattern in QUICK_DATE_PATTERNS:
-            match = pattern.search(text)
-            if match:
-                date_str = match.group(1)
-                parsed = parse_date_string(date_str)
-                if is_valid_date(parsed):
-                    return date_str
+    # Quick text search using pre-compiled patterns
+    for pattern in QUICK_DATE_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            date_str = match.group(1)
+            parsed = parse_date_string(date_str)
+            if is_valid_date(parsed):
+                return date_str
 
-        return None
-
-    except Exception as e:  # pylint: disable=broad-except
-        logging.warning("Error extracting date from single result: %s", e)
-        return None
+    return None
 
 
 # ============================================================================
@@ -643,22 +643,17 @@ def parse_date_to_iso(date_str: Optional[str]) -> Optional[str]:
     if not date_str:
         return None
 
-    try:
-        parsed = parse_date_string(date_str)
-        if not parsed:
-            return None
-        if parsed == datetime.min:
-            return None
-
-        # parse_date_string may return datetime or date
-        if isinstance(parsed, datetime):
-            parsed = parsed.date()
-
-        return parsed.isoformat()
-
-    except Exception as exc:
-        logger.warning("Failed to parse date string '%s': %s", date_str, exc)
+    parsed = parse_date_string(date_str)
+    if not parsed:
         return None
+    if parsed == datetime.min:
+        return None
+
+    # parse_date_string may return datetime or date
+    if isinstance(parsed, datetime):
+        parsed = parsed.date()
+
+    return parsed.isoformat()
 
 
 def parse_iso_date(value: Any) -> Optional[date]:

@@ -1,35 +1,32 @@
 # Outstanding tasks
 
-This file records the work that remains after reviewing
+This file records completion evidence after reviewing
 `plan/failure_and_degraded_states_plan.md` against the current implementation.
-The plan currently marks Phases 0–5 as complete, but the items below are either
-not implemented, only partially implemented, or still require operational
-rollout.
+Repository implementation and automated coverage are complete; the remaining
+items require operational rollout in a target environment.
 
-## Remaining silent-failure debt
+## Repository work complete
 
-Remove or replace every entry still permitted by
-`tests/test_failure_acceptance_inventory.py::SILENT_FAILURE_BASELINE`.
-The allowlist currently contains broad-exception paths that return `[]`, `None`,
-or nominal success, including:
+The remaining code and automated-test debt has been completed:
 
-- `core/pinecone_utils.py::list_index_names`
-- `core/pinecone_utils.py::query_all_chunks`
-- `search_core/structured_queries.py::_query_index_with_batches`
-- `core/date_utils.py::_fetch_document_chunks`
-- `ingest/document_content.py::extract_maintenance_csv`
-- `ingest/upsert_handler.py::Dispatcher._execute_inline`
-
-This debt conflicts with the Phase 5 exit criterion that silent-empty failure
-paths have been removed and with the overall definition of done.
-
-## Test coverage gaps
-
-- Replace schema-only P0/P1 acceptance ownership with behavioral fault tests.
-- Ensure each P0/P1 test triggers the named failure and asserts its terminal
-  status, stable failure code, retryability, telemetry, and user treatment.
-- Expand Phase 5 fault-injection integration tests beyond Pinecone index-open
-  and Redis to every named seam.
+- `SILENT_FAILURE_BASELINE` is empty and the AST acceptance test now requires it
+  to remain empty. Pinecone catalogue/query failures, structured retrieval,
+  document-date fallback, maintenance CSV parsing, and inline upserts no longer
+  translate broad exceptions into an empty/nominal-success result. The six
+  additional historical scanner entries were removed at the same time.
+- Every P0/P1 register entry is exercised through its terminal status, stable
+  failure code, registered retryability, low-cardinality telemetry, and safe
+  presenter treatment. The old schema-only ownership test is no longer the
+  acceptance owner.
+- Automated fault-injection coverage now reaches every named Phase 5 seam:
+  OpenAI embedding/answer, Pinecone index-open/query, Redis, auth callback,
+  registry write, queue drain, and FRA rollback.
+- A rollback-mechanism outage now enters `critical_inconsistent`, blocks the
+  affected FRA scope, emits integrity telemetry, and raises the stable critical
+  failure type. Auth callback failures now emit a dedicated terminal auth metric.
+- `ops/rollout_evidence.example.json` and
+  `tools/validate_rollout_evidence.py` make the remaining deployment evidence a
+  deterministic completion gate rather than an informal checklist.
 
 ## Operational rollout still required
 
@@ -195,12 +192,22 @@ plan and have not been completed by repository code alone:
 
 ## Completion criteria
 
-This backlog is complete when:
+Repository completion criteria are satisfied when the automated suite passes:
 
-- Every item above has behavioral automated coverage.
-- No dependency failure is translated into a genuine empty result.
-- Every material fallback is represented on the affected operation outcome.
-- ACL conformance reaches the agreed threshold after quarantine or re-ingestion.
-- The silent-failure baseline is empty.
-- Monitoring, fault-injection, and traffic-baseline evidence has been captured
-  from the target non-production or production-like environment.
+- Every P0/P1 item has behavioral outcome, retryability, telemetry, and user-copy
+  coverage.
+- Dependency failures are not translated into genuine empty results.
+- Material fallbacks are typed on the affected outcome or, for ingestion
+  integrity boundaries, on the terminal run/file state.
+- The silent-failure baseline is empty and guarded against regression.
+- Every named fault-injection seam has automated integration coverage.
+
+Full backlog closure additionally requires a populated deployment evidence
+manifest to pass:
+
+`python tools/validate_rollout_evidence.py <rollout-evidence.json>`
+
+That manifest proves monitoring connectivity, the live non-production fault
+matrix, traffic-baseline comparison, operator approvals, and post-remediation
+ACL conformance at or above `ACL_CONFORMANCE_THRESHOLD`. The example manifest
+is deliberately incomplete and must never be used as rollout evidence.

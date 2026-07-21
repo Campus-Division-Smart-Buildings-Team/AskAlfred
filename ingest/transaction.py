@@ -666,7 +666,21 @@ class FraTransaction:
         if self._tx_id is None:
             return
         # Rollout fault-injection seam (no-op unless armed in a non-prod env).
-        maybe_fail(FaultPoint.FRA_ROLLBACK)
+        try:
+            maybe_fail(FaultPoint.FRA_ROLLBACK)
+        except Exception as error:  # pylint: disable=broad-except
+            # An unavailable rollback mechanism means persisted state can no
+            # longer be proven consistent. Enter the same fail-closed terminal
+            # state as an incomplete restore instead of leaking a raw injected
+            # dependency exception or leaving the transaction merely pending.
+            record = self._ctx.fra_journal.get(self._tx_id)
+            item_ids = list(record.superseded_ids) if record else self._superseded_ids
+            try:
+                self._mark_critical_inconsistent(
+                    f"{reason}: rollback mechanism unavailable", item_ids, 0
+                )
+            except CriticalInconsistentError as critical:
+                raise critical from error
         self._transition(
             FraJournalState.ROLLBACK_PENDING,
             failure_code="fra.supersession_failed",

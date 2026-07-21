@@ -54,6 +54,7 @@ COMPONENT_REDIS = "redis"
 
 # Stable metric names.
 METRIC_REQUEST_OUTCOME = "request_outcome_total"
+METRIC_AUTH_OUTCOME = "auth_outcome_total"
 METRIC_SOURCE_OUTCOME = "source_outcome_total"
 METRIC_FALLBACK_ACTIVATED = "fallback_activated_total"
 METRIC_SERVICE_DEGRADED = "service_degraded_total"
@@ -180,6 +181,13 @@ class Telemetry:
         if failure_code is not None:
             labels["code"] = failure_code
         self.increment(METRIC_REQUEST_OUTCOME, **labels)
+
+    def record_auth_outcome(
+        self, status: OutcomeStatus, failure_code: FailureCode
+    ) -> None:
+        """Record a terminal authentication attempt without user identifiers."""
+
+        self.increment(METRIC_AUTH_OUTCOME, status=status, code=failure_code)
 
     def record_source_outcome(self, component: str, status: OutcomeStatus) -> None:
         """Record one per-source retrieval outcome for a named component."""
@@ -345,6 +353,7 @@ __all__ = [
     "METRIC_ACL_METADATA_DROP",
     "METRIC_ACL_RECONCILIATION",
     "METRIC_FALLBACK_ACTIVATED",
+    "METRIC_AUTH_OUTCOME",
     "METRIC_REQUEST_OUTCOME",
     "METRIC_INGEST_OUTCOME",
     "METRIC_INGEST_INTEGRITY",

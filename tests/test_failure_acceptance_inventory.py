@@ -9,37 +9,18 @@ from pathlib import Path
 import pytest
 
 from core.failure_acceptance import P0_P1_FAILURE_ACCEPTANCE
-from core.failure_codes import FAILURE_CODE_SPECS, FailureCode
-from core.outcomes import OutcomeStatus
+from core.failure_codes import FAILURE_CODE_SPECS, FailureCode, get_failure_code_spec
+from core.outcomes import FailureInfo, OutcomeStatus
+from core.telemetry import METRIC_REQUEST_OUTCOME, Telemetry
+from ui.error_presenter import present_outcome
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REGISTER_PATH = REPO_ROOT / "plan" / "failure_and_degraded_states_plan.md"
 
-# Phase 0 freezes the existing broad-exception/silent-sentinel debt so later
-# phases can remove it incrementally. Any new fingerprint fails this test.
-#
-# Phase 2 removed the semantic and structured retrieval entries as those paths
-# migrated to typed source outcomes (search_one_index_with_outcome,
-# _query_index_with_outcome, and per-source embedding outcomes). The best-effort
-# `_query_index_with_batches` wrapper still returns [] and remains frozen.
-#
-# Phase 3 removed the rate-limiter lease entries: RedisRateLimiter.acquire_lease
-# and release_lease now fail closed (return False) instead of returning a
-# nominal-success sentinel, and emit a degraded-service metric (START-06).
-SILENT_FAILURE_BASELINE = {
-    "auth/auth_manager.py:_try_complete_authentication",
-    "building/alias_override.py:validate_overrides",
-    "building/path_inventory_summary.py:_is_binary_file",
-    "core/date_utils.py:_fetch_document_chunks",
-    "core/date_utils.py:extract_date_from_single_result",
-    "core/date_utils.py:parse_date_to_iso",
-    "core/env_bootstrap.py:load_local_env",
-    "core/pinecone_utils.py:list_index_names",
-    "core/pinecone_utils.py:query_all_chunks",
-    "ingest/document_content.py:extract_maintenance_csv",
-    "ingest/upsert_handler.py:Dispatcher._execute_inline",
-    "search_core/structured_queries.py:_query_index_with_batches",
-}
+# Phase 5 completion requires this baseline to stay empty. Broad exception
+# handlers may recover, but must do so through an explicit typed/degraded path
+# rather than returning an empty/None/nominal-success sentinel.
+SILENT_FAILURE_BASELINE: set[str] = set()
 
 
 def _registered_p0_p1_rows() -> dict[str, str]:
@@ -73,8 +54,8 @@ def test_acceptance_inventory_exactly_covers_register_p0_p1_rows():
         for state_id, contract in sorted(P0_P1_FAILURE_ACCEPTANCE.items())
     ],
 )
-def test_p0_p1_state_contract(state_id, contract):
-    """Own every P0/P1 row with a stable, low-cardinality outcome contract."""
+def test_p0_p1_failure_behaviour(state_id, contract):
+    """Exercise every P0/P1 failure through outcome, telemetry and UI layers."""
 
     assert re.fullmatch(r"[A-Z]+-\d+", state_id)
     assert contract.priority in {"P0", "P1"}
@@ -84,8 +65,30 @@ def test_p0_p1_state_contract(state_id, contract):
     assert re.fullmatch(r"[a-z][a-z0-9_]*", contract.component)
     assert contract.owning_test == (
         "tests/test_failure_acceptance_inventory.py::"
-        f"test_p0_p1_state_contract[{state_id}]"
+        f"test_p0_p1_failure_behaviour[{state_id}]"
     )
+
+    # Inject the registered named failure into the shared operation boundary.
+    # This verifies more than schema ownership: terminal status, stable code,
+    # retryability, low-cardinality telemetry, and safe user treatment all run.
+    failure = FailureInfo.from_code(contract.code, contract.component)
+    assert failure.code is contract.code
+    assert failure.retryable is get_failure_code_spec(contract.code).retryable
+
+    telemetry = Telemetry()
+    telemetry.record_request_outcome(contract.status, contract.code)
+    assert telemetry.get(
+        METRIC_REQUEST_OUTCOME,
+        status=contract.status,
+        code=contract.code,
+    ) == 1
+
+    presented = present_outcome(contract.status, failure)
+    assert presented.render_as_notice is (contract.status is not OutcomeStatus.SUCCESS)
+    assert presented.severity in {"info", "warning", "error"}
+    assert presented.message
+    assert failure.correlation_id == presented.reference
+    assert state_id not in presented.message
 
 
 def _is_empty_or_nominal_success_return(node: ast.Return) -> bool:
@@ -182,11 +185,9 @@ def _silent_failure_fingerprints() -> set[str]:
     return fingerprints
 
 
-def test_no_new_broad_exception_path_returns_a_silent_sentinel():
+def test_silent_failure_baseline_is_empty():
     current = _silent_failure_fingerprints()
-    additions = current - SILENT_FAILURE_BASELINE
-
-    assert not additions, (
-        "New broad exception paths must return an explicit degraded/failure "
-        f"outcome instead of a silent sentinel: {sorted(additions)}"
+    assert current == SILENT_FAILURE_BASELINE == set(), (
+        "Broad exception paths must return an explicit degraded/failure "
+        f"outcome instead of a silent sentinel: {sorted(current)}"
     )
