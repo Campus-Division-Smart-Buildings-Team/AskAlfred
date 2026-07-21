@@ -8,14 +8,6 @@ rollout.
 
 ## High-priority implementation gaps
 
-### ROUTE-09 / SEARCH-19 — Convert handler exceptions into typed outcomes
-
-- Guard handler execution inside `QueryManager.process_query`.
-- Convert unexpected handler errors into a structured `failed` result with a
-  stable failure code and correlation reference.
-- Ensure API and non-Streamlit callers receive the same typed result contract.
-- Add behavioral tests for exceptions from every handler stage.
-
 ### AUTH-10 / Phase 3 item 5 — Remediate non-conformant ACL vectors
 
 - Build an operator workflow that identifies vectors missing the required ACL
@@ -162,6 +154,14 @@ plan and have not been completed by repository code alone:
 3. Capture a real traffic baseline and compare empty, partial, unavailable,
    failed, and degraded rates using `tools/compare_outcome_rates.py`.
 4. Record operator approval of the stable user-facing copy and alert thresholds.
+
+## Recently completed
+
+- **ROUTE-09 / SEARCH-19:** `QueryManager.process_query` now converts unexpected
+  exceptions from every registered handler into a transport-safe `failed`
+  `QueryResult` with the stable `handler.execution_failed` code and an opaque
+  correlation reference. Parameterised behavioral coverage verifies the same
+  serialisable result contract for UI, API, and direct Python callers.
 
 ## Completion criteria
 

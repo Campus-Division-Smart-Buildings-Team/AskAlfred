@@ -3,6 +3,8 @@ Tests for the Query Manager,
 ensuring correct routing of queries to handlers and backward compatibility of results.
 """
 
+import re
+
 import pytest
 
 from core.failure_codes import FailureCode
@@ -10,8 +12,16 @@ from core.outcomes import OutcomeStatus, is_successful
 from query_core import query_context
 from query_core.query_manager import QueryManager, process_query_unified
 from query_core.query_result import QueryResult
+from query_core.query_route import QueryRoute
 from query_core.query_types import QueryType
-from query_handlers.semantic_search_handler import SemanticSearchHandler
+from query_handlers import (
+    ConversationalHandler,
+    CountingHandler,
+    MaintenanceHandler,
+    PropertyHandler,
+    RankingHandler,
+    SemanticSearchHandler,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -206,6 +216,82 @@ class TestHandlerGraphValidation:
         assert result.status is OutcomeStatus.FAILED
         assert result.failure is not None
         assert result.failure.code is FailureCode.ROUTING_GRAPH_INVALID
+
+
+class TestHandlerExecutionFailures:
+    """ROUTE-09 / SEARCH-19 failures are typed at the manager boundary."""
+
+    @pytest.mark.parametrize(
+        "handler_type",
+        [
+            ConversationalHandler,
+            MaintenanceHandler,
+            RankingHandler,
+            PropertyHandler,
+            CountingHandler,
+            SemanticSearchHandler,
+        ],
+        ids=lambda handler_type: handler_type.__name__,
+    )
+    def test_every_handler_exception_returns_transport_safe_failure(
+        self, monkeypatch, caplog, handler_type
+    ):
+        manager = QueryManager(intent_classifier=object())
+        handler = handler_type()
+        recorded_outcomes = []
+
+        monkeypatch.setattr(QueryManager, "_run_preprocessors", lambda self, context: None)
+        monkeypatch.setattr(
+            QueryManager,
+            "_record_building_directory_readiness",
+            lambda self, context: False,
+        )
+        monkeypatch.setattr(
+            QueryManager,
+            "_route_query_hybrid",
+            lambda self, context: QueryRoute(
+                handler=handler,
+                metadata={"route": "fault_injection"},
+            ),
+        )
+
+        def raise_unexpected(_context):
+            raise RuntimeError("secret provider detail")
+
+        monkeypatch.setattr(handler, "handle", raise_unexpected)
+        monkeypatch.setattr(
+            manager,
+            "_record_outcome_telemetry",
+            recorded_outcomes.append,
+        )
+        manager.cache_enabled = True
+
+        result = manager.process_query("test handler failure")
+        payload = result.to_dict()
+
+        assert result.status is OutcomeStatus.FAILED
+        assert result.failure is not None
+        assert result.failure.code is FailureCode.HANDLER_EXECUTION_FAILED
+        assert result.failure.component == "query_handler"
+        assert result.failure.retryable is True
+        assert re.fullmatch(r"alf-[0-9a-f]{12}", result.failure.correlation_id)
+        assert result.handler_used == handler_type.__name__
+        assert result.query_type == handler.query_type.value
+        assert result.answer is None
+        assert result.results == []
+        assert result.metadata == {
+            "error": FailureCode.HANDLER_EXECUTION_FAILED.value,
+            "route": "fault_injection",
+        }
+        assert "secret provider detail" not in str(payload)
+        assert payload["status"] == OutcomeStatus.FAILED.value
+        assert payload["failure"] == result.failure.to_dict()
+        assert manager.cache == {}
+        assert recorded_outcomes == [result]
+        assert (
+            "handler_execution_failed code=handler.execution_failed "
+            f"correlation_id={result.failure.correlation_id}"
+        ) in caplog.text
 
 
 class TestBackwardCompatibility:

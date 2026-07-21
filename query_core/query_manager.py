@@ -48,6 +48,7 @@ from query_handlers import (
     RankingHandler,
     SemanticSearchHandler,
 )
+from query_handlers.handler_failures import handler_failed_result
 from query_preprocessors import (
     BuildingExtractor,
     BusinessTermExtractor,
@@ -556,7 +557,30 @@ class QueryManager:
         # Execute handler
         # ---------------------------------------------------
         handler_start = time.time()
-        query_result = route.handler.handle(context)
+        try:
+            query_result = route.handler.handle(context)
+        except Exception as exc:
+            # This is the final exception boundary for every query handler.
+            # Individual handlers may translate known dependency failures more
+            # precisely, while anything unexpected still leaves the manager as
+            # a transport-safe, typed outcome for UI, API, and direct callers.
+            query_result = handler_failed_result(
+                context.query,
+                route.handler.__class__.__name__,
+                route.handler.query_type.value,
+                error_code=FailureCode.HANDLER_EXECUTION_FAILED.value,
+            )
+            failure = query_result.failure
+            self.logger.error(
+                "handler_execution_failed code=%s correlation_id=%s "
+                "component=%s handler=%s error=%s",
+                failure.code.value,
+                failure.correlation_id,
+                failure.component,
+                route.handler.__class__.__name__,
+                sanitise_error(exc),
+                exc_info=False,
+            )
         handler_elapsed_ms = (time.time() - handler_start) * 1000
 
         # Attach handler metadata
