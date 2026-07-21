@@ -8,13 +8,6 @@ rollout.
 
 ## Ingestion and vector gaps
 
-### INGEST-08 — Complete empty/review outcomes
-
-- Add distinct `empty_document` and `unsupported_layout` outcomes.
-- Keep `fra_no_action_plan` separate from technical extraction failure.
-- Add terminal-state and CLI-summary tests for all three cases.
-- Only `fra_no_action_plan` currently has a distinct review reason.
-
 ### VECTOR-04 — Retry and alert on embedding response mismatch
 
 - Retry a provider response-size mismatch once when safe.
@@ -84,6 +77,18 @@ plan and have not been completed by repository code alone:
 
 ## Recently completed
 
+- **INGEST-08:** A file that produces no usable vectors now finishes
+  `needs_review` with a distinct, operator-actionable reason instead of a
+  generic `no_usable_vectors`: `empty_document` when nothing could be extracted,
+  and `unsupported_layout` when text was recovered but yielded no vectors. The
+  FRA `fra_no_action_plan` review reason is retained and, like the other two,
+  kept separate from a technical `failed`; all three are stable constants in
+  `core/ingest_outcomes.py`. Terminal writes record the reason on the registry
+  `error` field, in a per-reason `ThreadSafeStats` tally (counted once per
+  file), and as low-cardinality `ingest_review_total{reason}` telemetry. The run
+  report and CLI summary surface a `files_needs_review` count and a per-reason
+  breakdown. Covered by terminal-state and CLI-summary tests for all three
+  cases.
 - **ROUTE-10:** Conversation-memory persistence failures now mark the turn
   `degraded/conversation_memory` with safe structured metadata and prevent it
   from being cached as healthy. A session-scoped marker prevents stale context

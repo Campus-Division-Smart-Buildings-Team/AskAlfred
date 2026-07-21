@@ -90,6 +90,7 @@ class ThreadSafeStats(MetricsReader):
             "vectors_skipped": 0,
             "failed_files": [],
             "file_terminal_states": {},
+            "review_reasons": {},
         }
 
     def increment(self, key: str, amount: int = 1) -> None:
@@ -107,10 +108,18 @@ class ThreadSafeStats(MetricsReader):
             snapshot["file_terminal_states"] = dict(
                 self._stats["file_terminal_states"]
             )
+            snapshot["review_reasons"] = dict(self._stats["review_reasons"])
             return snapshot
 
-    def record_file_terminal(self, file_key: str, status: str) -> None:
-        """Record one terminal state without double-counting repeated writes."""
+    def record_file_terminal(
+        self, file_key: str, status: str, reason: str | None = None
+    ) -> None:
+        """Record one terminal state without double-counting repeated writes.
+
+        ``reason`` is the low-cardinality review reason (INGEST-08) recorded when
+        ``status`` is ``needs_review``; it is counted only when the terminal
+        state is newly set, so repeated writes cannot inflate the tally.
+        """
 
         if not file_key:
             return
@@ -139,7 +148,13 @@ class ThreadSafeStats(MetricsReader):
             if previous == "critical_inconsistent":
                 return
             states[file_key] = status
+            record_review = status == "needs_review" and bool(reason)
+            if record_review:
+                reasons = self._stats["review_reasons"]
+                reasons[reason] = reasons.get(reason, 0) + 1
         get_telemetry().record_ingest_outcome("file", status)
+        if record_review:
+            get_telemetry().record_ingest_review(str(reason))
 
     def observe_timing(self, key: str, value: float) -> None:
         with self._lock:
@@ -1291,7 +1306,12 @@ def _write_ingested_file_records(
             raise
         source_key = payload["source_key"] or file_id
         if hasattr(ctx, "stats") and hasattr(ctx.stats, "record_file_terminal"):
-            ctx.stats.record_file_terminal(source_key, payload["status"])
+            # For a needs_review file (e.g. fra_no_action_plan carried on the
+            # vector override) the error field is the stable review reason.
+            reason = (
+                payload["error"] if payload["status"] == "needs_review" else None
+            )
+            ctx.stats.record_file_terminal(source_key, payload["status"], reason)
 
 
 def _mark_batch_state(

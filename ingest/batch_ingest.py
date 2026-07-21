@@ -78,6 +78,8 @@ class IngestReport:
     files_partial: int = 0
     files_unavailable: int = 0
     files_degraded: int = 0
+    files_needs_review: int = 0
+    review_reasons: dict[str, int] = field(default_factory=dict)
     file_outcomes: dict[str, str] = field(default_factory=dict)
     worker_queue_timed_out: bool = False
     lingering_workers: tuple[str, ...] = ()
@@ -199,7 +201,9 @@ def _run_ingest_sequential(
             elif getattr(ctx.config, "dry_run", False):
                 ctx.stats.record_file_terminal(filename, "dry_run")
             elif result.status in {"needs_review", "partial", "cancelled"}:
-                ctx.stats.record_file_terminal(filename, result.status)
+                ctx.stats.record_file_terminal(
+                    filename, result.status, result.review_reason
+                )
         except Exception as error:  # pylint: disable=broad-except
             ctx.logger.warning("Failed to ingest file %s: %s", obj.get("Key"), error)
             ctx.stats.increment("files_failed")
@@ -297,7 +301,9 @@ def _run_ingest_parallel(
                 elif getattr(ctx.config, "dry_run", False):
                     ctx.stats.record_file_terminal(filename, "dry_run")
                 elif result.status in {"needs_review", "partial", "cancelled"}:
-                    ctx.stats.record_file_terminal(filename, result.status)
+                    ctx.stats.record_file_terminal(
+                        filename, result.status, result.review_reason
+                    )
             except Exception as error:  # pylint: disable=broad-except
                 ctx.logger.warning(
                     "Failed to ingest file %s: %s", obj.get("Key"), error
@@ -413,6 +419,10 @@ def run_ingest(
         files_degraded=sum(
             status == "degraded" for status in file_outcomes.values()
         ),
+        files_needs_review=sum(
+            status == "needs_review" for status in file_outcomes.values()
+        ),
+        review_reasons=dict(stats.get("review_reasons", {})),
         file_outcomes=file_outcomes,
         worker_queue_timed_out=teardown.queue_timed_out,
         lingering_workers=teardown.lingering_workers,
@@ -705,6 +715,7 @@ def _log_ingest_summary(ctx: IngestContext, report: IngestReport) -> None:
             Files skipped:        %d
             Files failed:         %d
             Files degraded:       %d
+            Files needs review:   %d
             Total vectors:        %d
             Duration:             %.2fs
             Avg speed:            %.1f vectors/sec
@@ -716,6 +727,7 @@ def _log_ingest_summary(ctx: IngestContext, report: IngestReport) -> None:
         report.files_skipped,
         report.files_failed,
         report.files_degraded,
+        report.files_needs_review,
         report.total_vectors,
         report.duration_seconds,
         report.vectors_per_second,
@@ -725,6 +737,10 @@ def _log_ingest_summary(ctx: IngestContext, report: IngestReport) -> None:
         ctx.logger.warning("Failed files:")
         for failed_file in report.failed_files:
             ctx.logger.warning("  - %s", failed_file)
+    if report.review_reasons:
+        ctx.logger.info("Files needing review by reason:")
+        for reason, count in sorted(report.review_reasons.items()):
+            ctx.logger.info("  - %s: %d", reason, count)
     ctx.logger.info("Ingestion finished with status=%s", report.status.value)
 
 

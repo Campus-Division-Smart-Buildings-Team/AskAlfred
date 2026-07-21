@@ -59,6 +59,7 @@ METRIC_SERVICE_DEGRADED = "service_degraded_total"
 METRIC_ACL_METADATA_DROP = "acl_metadata_drop_total"
 METRIC_ACL_RECONCILIATION = "acl_reconciliation_total"
 METRIC_INGEST_OUTCOME = "ingest_outcome_total"
+METRIC_INGEST_REVIEW = "ingest_review_total"
 METRIC_INGEST_INTEGRITY = "ingest_integrity_total"
 
 # A label value must be a short, low-cardinality token. Enum values are coerced
@@ -224,6 +225,11 @@ class Telemetry:
         """Record a file/run terminal state without file identifiers."""
 
         self.increment(METRIC_INGEST_OUTCOME, scope=scope, status=status)
+
+    def record_ingest_review(self, reason: str) -> None:
+        """Record why a file needs review (INGEST-08) without identifiers."""
+
+        self.increment(METRIC_INGEST_REVIEW, reason=reason)
 
     def record_ingest_integrity(self, event: str, state: str) -> None:
         """Record registry, rollback, or reconciliation state transitions."""

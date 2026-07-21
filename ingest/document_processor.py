@@ -35,6 +35,11 @@ from core.alfred_exceptions import (
     RoutingError,
     ValidationError,
 )
+from core.ingest_outcomes import (
+    REVIEW_EMPTY_DOCUMENT,
+    REVIEW_FRA_NO_ACTION_PLAN,
+    REVIEW_UNSUPPORTED_LAYOUT,
+)
 from fra import FraVectorExtractResult, extract_fra_metadata
 
 from .document_content import (
@@ -85,6 +90,27 @@ def _first_encoding_fallback(docs: list[DocTuple]) -> str | None:
         if reason:
             return str(reason)
     return None
+
+
+def _has_extractable_text(text_sample: str | None, docs: list[DocTuple]) -> bool:
+    """True when any text was recovered from the file or its extracted docs."""
+    if (text_sample or "").strip():
+        return True
+    return any((text or "").strip() for _key, _canonical, text, _meta in docs)
+
+
+def _no_vector_review_reason(text_sample: str | None, docs: list[DocTuple]) -> str:
+    """Classify a file that produced no vectors (INGEST-08).
+
+    A file with no recoverable text at all is an ``empty_document``; a file that
+    yielded text but no usable vectors (e.g. an unreadable layout or content
+    that could not be chunked/validated) is an ``unsupported_layout``. Both are
+    review outcomes, kept distinct from a technical extraction/embedding
+    failure.
+    """
+    if _has_extractable_text(text_sample, docs):
+        return REVIEW_UNSUPPORTED_LAYOUT
+    return REVIEW_EMPTY_DOCUMENT
 
 
 def _resolve_document_type_policy(
@@ -646,7 +672,7 @@ class DocumentProcessor:
                 # Set extraction status
                 if extracted_result.get("missing_action_plan"):
                     self.note_file_outcome(
-                        file_id, "needs_review", "fra_no_action_plan"
+                        file_id, "needs_review", REVIEW_FRA_NO_ACTION_PLAN
                     )
                     extra_metadata["fra_action_plan_missing"] = True
                     extra_metadata["fra_risk_item_extraction_status"] = (
@@ -1266,18 +1292,24 @@ class FileIngestOrchestrator:
             precomputed_chunks=precomputed_chunks,
         )
         if not vectors and not _is_dry_run(self._processor.ctx.config):
+            review_reason = _no_vector_review_reason(text_sample, docs)
             self._processor.ctx.file_registry.mark_state(
                 file_id=file_id,
                 processing_token=processing_token,
                 status="needs_review",
-                error="no_usable_vectors",
+                error=review_reason,
                 source_path=self._processor.base_path,
                 source_key=key,
                 content_hash=content_hash,
             )
-            self._processor.ctx.stats.record_file_terminal(key, "needs_review")
+            self._processor.ctx.stats.record_file_terminal(
+                key, "needs_review", review_reason
+            )
             return FileProcessResult(
-                status="needs_review", vectors=[], vector_count=0
+                status="needs_review",
+                vectors=[],
+                vector_count=0,
+                review_reason=review_reason,
             )
         if _is_timeout_exceeded(start, max_seconds):
             self._processor.ctx.file_registry.mark_state(
@@ -1304,3 +1336,4 @@ class FileProcessResult:
     status: str
     vectors: list[dict[str, Any]]
     vector_count: int
+    review_reason: str | None = None

@@ -25,6 +25,26 @@ class IngestTerminalStatus(str, Enum):
 TERMINAL_FILE_STATUSES = frozenset(status.value for status in IngestTerminalStatus)
 
 
+# INGEST-08: stable, low-cardinality reasons recorded on the ``error`` field of
+# a ``needs_review`` file so an operator can tell *why* a document produced no
+# usable vectors. These are review outcomes, kept deliberately distinct from a
+# technical extraction/embedding ``failed``:
+#   - empty_document     -> nothing could be extracted from the file at all
+#   - unsupported_layout -> content was extracted but yielded no usable vectors
+#   - fra_no_action_plan -> an FRA had no locatable action-plan section
+REVIEW_EMPTY_DOCUMENT = "empty_document"
+REVIEW_UNSUPPORTED_LAYOUT = "unsupported_layout"
+REVIEW_FRA_NO_ACTION_PLAN = "fra_no_action_plan"
+
+NEEDS_REVIEW_REASONS = frozenset(
+    {
+        REVIEW_EMPTY_DOCUMENT,
+        REVIEW_UNSUPPORTED_LAYOUT,
+        REVIEW_FRA_NO_ACTION_PLAN,
+    }
+)
+
+
 class IngestExitCode(IntEnum):
     """Stable process exit codes documented in the failure-state plan."""
 
@@ -69,5 +89,9 @@ __all__ = [
     "IngestExitCode",
     "IngestTerminalStatus",
     "TERMINAL_FILE_STATUSES",
+    "NEEDS_REVIEW_REASONS",
+    "REVIEW_EMPTY_DOCUMENT",
+    "REVIEW_UNSUPPORTED_LAYOUT",
+    "REVIEW_FRA_NO_ACTION_PLAN",
     "exit_code_for_status",
 ]
