@@ -57,6 +57,62 @@ def _get_int_env(name: str, default: int) -> int:
         raise ConfigError(f"{name} must be >= 0")
     return value
 
+
+def _resolve_redis_connection_kwargs() -> dict:
+    """Parse and validate Redis connection settings from the environment.
+
+    Returns the keyword arguments used to build the client. Raises
+    :class:`ConfigError` when ``REDIS_HOST``/``REDIS_PORT`` or a timeout value is
+    missing or invalid. This performs configuration validation only; it does not
+    open a socket, so it is safe to call during a controlled startup readiness
+    check (START-10).
+    """
+    redis_host = os.environ.get("REDIS_HOST")
+    if not redis_host:
+        raise ConfigError("REDIS_HOST is not set in environment")
+
+    redis_port_str = os.environ.get("REDIS_PORT", "0")
+    try:
+        redis_port = int(redis_port_str)
+    except (ValueError, TypeError) as exc:
+        raise ConfigError(f"Invalid REDIS_PORT: {redis_port_str}") from exc
+    if redis_port <= 0 or redis_port > 65535:
+        raise ConfigError("REDIS_PORT must be between 1 and 65535")
+
+    redis_username = os.environ.get("REDIS_USERNAME", "")
+    redis_password = os.environ.get("REDIS_PASSWORD", "")
+
+    return {
+        "host": redis_host,
+        "port": redis_port,
+        "db": _get_int_env("REDIS_DB", 0),
+        "decode_responses": True,
+        "username": redis_username if redis_username else None,
+        "password": redis_password if redis_password else None,
+        "ssl": _is_truthy_env("REDIS_SSL"),
+        "socket_timeout": _get_float_env(
+            "REDIS_SOCKET_TIMEOUT", _DEFAULT_REDIS_SOCKET_TIMEOUT
+        ),
+        "socket_connect_timeout": _get_float_env(
+            "REDIS_SOCKET_CONNECT_TIMEOUT", _DEFAULT_REDIS_CONNECT_TIMEOUT
+        ),
+        "health_check_interval": _get_float_env(
+            "REDIS_HEALTH_CHECK_INTERVAL", _DEFAULT_REDIS_HEALTH_CHECK_INTERVAL
+        ),
+    }
+
+
+def validate_redis_config() -> None:
+    """Validate Redis connection configuration without opening a socket.
+
+    Raises :class:`ConfigError` when the Redis host/port or a timeout value is
+    missing or invalid. The startup dependency-readiness check (START-10) uses
+    this so an invalid Redis configuration surfaces as a published readiness
+    state rather than an exception escaping into a runtime code path.
+    """
+    _resolve_redis_connection_kwargs()
+
+
 # print("pinecone loaded from:", Pinecone.__module__)
 # print("openai loaded from:", OpenAI.__module__)
 # print("redis loaded from:", Redis.__module__)
@@ -129,45 +185,12 @@ class ClientManager:
         if cls._redis is not None:
             return cls._redis
 
-        redis_host = os.environ.get("REDIS_HOST")
-        redis_port_str = os.environ.get("REDIS_PORT", "0")
-        redis_username = os.environ.get("REDIS_USERNAME", "")
-        redis_password = os.environ.get("REDIS_PASSWORD", "")
-        redis_db = _get_int_env("REDIS_DB", 0)
-        socket_timeout = _get_float_env(
-            "REDIS_SOCKET_TIMEOUT", _DEFAULT_REDIS_SOCKET_TIMEOUT
-        )
-        socket_connect_timeout = _get_float_env(
-            "REDIS_SOCKET_CONNECT_TIMEOUT", _DEFAULT_REDIS_CONNECT_TIMEOUT
-        )
-        health_check_interval = _get_float_env(
-            "REDIS_HEALTH_CHECK_INTERVAL", _DEFAULT_REDIS_HEALTH_CHECK_INTERVAL
-        )
-
-        if not redis_host:
-            raise ConfigError("REDIS_HOST is not set in environment")
+        # Configuration validation (host/port/timeouts) raises ConfigError
+        # directly; only client construction is wrapped below.
+        connection_kwargs = _resolve_redis_connection_kwargs()
 
         try:
-            redis_port = int(redis_port_str)
-        except (ValueError, TypeError) as exc:
-            raise ConfigError(f"Invalid REDIS_PORT: {redis_port_str}") from exc
-
-        if redis_port <= 0 or redis_port > 65535:
-            raise ConfigError("REDIS_PORT must be between 1 and 65535")
-
-        try:
-            cls._redis = Redis(
-                host=redis_host,
-                port=redis_port,
-                db=redis_db,
-                decode_responses=True,
-                username=redis_username if redis_username else None,
-                password=redis_password if redis_password else None,
-                ssl=_is_truthy_env("REDIS_SSL"),
-                socket_timeout=socket_timeout,
-                socket_connect_timeout=socket_connect_timeout,
-                health_check_interval=health_check_interval,
-            )
+            cls._redis = Redis(**connection_kwargs)
             return cls._redis
         except Exception as e:
             # Log sanitized error

@@ -9,6 +9,8 @@ import logging
 import time
 from typing import Optional
 
+from core.failure_codes import FailureCode
+from core.outcomes import FailureInfo, OutcomeStatus
 from query_core.query_context import QueryContext
 from query_core.query_result import QueryResult
 from query_core.query_types import QueryType
@@ -85,6 +87,11 @@ class SemanticSearchHandler(BaseQueryHandler):
                 results=[],
                 handler_used="SemanticSearchHandler",
                 query_type=self.query_type.value,
+                status=OutcomeStatus.REJECTED,
+                failure=FailureInfo.from_code(
+                    FailureCode.INPUT_INSUFFICIENT_DETAIL,
+                    "semantic_search",
+                ),
                 metadata={"short_query": True},
             )
 
@@ -95,6 +102,11 @@ class SemanticSearchHandler(BaseQueryHandler):
                 results=[],
                 handler_used="SemanticSearchHandler",
                 query_type=self.query_type.value,
+                status=OutcomeStatus.REJECTED,
+                failure=FailureInfo.from_code(
+                    FailureCode.INPUT_INSUFFICIENT_DETAIL,
+                    "semantic_search",
+                ),
                 metadata={"short_query": True},
             )
 

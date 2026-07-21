@@ -16,6 +16,7 @@ class FailureCode(str, Enum):
 
     UNKNOWN = "internal.unknown"
     CONFIGURATION_INVALID = "configuration.invalid"
+    DEPENDENCY_UNAVAILABLE = "dependency.unavailable"
     STARTUP_ARCHIVE_INVALID = "startup.archive_invalid"
     BUILDING_DIRECTORY_UNAVAILABLE = "building.directory_unavailable"
     RATE_LIMIT_BACKEND_UNAVAILABLE = "rate_limit.backend_unavailable"
@@ -28,6 +29,8 @@ class FailureCode(str, Enum):
     ACCESS_ROLE_CONTEXT_INVALID = "access.role_context_invalid"
     ACCESS_ACL_METADATA_INVALID = "access.acl_metadata_invalid"
     ACCESS_AUTHORIZED_SCOPE_EMPTY = "access.authorized_scope_empty"
+
+    INPUT_INSUFFICIENT_DETAIL = "input.insufficient_detail"
 
     ROUTING_GRAPH_INVALID = "routing.graph_invalid"
     HANDLER_EXECUTION_FAILED = "handler.execution_failed"
@@ -92,6 +95,7 @@ _NON_RETRYABLE_CODES = {
     FailureCode.ACCESS_ROLE_CONTEXT_INVALID,
     FailureCode.ACCESS_ACL_METADATA_INVALID,
     FailureCode.ACCESS_AUTHORIZED_SCOPE_EMPTY,
+    FailureCode.INPUT_INSUFFICIENT_DETAIL,
     FailureCode.ROUTING_GRAPH_INVALID,
     FailureCode.SEARCH_CONTRACT_INVALID,
     FailureCode.SEARCH_EMBEDDING_FAILED,

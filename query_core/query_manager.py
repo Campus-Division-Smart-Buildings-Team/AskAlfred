@@ -23,6 +23,7 @@ from config import (
 from core.failure_codes import FailureCode
 from core.outcomes import FailureInfo, OutcomeStatus, is_successful
 from core.session_manager import SessionManager
+from core.startup_readiness import missing_required_query_dependency
 from core.telemetry import (
     COMPONENT_BUILDING_DIRECTORY,
     COMPONENT_INTENT_CLASSIFIER,
@@ -73,6 +74,7 @@ _CACHEABLE_STATUSES = frozenset(
 )
 
 _QUERY_ROUTING_COMPONENT = "query_routing"
+_DEPENDENCY_READINESS_COMPONENT = "dependency_readiness"
 
 _HANDLER_TYPES = {
     handler_type.__name__: handler_type
@@ -457,6 +459,17 @@ class QueryManager:
                 auth_mandatory=mandatory_auth,
             )
 
+        # Fail fast before executing the query when a required dependency
+        # (OpenAI, Pinecone) was found unconfigured at startup. Retrieval or
+        # answer generation would otherwise raise a ConfigError deep in a
+        # handler; here it surfaces as a typed ``unavailable`` outcome with the
+        # configuration cause kept in logs/operator diagnostics only (START-09).
+        missing_dependency = missing_required_query_dependency()
+        if missing_dependency is not None:
+            return self._required_dependency_unavailable_result(
+                query, missing_dependency, start_time
+            )
+
         # ---------------------------------------------------
         # Load previous conversational memory from SessionManager
         # ---------------------------------------------------
@@ -677,6 +690,47 @@ class QueryManager:
         self._update_stats(
             handler_class_name=_QUERY_ROUTING_COMPONENT,
             query_type=_QUERY_ROUTING_COMPONENT,
+            elapsed_ms=elapsed_ms,
+            success=False,
+        )
+        self._record_outcome_telemetry(result)
+        return result
+
+    def _required_dependency_unavailable_result(
+        self, query: str, component: str, start_time: float
+    ) -> QueryResult:
+        """Return the START-09 ``unavailable`` outcome for a missing dependency.
+
+        ``component`` is the low-cardinality dependency name (e.g. ``openai``)
+        recorded in ``safe_context`` for operator diagnostics; the underlying
+        configuration cause is only in logs, never in the user-facing result.
+        """
+        failure = FailureInfo.from_code(
+            FailureCode.DEPENDENCY_UNAVAILABLE,
+            _DEPENDENCY_READINESS_COMPONENT,
+            safe_context={"dependency": component},
+        )
+        elapsed_ms = (time.time() - start_time) * 1000
+        result = QueryResult(
+            query=query,
+            answer=None,
+            results=[],
+            status=OutcomeStatus.UNAVAILABLE,
+            failure=failure,
+            processing_time_ms=elapsed_ms,
+            metadata={"route": "dependency_unavailable"},
+        )
+        self.logger.error(
+            "required_dependency_unavailable code=%s correlation_id=%s "
+            "component=%s dependency=%s",
+            failure.code.value,
+            failure.correlation_id,
+            failure.component,
+            component,
+        )
+        self._update_stats(
+            handler_class_name=_DEPENDENCY_READINESS_COMPONENT,
+            query_type=_DEPENDENCY_READINESS_COMPONENT,
             elapsed_ms=elapsed_ms,
             success=False,
         )

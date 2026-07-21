@@ -19,15 +19,6 @@ rollout.
 
 ## Structured-outcome gaps
 
-### INPUT-10 — Reject insufficient semantic detail explicitly
-
-- Return `rejected/insufficient_detail` for semantic queries below the handler's
-  character or word threshold.
-- Do not rely on the default `QueryResult` status of `success`.
-- Add tests for both short-query branches.
-- Evidence: `query_handlers/semantic_search_handler.py:80` returns a default
-  success result for both branches.
-
 ### ROUTE-01 — Record preprocessor degradation
 
 - Record which preprocessor failed.
@@ -150,6 +141,10 @@ plan and have not been completed by repository code alone:
 
 ## Recently completed
 
+- **INPUT-10:** Semantic queries below either the character or word threshold
+  now return a non-retryable `rejected/input.insufficient_detail` outcome.
+  Parameterised handler tests cover both threshold branches and ensure neither
+  can regress to the default `success` status.
 - **ROUTE-09 / SEARCH-19:** `QueryManager.process_query` now converts unexpected
   exceptions from every registered handler into a transport-safe `failed`
   `QueryResult` with the stable `handler.execution_failed` code and an opaque

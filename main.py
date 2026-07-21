@@ -38,6 +38,8 @@ from config.constant import IS_PRODUCTION
 from core.clients import ClientManager
 from core.model_archive import initialise_local_model_archive
 from core.outcomes import OutcomeStatus
+from core.startup_readiness import check_dependency_readiness
+from core.telemetry import Readiness
 from query_core.intent_classifier import NLPIntentClassifier, warm_encoder_runtime_async
 from query_core.query_context import build_access_filter, validate_access_context
 from query_core.query_manager import QueryManager
@@ -170,6 +172,24 @@ MIN_QUERY_LENGTH = QUERY_MIN_LENGTH
 def initialise_model_archive_once() -> bool:
     """Prepare the optional local intent model during controlled startup."""
     return initialise_local_model_archive(MODEL_ZIP, MODEL_DIR)
+
+
+@st.cache_resource(show_spinner=False)
+def check_dependency_readiness_once() -> bool:
+    """Validate external dependency configuration once at controlled startup.
+
+    Publishes readiness for the required OpenAI/Pinecone dependencies and the
+    optional Redis dependency so the health surface reflects them and the query
+    path can fail fast with ``unavailable`` when a required one is missing
+    (START-09 / START-10). Configuration causes stay in logs/operator
+    diagnostics. Returns whether every required query dependency is ready.
+    """
+    results = check_dependency_readiness()
+    return all(
+        r.readiness is not Readiness.UNAVAILABLE
+        for r in results
+        if r.required_for_query
+    )
 
 
 @st.cache_resource(show_spinner=False)
@@ -514,6 +534,12 @@ def main():
     # deployment artifact cannot abort module import. On failure the classifier
     # is explicitly constructed in its reduced-capability pattern-only mode.
     st.session_state.intent_model_enabled = initialise_model_archive_once()
+
+    # Validate required (OpenAI/Pinecone) and optional (Redis) dependency
+    # configuration once and publish component readiness. A missing required
+    # dependency is mapped to an ``unavailable`` outcome before query execution
+    # (START-09 / START-10).
+    check_dependency_readiness_once()
 
     auth_context = ensure_authentication()
 

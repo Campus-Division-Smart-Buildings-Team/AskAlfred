@@ -42,6 +42,14 @@ COMPONENT_RETRIEVAL = "retrieval"
 COMPONENT_ANSWER_GENERATION = "answer_generation"
 COMPONENT_ACCESS_CONTROL = "access_control"
 
+# External dependency components validated at startup (START-09 / START-10).
+# These are the *dependencies* (credential/connection configuration) rather than
+# the runtime capabilities above; a startup readiness check publishes their
+# state before any query runs.
+COMPONENT_OPENAI = "openai"
+COMPONENT_PINECONE = "pinecone"
+COMPONENT_REDIS = "redis"
+
 # Stable metric names.
 METRIC_REQUEST_OUTCOME = "request_outcome_total"
 METRIC_SOURCE_OUTCOME = "source_outcome_total"
@@ -306,7 +314,10 @@ __all__ = [
     "COMPONENT_ANSWER_GENERATION",
     "COMPONENT_BUILDING_DIRECTORY",
     "COMPONENT_INTENT_CLASSIFIER",
+    "COMPONENT_OPENAI",
+    "COMPONENT_PINECONE",
     "COMPONENT_RATE_LIMITER",
+    "COMPONENT_REDIS",
     "COMPONENT_RESOURCE_LEASE",
     "COMPONENT_RETRIEVAL",
     "METRIC_ACL_METADATA_DROP",
