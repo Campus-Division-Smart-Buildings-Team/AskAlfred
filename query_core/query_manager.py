@@ -78,6 +78,9 @@ _QUERY_ROUTING_COMPONENT = "query_routing"
 _DEPENDENCY_READINESS_COMPONENT = "dependency_readiness"
 _BUILDING_SCOPE_DISCARDED_COMPONENT = "building_scope_discarded"
 _HANDLER_NEGOTIATION_COMPONENT = "handler_negotiation"
+_CLASSIFIER_DEGRADED_REASONS = frozenset(
+    {"classification_error", "model_unavailable", "semantic_classification_error"}
+)
 
 _PREPROCESSOR_COMPONENTS = {
     SpellCheckPreprocessor: "spell_check_preprocessor",
@@ -597,6 +600,9 @@ class QueryManager:
         # Routing
         # ---------------------------------------------------
         route = self._route_query_hybrid(context)
+        intent_classifier_degradation = context.get_from_cache(
+            "intent_classifier_degradation"
+        )
 
         if route.handler is None:
             return self._routing_graph_invalid_result(query, start_time)
@@ -654,6 +660,9 @@ class QueryManager:
         self._apply_handler_negotiation_degradation(
             query_result, handler_negotiation_failures
         )
+        self._apply_intent_classifier_degradation(
+            query_result, intent_classifier_degradation
+        )
 
         # A building-scoped query answered while the building directory is
         # degraded may have reduced recall; mark it degraded so the UI can warn
@@ -680,6 +689,7 @@ class QueryManager:
             and query_result.status in _CACHEABLE_STATUSES
             and not preprocessor_degradations
             and not handler_negotiation_failures
+            and not intent_classifier_degradation
         ):
             self._store_cached_result(cache_key, query_result)
 
@@ -870,10 +880,44 @@ class QueryManager:
         if query_result.status in _CACHEABLE_STATUSES:
             query_result.status = OutcomeStatus.DEGRADED
 
-    def _record_intent_classifier_degraded(self) -> None:
-        """Record an intent-classifier fallback for this query (ROUTE-05)."""
+    def _record_intent_classifier_degraded(
+        self,
+        context: QueryContext | None = None,
+        *,
+        reason: str = "classification_error",
+        fallback: str = "semantic",
+    ) -> None:
+        """Record a safe, request-scoped classifier fallback (ROUTE-05)."""
         get_readiness().mark_degraded(COMPONENT_INTENT_CLASSIFIER)
         get_telemetry().record_fallback(COMPONENT_INTENT_CLASSIFIER)
+        if context is None:
+            return
+
+        safe_reason = (
+            reason if reason in _CLASSIFIER_DEGRADED_REASONS else "classification_error"
+        )
+        context.add_to_cache(
+            "intent_classifier_degradation",
+            {"reason": safe_reason, "fallback": fallback},
+        )
+        context.routing_notes.append(f"intent_classifier_degraded:{safe_reason}")
+
+    @staticmethod
+    def _apply_intent_classifier_degradation(
+        query_result: QueryResult,
+        degradation: object,
+    ) -> None:
+        """Attach classifier fallback evidence and downgrade trustworthy results."""
+        if not isinstance(degradation, dict):
+            return
+
+        if COMPONENT_INTENT_CLASSIFIER not in query_result.degraded_components:
+            query_result.degraded_components.append(COMPONENT_INTENT_CLASSIFIER)
+        query_result.metadata["intent_classifier_degradation"] = dict(degradation)
+
+        # Never upgrade a failed, unavailable, partial, or rejected outcome.
+        if query_result.status in _CACHEABLE_STATUSES:
+            query_result.status = OutcomeStatus.DEGRADED
 
     def _apply_preprocessor_degradation(
         self,
@@ -1148,6 +1192,7 @@ class QueryManager:
         # ----------------------------------
         # 2) ML CLASSIFIER for ambiguous case
         # ----------------------------------
+        classifier_failed = False
         try:
             ml = self.intent_clf.classify_intent(context.query, context)
             context.predicted_intent = ml.intent
@@ -1157,11 +1202,29 @@ class QueryManager:
                 ml.intent.value if hasattr(ml.intent, "value") else ml.intent,
                 ml.confidence,
             )
+
+            classifier_metadata = getattr(ml, "metadata", {})
+            degraded_reason = (
+                classifier_metadata.get("degraded_reason")
+                if isinstance(classifier_metadata, dict)
+                else None
+            )
+            if degraded_reason in _CLASSIFIER_DEGRADED_REASONS:
+                self._record_intent_classifier_degraded(
+                    context,
+                    reason=degraded_reason,
+                    fallback="pattern",
+                )
         except Exception as e:
             self.logger.error(
                 "Intent classifier failed: %s", sanitise_error(e), exc_info=False
             )
-            self._record_intent_classifier_degraded()
+            classifier_failed = True
+            self._record_intent_classifier_degraded(
+                context,
+                reason="classification_error",
+                fallback="rule" if rule_candidate else "semantic",
+            )
             ml = None
 
         # --------------------------------------------------------
@@ -1186,7 +1249,11 @@ class QueryManager:
                         "route": "rule",
                         "ml_intent": getattr(ml.intent, "value", None) if ml else None,
                         "ml_confidence": getattr(ml, "confidence", None),
-                        "ml_route_reason": "rule_not_overridden",
+                        "ml_route_reason": (
+                            "classifier_error_rule_fallback"
+                            if classifier_failed
+                            else "rule_not_overridden"
+                        ),
                     },
                 )
 
@@ -1202,7 +1269,11 @@ class QueryManager:
                     "route": "semantic_fallback_low_conf",
                     "ml_intent": ml.intent.value if ml else None,
                     "ml_confidence": ml.confidence if ml else None,
-                    "ml_route_reason": "confidence_below_threshold",
+                    "ml_route_reason": (
+                        "classifier_error"
+                        if classifier_failed
+                        else "confidence_below_threshold"
+                    ),
                 },
             )
 

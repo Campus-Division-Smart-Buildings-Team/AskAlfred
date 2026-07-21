@@ -664,6 +664,7 @@ class NLPIntentClassifier:
         # -----------------------------
         # 1) Try semantic if enabled
         # -----------------------------
+        degraded_reason: Optional[str] = None
         if getattr(self, "enabled", True):
             try:
                 result = self._semantic_intent(q)
@@ -683,10 +684,13 @@ class NLPIntentClassifier:
 
             except Exception as e:
                 # Any semantic failure -> fallback
+                degraded_reason = "semantic_classification_error"
                 self.logger.warning(
                     "Semantic intent classification failed; using pattern fallback: %s",
                     e,
                 )
+        else:
+            degraded_reason = "model_unavailable"
 
         # -----------------------------
         # 2) Pattern fallback
@@ -696,6 +700,12 @@ class NLPIntentClassifier:
 
         # Apply context bias in fallback mode too
         result = self._apply_context_bias(result, context)
+
+        # Expose only a stable, non-sensitive reason. QueryManager uses this to
+        # attach the otherwise swallowed classifier degradation to the request
+        # result; exception text remains confined to logs.
+        if degraded_reason is not None:
+            result.metadata["degraded_reason"] = degraded_reason
 
         return result
 
