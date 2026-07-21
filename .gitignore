@@ -42,6 +42,7 @@ data/
 *.md
 !README.md
 !plan/dependency_and_source_classification.md
+!plan/outstanding_tasks.md
 
 # metrics
 *.prom
