@@ -77,3 +77,4 @@ class FraVectorExtractResult(TypedDict):
     missing_action_plan: Optional[bool]
     fra_assessment_date: Optional[str]
     fra_assessment_date_int: Optional[int]
+    embedding_failures: int

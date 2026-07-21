@@ -49,6 +49,7 @@ class EmbeddingsResult:
     batch_reductions: int = 0
     rate_limit_errors: int = 0
     error_summary: str | None = None
+    fatal_error: bool = False
 
 
 class OpenAIEmbedder:
@@ -158,6 +159,7 @@ class OpenAIEmbedder:
         retry_attempts = 0
         batch_reductions = 0
         rate_limit_errors = 0
+        terminal_fatal_error = False
         i = 0
         batch_size = initial_batch_size
         while i < len(texts):
@@ -182,6 +184,7 @@ class OpenAIEmbedder:
                 continue
 
             if fatal_error and error_reason:
+                terminal_fatal_error = True
                 for offset in range(len(batch)):
                     errors_by_index[i + offset] = error_reason
                 # Auth/model errors won't recover mid-run; fail remaining items.
@@ -211,6 +214,7 @@ class OpenAIEmbedder:
             batch_reductions=batch_reductions,
             rate_limit_errors=rate_limit_errors,
             error_summary="; ".join(errors) if errors else None,
+            fatal_error=terminal_fatal_error,
         )
 
 

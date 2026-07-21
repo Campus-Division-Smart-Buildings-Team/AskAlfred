@@ -690,6 +690,90 @@ Deferred to later phases: identifying and re-ingesting/quarantining the actual
 non-conformant vectors (ingestion pipeline, Phase 4) and wiring the readiness
 snapshot into the operator diagnostics panel and external dashboards (Phase 5).
 
+## Phase 4 update (completed 2026-07-21)
+
+Ingestion and FRA mutation paths now have explicit terminal truth, durable
+recovery state, and stable automation outcomes. Partial work, worker shutdown
+failure, registry divergence, verification-read outage, and incomplete rollback
+can no longer finish as nominal success.
+
+Implemented:
+
+- Added the shared `IngestTerminalStatus` state machine and stable CLI exit-code
+  mapping (`0`, `2`, `3`, `4`, `5`, `10`). `IngestReport` carries its terminal
+  state, per-file outcomes, partial/unavailable counts, queue-timeout state, and
+  lingering workers. Empty input, dry run, skips, cancellation, partial runs,
+  dependency outage, failure, and critical inconsistency are distinct. The CLI
+  returns the report's code and catches classified and unclassified failures.
+- File registry terminal transitions now include `partial`, `cancelled`,
+  `needs_review`, and `critical_inconsistent`; every transition is guarded by
+  the processing token and terminal-state precedence. A stale/later worker
+  cannot promote `failed`/`partial` to `success`. File completion tracks all
+  expected vector IDs, so one failed split after earlier successful chunks
+  finishes `partial`, never `success` or all-or-nothing `failed`.
+- Partial embedding/metadata outcomes are carried on the file until the final
+  registry write. Fatal embedding configuration aborts the file, transient
+  all-item embedding failure is `unavailable`, no usable vectors is
+  `needs_review`, and a missing FRA action plan is retained as an operator
+  review outcome while the whole document may still be indexed.
+- Worker teardown returns a structured result. Queue drain timeout marks queued
+  and currently executing batches terminal before returning; lingering daemon
+  threads and collected worker errors force a non-success run; cancellation
+  assigns remaining discovered files an explicit terminal state.
+- Vector success plus file-registry failure increments low-cardinality
+  divergence telemetry, forces the run to `partial`, emits an operator event,
+  and writes a durable local replay spool. `--reconcile-registry` replays the
+  token-guarded file transition and retains only unresolved records.
+- Replaced the in-memory-only FRA transaction log with a durable Redis journal.
+  The journal records buildings, requests, new vector IDs, and the complete
+  compensation set before the first supersession update. A durable building
+  block is also written before mutation and survives a process crash. Open
+  records are recoverable with the idempotent `--reconcile-fra [TRANSACTION_ID]`
+  command.
+- FRA supersession now fails closed when the idempotency registry is unreadable
+  or another job is unresolved, and it no longer uses a zero-vector fallback.
+  Partial per-item supersession raises into compensation. Job success is written
+  only after new vectors verify and the journal commits.
+- FRA execute/verify compensation catches every exception class. Rollback
+  restores and verifies every journalled ID. Incomplete or unverifiable rollback
+  transitions to `critical_inconsistent`, keeps the affected building blocked,
+  records a critical metric/event and durable reconciliation artifact, and
+  produces exit code `10`.
+- Verification now distinguishes persistent absence from a read-side outage.
+  A healthy persistent miss rolls back; a fetch outage records
+  `verification_unavailable`, leaves the successful upsert and supersession
+  intact, blocks follow-on writes, and defers verification to reconciliation.
+- Extended low-cardinality telemetry for file/run terminal outcomes, registry
+  divergence, rollback state, and reconciliation state. File paths, document
+  names, exception text, and transaction IDs are not metric labels.
+
+Regression coverage:
+
+- `tests/test_phase4_ingestion_integrity.py` covers exit-code stability,
+  partial-run aggregation, no identifier telemetry labels, unclassified
+  execute exceptions, verification-read outage, incomplete rollback/blocking,
+  crash recovery and idempotent reconciliation, queue/lingering-worker state,
+  fail-closed idempotency lookup, partial singleton upsert, and registry-spool
+  replay.
+- Existing ingestion/upsert optimisation tests continue to cover whole-file
+  completion, atomic token scripts, embedding batch recovery, bounded FRA
+  verification retries, retries/splits, and worker shutdown.
+- Full suite: 548 passed and 5 platform/capability skips with a workspace-local
+  pytest temporary directory. `ruff check .` passes.
+
+Exit criteria status:
+
+- Every discovered file reaches an explicit terminal state in run accounting;
+  registry-backed files use token-guarded terminal transitions.
+- Partial files/runs, registry divergence, worker errors, queue timeouts, and
+  lingering workers cannot report success.
+- Stale success cannot overwrite a newer partial/failed/critical terminal state.
+- Incomplete rollback produces `critical_inconsistent`, blocks affected writes,
+  and leaves both a durable journal and an operator event.
+- Unclassified execute/verify exceptions compensate; verification-read outages
+  do not compensate a successful upsert; crash recovery is journal-driven and
+  idempotent.
+
 ## Delivery plan
 
 ### Phase 0: Baseline and contracts

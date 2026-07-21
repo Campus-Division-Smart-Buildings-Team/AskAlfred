@@ -27,6 +27,7 @@ from enum import Enum
 from typing import Optional
 
 from core.failure_codes import FailureCode
+from core.ingest_outcomes import IngestTerminalStatus
 from core.outcomes import OutcomeStatus
 
 # ---------------------------------------------------------------------------
@@ -47,6 +48,8 @@ METRIC_SOURCE_OUTCOME = "source_outcome_total"
 METRIC_FALLBACK_ACTIVATED = "fallback_activated_total"
 METRIC_SERVICE_DEGRADED = "service_degraded_total"
 METRIC_ACL_METADATA_DROP = "acl_metadata_drop_total"
+METRIC_INGEST_OUTCOME = "ingest_outcome_total"
+METRIC_INGEST_INTEGRITY = "ingest_integrity_total"
 
 # A label value must be a short, low-cardinality token. Enum values are coerced
 # to their ``.value`` first; anything else must match this pattern.
@@ -178,6 +181,18 @@ class Telemetry:
         if count > 0:
             self.increment(METRIC_ACL_METADATA_DROP, value=count)
 
+    def record_ingest_outcome(
+        self, scope: str, status: IngestTerminalStatus | str
+    ) -> None:
+        """Record a file/run terminal state without file identifiers."""
+
+        self.increment(METRIC_INGEST_OUTCOME, scope=scope, status=status)
+
+    def record_ingest_integrity(self, event: str, state: str) -> None:
+        """Record registry, rollback, or reconciliation state transitions."""
+
+        self.increment(METRIC_INGEST_INTEGRITY, event=event, state=state)
+
 
 class ReadinessRegistry:
     """Thread-safe registry of coarse component readiness states."""
@@ -269,6 +284,8 @@ __all__ = [
     "METRIC_ACL_METADATA_DROP",
     "METRIC_FALLBACK_ACTIVATED",
     "METRIC_REQUEST_OUTCOME",
+    "METRIC_INGEST_OUTCOME",
+    "METRIC_INGEST_INTEGRITY",
     "METRIC_SERVICE_DEGRADED",
     "METRIC_SOURCE_OUTCOME",
     "Readiness",

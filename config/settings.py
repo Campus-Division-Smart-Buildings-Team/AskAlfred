@@ -174,6 +174,9 @@ class BatchIngestConfig:
     export_events: bool = False
     export_events_file: str = "building_events.jsonl"
     prometheus_metrics_file: str = ""
+    registry_reconciliation_file: str = (
+        "logs/ingest_registry_reconciliation.jsonl"
+    )
     max_memory_mb: float = 512.0
 
     # -----------------------------------------------------------------------
@@ -275,6 +278,10 @@ class BatchIngestConfig:
             ),
             prometheus_metrics_file=os.getenv(
                 "PROMETHEUS_METRICS_FILE", defaults.prometheus_metrics_file
+            ),
+            registry_reconciliation_file=os.getenv(
+                "REGISTRY_RECONCILIATION_FILE",
+                defaults.registry_reconciliation_file,
             ),
             dry_run=os.getenv("DRY_RUN", "false").lower() in ("1", "true", "yes"),
             max_metadata_text_tokens=int(

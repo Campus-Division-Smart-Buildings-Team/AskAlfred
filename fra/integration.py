@@ -7,7 +7,7 @@ from __future__ import annotations
 import zlib
 from collections.abc import Mapping
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from redis.exceptions import RedisError
 
@@ -52,7 +52,12 @@ def _assessment_date_to_int(value: str | None) -> int | None:
 
 
 def mark_superseded_risk_items(
-    ctx: IngestContext, building: str, new_assessment_date: str
+    ctx: IngestContext,
+    building: str,
+    new_assessment_date: str,
+    *,
+    before_update: Callable[[list[str]], None] | None = None,
+    finalise_job: bool = True,
 ) -> list[str]:
     """Mark existing risk items for the same building with older assessment dates as superseded."""
     building_key = normalise_building_name(building)
@@ -73,37 +78,26 @@ def mark_superseded_risk_items(
             try:
                 existing = ctx.job_registry.get(registry_id)
             except (RedisError, OSError, ValueError, TypeError) as e:
-                mapped_error = wrap_exception(e)
-                ctx.logger.warning(
-                    "JobRegistry lookup failed for %s: %s", registry_id, mapped_error
-                )
+                raise ExternalServiceError(
+                    "FRA idempotency registry lookup unavailable"
+                ) from e
             if existing and existing.status == "success":
                 ctx.logger.info(
                     "Supersession already recorded for %s (assessment: %s); skipping",
                     building,
                     new_assessment_date,
                 )
-            else:
-                ctx.logger.info(
-                    "Supersession already processing for %s (assessment: %s); skipping",
-                    building,
-                    new_assessment_date,
-                )
-            return []
+                return []
+            raise ExternalServiceError(
+                "FRA supersession is already active or requires reconciliation"
+            )
     except (RedisError, OSError, ValueError, TypeError) as e:
-        mapped_error = wrap_exception(e)
-        ctx.logger.warning(
-            "JobRegistry start failed for %s: %s", registry_id, mapped_error
-        )
+        raise ExternalServiceError("FRA idempotency registry unavailable") from e
 
     try:
         existing = ctx.job_registry.get(registry_id)
     except (RedisError, OSError, ValueError, TypeError) as e:
-        mapped_error = wrap_exception(e)
-        ctx.logger.warning(
-            "JobRegistry lookup failed for %s: %s", registry_id, mapped_error
-        )
-        existing = None
+        raise ExternalServiceError("FRA idempotency registry unavailable") from e
     if existing and existing.status == "success":
         ctx.logger.info(
             "Supersession already recorded for %s (assessment: %s); skipping",
@@ -159,17 +153,12 @@ def mark_superseded_risk_items(
                 if query_vector:
                     ctx.cache.set_embedding(building, query_vector)
         except Exception as embed_error:  # pylint: disable=broad-except
-            ctx.logger.warning(
-                "Supersession embedding failed for %s: %s; falling back to zero vector",
-                building,
-                embed_error,
-            )
+            raise ExternalServiceError(
+                "FRA supersession embedding unavailable"
+            ) from embed_error
 
         if not query_vector:
-            dim = int(getattr(ctx.config, "dimension", 0))
-            if dim <= 0:
-                raise IngestError("Invalid embedding dimension for supersession query")
-            query_vector = [0.0] * dim
+            raise ExternalServiceError("FRA supersession embedding was empty")
         results = ctx.index.query(
             vector=query_vector,
             namespace=FRA_RISK_ITEMS_NAMESPACE,
@@ -213,7 +202,7 @@ def mark_superseded_risk_items(
                 registry_id,
                 mapped_registry_error,
             )
-        return []
+        raise mapped_error
 
     if results and isinstance(results, dict) and "matches" in results:
         matches = results["matches"]
@@ -300,6 +289,11 @@ def mark_superseded_risk_items(
         ctx.logger.info("No eligible risk items found to supersede")
         return []
 
+    # Persist the complete compensation set before the first mutation.  A crash
+    # after any individual update can therefore be recovered from the journal.
+    if before_update is not None:
+        before_update(list(eligible_ids))
+
     # Update strictly per verified ID. A filter-based bulk update can race with
     # concurrent ingest and supersede records that were never verified above.
     for item_id in eligible_ids:
@@ -341,6 +335,12 @@ def mark_superseded_risk_items(
                 pass
 
     ctx.logger.info(f"Marked {len(updated_ids)} risk items as superseded")
+    if len(updated_ids) != len(eligible_ids):
+        raise ExternalServiceError(
+            "FRA supersession was incomplete and requires rollback"
+        )
+    if not finalise_job:
+        return updated_ids
     try:
         status = "success"
         error = None

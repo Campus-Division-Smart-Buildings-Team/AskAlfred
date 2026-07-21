@@ -26,8 +26,12 @@ from config import (
     INGEST_UPSERT_JOIN_TIMEOUT_SECONDS,
 )
 from core.alfred_exceptions import (
+    CriticalInconsistentError,
+    ExternalServiceError,
     IngestError,
 )
+from core.ingest_outcomes import IngestTerminalStatus, exit_code_for_status
+from core.telemetry import get_telemetry
 from security.file_operations_validator import (
     FileOperationSecurityError,
     validate_directory_safety,
@@ -69,6 +73,16 @@ class IngestReport:
     total_vectors: int
     duration_seconds: float
     failed_files: list[str] = field(default_factory=list)
+    status: IngestTerminalStatus = IngestTerminalStatus.SUCCESS
+    files_partial: int = 0
+    files_unavailable: int = 0
+    file_outcomes: dict[str, str] = field(default_factory=dict)
+    worker_queue_timed_out: bool = False
+    lingering_workers: tuple[str, ...] = ()
+
+    @property
+    def exit_code(self) -> int:
+        return int(exit_code_for_status(self.status))
 
     @property
     def vectors_per_second(self) -> float:
@@ -77,6 +91,67 @@ class IngestReport:
             if self.duration_seconds > 0
             else 0.0
         )
+
+
+@dataclass(frozen=True)
+class WorkerTeardownReport:
+    """Explicit result of draining and stopping background writers."""
+
+    queue_timed_out: bool = False
+    cancelled: bool = False
+    aborted: bool = False
+    lingering_workers: tuple[str, ...] = ()
+
+
+def _status_for_exception(error: BaseException) -> IngestTerminalStatus:
+    if isinstance(error, CriticalInconsistentError):
+        return IngestTerminalStatus.CRITICAL_INCONSISTENT
+    if isinstance(error, ExternalServiceError):
+        return IngestTerminalStatus.UNAVAILABLE
+    return IngestTerminalStatus.FAILED
+
+
+def _derive_run_status(
+    *,
+    ctx: IngestContext,
+    files_found: int,
+    file_outcomes: dict[str, str],
+    upsert_errors: list[Exception],
+    teardown: WorkerTeardownReport,
+) -> IngestTerminalStatus:
+    if getattr(ctx.config, "dry_run", False):
+        return IngestTerminalStatus.DRY_RUN
+    if files_found == 0:
+        return IngestTerminalStatus.EMPTY_INPUT
+    states = set(file_outcomes.values())
+    if "critical_inconsistent" in states or ctx.stats.get_stats().get(
+        "critical_inconsistent_total", 0
+    ):
+        return IngestTerminalStatus.CRITICAL_INCONSISTENT
+    if teardown.cancelled:
+        return IngestTerminalStatus.CANCELLED
+    successful = bool(states & {"success", "success_with_skips", "skipped"})
+    incomplete = bool(states & {"partial", "unavailable", "failed", "cancelled"})
+    stats = ctx.stats.get_stats()
+    if stats.get("registry_divergence_total", 0):
+        return IngestTerminalStatus.PARTIAL
+    if upsert_errors or teardown.queue_timed_out or teardown.lingering_workers:
+        return IngestTerminalStatus.PARTIAL if successful else IngestTerminalStatus.FAILED
+    if "cancelled" in states:
+        return IngestTerminalStatus.CANCELLED
+    if "partial" in states or (successful and incomplete):
+        return IngestTerminalStatus.PARTIAL
+    if "unavailable" in states:
+        return IngestTerminalStatus.PARTIAL if successful else IngestTerminalStatus.UNAVAILABLE
+    if "failed" in states:
+        return IngestTerminalStatus.PARTIAL if successful else IngestTerminalStatus.FAILED
+    if states == {"needs_review"}:
+        return IngestTerminalStatus.NEEDS_REVIEW
+    if "needs_review" in states and successful:
+        return IngestTerminalStatus.PARTIAL
+    if "skipped" in states or int(stats.get("files_skipped", 0)):
+        return IngestTerminalStatus.SUCCESS_WITH_SKIPS
+    return IngestTerminalStatus.SUCCESS
 
 
 def _run_ingest_sequential(
@@ -88,8 +163,14 @@ def _run_ingest_sequential(
     progress: IngestionProgressTracker | None = None,
 ) -> None:
     """Process files sequentially."""
-    for obj in objs:
+    for index, obj in enumerate(objs):
         if upsert_stop_event.is_set():
+            for pending_obj in objs[index:]:
+                pending_key = str(
+                    pending_obj.get("Key") or pending_obj.get("key") or ""
+                )
+                if pending_key:
+                    ctx.stats.record_file_terminal(pending_key, "cancelled")
             break
         filename = obj.get("Key", "")
         try:
@@ -105,12 +186,30 @@ def _run_ingest_sequential(
             ctx.stats.increment("files_processed")
             if result.status == "skipped":
                 ctx.stats.increment("files_skipped")
+                ctx.stats.record_file_terminal(filename, "skipped")
+            elif getattr(ctx.config, "dry_run", False):
+                ctx.stats.record_file_terminal(filename, "dry_run")
+            elif result.status in {"needs_review", "partial", "cancelled"}:
+                ctx.stats.record_file_terminal(filename, result.status)
         except Exception as error:  # pylint: disable=broad-except
             ctx.logger.warning("Failed to ingest file %s: %s", obj.get("Key"), error)
             ctx.stats.increment("files_failed")
             failed_key = obj.get("Key") or obj.get("key") or ""
             if failed_key:
                 ctx.stats.append_failed(failed_key)
+                terminal = _status_for_exception(error)
+                ctx.stats.record_file_terminal(failed_key, terminal.value)
+                try:
+                    orchestrator.mark_failed(
+                        obj,
+                        terminal.value,
+                        status=terminal.value,
+                    )
+                except Exception as registry_error:  # pylint: disable=broad-except
+                    ctx.logger.error(
+                        "Could not finish failed file state: %s", registry_error
+                    )
+                    ctx.stats.increment("registry_divergence_total")
             ctx.stats.increment("files_processed")
             if progress:
                 progress.update(filename, status="failed")
@@ -144,13 +243,34 @@ def _run_ingest_parallel(
 
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
         futures = {executor.submit(orchestrator.process, obj): obj for obj in objs}
+        aborting = False
         for future in as_completed(futures):
             if upsert_stop_event.is_set():
-                # Drop queued files; only the currently running ones finish.
-                executor.shutdown(wait=False, cancel_futures=True)
-                break
+                aborting = True
+                for pending_future in futures:
+                    if not pending_future.done():
+                        pending_future.cancel()
             obj = futures[future]
             filename = obj.get("Key", "")
+            if aborting:
+                try:
+                    future.result()
+                except Exception:  # pylint: disable=broad-except
+                    pass
+                if filename:
+                    ctx.stats.record_file_terminal(filename, "cancelled")
+                try:
+                    orchestrator.mark_failed(
+                        obj, "worker_aborted", status="cancelled"
+                    )
+                except Exception as registry_error:  # pylint: disable=broad-except
+                    ctx.logger.error(
+                        "Could not finish cancelled file state: %s",
+                        registry_error,
+                    )
+                    ctx.stats.increment("registry_divergence_total")
+                ctx.stats.increment("files_processed")
+                continue
             try:
                 result = future.result()
                 if result.vectors:
@@ -164,6 +284,11 @@ def _run_ingest_parallel(
                 ctx.stats.increment("files_processed")
                 if result.status == "skipped":
                     ctx.stats.increment("files_skipped")
+                    ctx.stats.record_file_terminal(filename, "skipped")
+                elif getattr(ctx.config, "dry_run", False):
+                    ctx.stats.record_file_terminal(filename, "dry_run")
+                elif result.status in {"needs_review", "partial", "cancelled"}:
+                    ctx.stats.record_file_terminal(filename, result.status)
             except Exception as error:  # pylint: disable=broad-except
                 ctx.logger.warning(
                     "Failed to ingest file %s: %s", obj.get("Key"), error
@@ -172,6 +297,19 @@ def _run_ingest_parallel(
                 failed_key = obj.get("Key") or obj.get("key") or ""
                 if failed_key:
                     ctx.stats.append_failed(failed_key)
+                    terminal = _status_for_exception(error)
+                    ctx.stats.record_file_terminal(failed_key, terminal.value)
+                    try:
+                        orchestrator.mark_failed(
+                            obj,
+                            terminal.value,
+                            status=terminal.value,
+                        )
+                    except Exception as registry_error:  # pylint: disable=broad-except
+                        ctx.logger.error(
+                            "Could not finish failed file state: %s", registry_error
+                        )
+                        ctx.stats.increment("registry_divergence_total")
                 ctx.stats.increment("files_processed")
                 if progress:
                     progress.update(filename, status="failed")
@@ -220,8 +358,9 @@ def run_ingest(
         coordinator.close(progress=progress)
 
     # Tear down the worker thread (coordinator already closed)
+    teardown = WorkerTeardownReport()
     if use_worker and upsert_queue is not None and upsert_threads:
-        _teardown_worker(
+        teardown = _teardown_worker(
             ctx,
             upsert_stop_event=upsert_stop_event,
             upsert_queue=upsert_queue,
@@ -236,14 +375,35 @@ def run_ingest(
 
     stats = ctx.stats.get_stats()
     duration = time.time() - t_start
+    file_outcomes = dict(stats.get("file_terminal_states", {}))
+    run_status = _derive_run_status(
+        ctx=ctx,
+        files_found=len(objs),
+        file_outcomes=file_outcomes,
+        upsert_errors=upsert_errors,
+        teardown=teardown,
+    )
+    get_telemetry().record_ingest_outcome("run", run_status)
+    files_failed = sum(
+        status in {"failed", "cancelled", "critical_inconsistent"}
+        for status in file_outcomes.values()
+    )
     return IngestReport(
         files_found=len(objs),
         files_processed=stats["files_processed"],
         files_skipped=stats["files_skipped"],
-        files_failed=stats["files_failed"],
+        files_failed=max(int(stats["files_failed"]), files_failed),
         total_vectors=stats["total_vectors"],
         duration_seconds=duration,
         failed_files=list(stats.get("failed_files", [])),
+        status=run_status,
+        files_partial=sum(status == "partial" for status in file_outcomes.values()),
+        files_unavailable=sum(
+            status == "unavailable" for status in file_outcomes.values()
+        ),
+        file_outcomes=file_outcomes,
+        worker_queue_timed_out=teardown.queue_timed_out,
+        lingering_workers=teardown.lingering_workers,
     )
 
 
@@ -253,7 +413,7 @@ def _teardown_worker(
     upsert_stop_event: threading.Event,
     upsert_queue: Queue[UpsertQueueItem | None],
     upsert_threads: list[threading.Thread],
-) -> None:
+) -> WorkerTeardownReport:
     """
     Tear down the upsert worker thread.
 
@@ -303,6 +463,13 @@ def _teardown_worker(
             upsert_queue.put(None)
         for thread in upsert_threads:
             thread.join(timeout=join_timeout)
+        lingering = tuple(thread.name for thread in upsert_threads if thread.is_alive())
+        if lingering:
+            ctx.stats.increment("lingering_workers_total", len(lingering))
+        return WorkerTeardownReport(
+            aborted=True,
+            lingering_workers=lingering,
+        )
 
     else:
         # Normal path: wait for all work to complete, then stop worker
@@ -355,9 +522,17 @@ def _teardown_worker(
                     upsert_queue.put(None)
                 for thread in upsert_threads:
                     thread.join(timeout=join_timeout)
-                return
+                lingering = tuple(
+                    thread.name for thread in upsert_threads if thread.is_alive()
+                )
+                ctx.stats.increment("ingest_cancelled_total")
+                return WorkerTeardownReport(
+                    cancelled=True,
+                    lingering_workers=lingering,
+                )
 
         if not queue_drained:
+            ctx.stats.increment("worker_queue_timeout_total")
             ctx.logger.warning(
                 "Upsert queue join timed out after %.1fs (%d tasks remaining); sending sentinel anyway",
                 join_timeout,
@@ -368,6 +543,15 @@ def _teardown_worker(
                 upsert_queue.unfinished_tasks,
             )
             upsert_stop_event.set()
+            active_batches = getattr(ctx, "active_upsert_batches", None)
+            active_lock = getattr(ctx, "active_upsert_batches_lock", None)
+            if active_batches is not None and active_lock is not None:
+                with active_lock:
+                    running_batches = list(active_batches.values())
+                for running_batch in running_batches:
+                    _mark_batch_failed(
+                        ctx, running_batch, reason="worker_execution_timeout"
+                    )
             drained = 0
             failed_files: set[str] = set()
             while True:
@@ -426,6 +610,7 @@ def _teardown_worker(
 
         still_alive = [t.name for t in upsert_threads if t.is_alive()]
         if still_alive:
+            ctx.stats.increment("lingering_workers_total", len(still_alive))
             ctx.logger.error(
                 "Upsert worker thread(s) did not exit after %.1fs: %s",
                 join_timeout,
@@ -435,6 +620,10 @@ def _teardown_worker(
             ctx.logger.info(
                 "Upsert worker thread(s) exited in %.3fs", thread_join_elapsed
             )
+        return WorkerTeardownReport(
+            queue_timed_out=not queue_drained,
+            lingering_workers=tuple(still_alive),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -475,6 +664,7 @@ def _emit_ingest_metrics(
             "vectors_created": report.total_vectors,
             "vectors_per_second": report.vectors_per_second,
             "failures": report.files_failed,
+            "terminal_status": report.status.value,
         }
         try:
             ctx.event_sink.emit_event(metrics)
@@ -494,6 +684,7 @@ def _log_ingest_summary(ctx: IngestContext, report: IngestReport) -> None:
             Total vectors:        %d
             Duration:             %.2fs
             Avg speed:            %.1f vectors/sec
+            Terminal status:      %s
             ========================================
             """,
         report.files_found,
@@ -503,18 +694,19 @@ def _log_ingest_summary(ctx: IngestContext, report: IngestReport) -> None:
         report.total_vectors,
         report.duration_seconds,
         report.vectors_per_second,
+        report.status.value,
     )
     if report.failed_files:
         ctx.logger.warning("Failed files:")
         for failed_file in report.failed_files:
             ctx.logger.warning("  - %s", failed_file)
-    ctx.logger.info("Ingestion complete")
+    ctx.logger.info("Ingestion finished with status=%s", report.status.value)
 
 
 def ingest_local_directory_with_progress(
     ctx: IngestContext,
     use_progress_bar: bool = True,
-) -> None:
+) -> IngestReport:
     """
     Enhanced ingestion with progress tracking and security.
 
@@ -547,7 +739,19 @@ def ingest_local_directory_with_progress(
 
     if not objs:
         ctx.logger.warning("No files found to process")
-        return
+        report = IngestReport(
+            files_found=0,
+            files_processed=0,
+            files_skipped=0,
+            files_failed=0,
+            total_vectors=0,
+            duration_seconds=0.0,
+            status=IngestTerminalStatus.EMPTY_INPUT,
+        )
+        get_telemetry().record_ingest_outcome("run", report.status)
+        _emit_ingest_metrics(ctx, report, base_path)
+        _log_ingest_summary(ctx, report)
+        return report
 
     # Building resolution
     name_to_canonical: dict[str, str] = {}
@@ -673,3 +877,4 @@ def ingest_local_directory_with_progress(
 
     _emit_ingest_metrics(ctx, report, base_path)
     _log_ingest_summary(ctx, report)
+    return report

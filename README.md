@@ -561,6 +561,22 @@ Developer and debugging utilities live in `tools/`:
 The `cli/` package provides operational entry points: `cli/local_batch_ingest.py`
 (batch ingestion) and `cli/resolve_buildings.py` (building resolution).
 
+Batch ingestion uses stable automation exit codes: `0` success (including
+skips), `2` empty/validation-only, `3` partial, `4` retryable dependency
+unavailable, `5` failed/cancelled, and `10` critical inconsistent. Recovery
+commands are:
+
+```powershell
+python -m cli.local_batch_ingest --reconcile-fra
+python -m cli.local_batch_ingest --reconcile-fra TRANSACTION_ID
+python -m cli.local_batch_ingest --reconcile-registry
+```
+
+FRA reconciliation reads the durable Redis transaction journal. Registry
+reconciliation replays the local JSONL divergence spool (configured with
+`REGISTRY_RECONCILIATION_FILE`). Both commands are idempotent and retain
+unresolved records for a later retry.
+
 ---
 
 ## 🧪 Example Queries

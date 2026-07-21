@@ -18,12 +18,20 @@ if str(ROOT) not in sys.path:
 from dotenv import load_dotenv
 
 from config import NAMESPACE_MAPPINGS, BatchIngestConfig
-from core.alfred_exceptions import ConfigError, UnexpectedError
+from core.alfred_exceptions import (
+    ConfigError,
+    CriticalInconsistentError,
+    ExternalServiceError,
+    IngestError,
+    UnexpectedError,
+)
 from ingest import (
     IngestContext,
     ingest_local_directory_with_progress,
     validate_namespace_routing,
 )
+from ingest.fra_reconciliation import reconcile_fra_transactions
+from ingest.registry_reconciliation import reconcile_registry_divergence
 from security.file_operations_validator import (
     FileOperationSecurityError,
     validate_directory_safety,
@@ -90,6 +98,18 @@ def parse_args() -> argparse.Namespace:
         type=int,
         help="Number of upsert worker threads (worker strategy only).",
     )
+    parser.add_argument(
+        "--reconcile-fra",
+        nargs="?",
+        const="*",
+        metavar="TRANSACTION_ID",
+        help="Reconcile one FRA transaction, or all open transactions if no ID is supplied.",
+    )
+    parser.add_argument(
+        "--reconcile-registry",
+        action="store_true",
+        help="Replay vector-success/file-registry divergence records.",
+    )
 
     return parser.parse_args()
 
@@ -129,7 +149,7 @@ def main() -> int:
                 logging.info("Validated ingest directory: %s", validated_path)
             except FileOperationSecurityError as e:
                 logging.error("Invalid path argument: %s", e)
-                return 1
+                return 2
         if args.io_workers:
             config.max_io_workers = args.io_workers
         if args.parse_workers:
@@ -159,33 +179,82 @@ def main() -> int:
 
     except ConfigError as error:
         logging.error("Configuration error: %s", error)
-        return 1
+        return 5
     except UnexpectedError as error:
         logging.error("Configuration error: %s", error)
-        return 1
+        return 5
 
     if args.validate_routing:
         for doc_type, expected_namespace in NAMESPACE_MAPPINGS.items():
             valid, reason = validate_namespace_routing(doc_type, expected_namespace)
             if not valid:
-                raise ValueError(
-                    f"Routing validation failed for doc_type='{doc_type}': {reason}"
+                logging.error(
+                    "Routing validation failed for document type %s: %s",
+                    doc_type,
+                    reason,
                 )
+                return 2
         logging.info("Namespace routing validation passed.")
         return 0
 
     ctx = IngestContext(config)
 
     try:
-        ingest_local_directory_with_progress(ctx, use_progress_bar=not args.no_progress)
-        return 0
+        if args.reconcile_fra is not None:
+            report = reconcile_fra_transactions(
+                ctx,
+                transaction_id=(
+                    None if args.reconcile_fra == "*" else args.reconcile_fra
+                ),
+            )
+            logging.info(
+                "FRA reconciliation status=%s examined=%d reconciled=%d remaining=%d",
+                report.status.value,
+                report.examined,
+                report.reconciled,
+                report.remaining,
+            )
+            return report.exit_code
+
+        if args.reconcile_registry:
+            report = reconcile_registry_divergence(ctx)
+            logging.info(
+                "Registry reconciliation status=%s examined=%d reconciled=%d remaining=%d",
+                report.status.value,
+                report.examined,
+                report.reconciled,
+                report.remaining,
+            )
+            return report.exit_code
+
+        report = ingest_local_directory_with_progress(
+            ctx, use_progress_bar=not args.no_progress
+        )
+        logging.info(
+            "Ingestion terminal status=%s exit_code=%d",
+            report.status.value,
+            report.exit_code,
+        )
+        return report.exit_code
     except KeyboardInterrupt:
         ctx.logger.warning("Ingestion interrupted by user. Cleaning up...")
         ctx.logger.info("No cache to persist on shutdown.")
-        return 0
+        return 5
+    except CriticalInconsistentError as error:
+        ctx.logger.critical("Ingestion requires reconciliation: %s", error)
+        return 10
+    except ExternalServiceError as error:
+        ctx.logger.error("Ingestion dependency unavailable: %s", error)
+        return 4
     except UnexpectedError as error:
         ctx.logger.error("Ingestion failed: %s", error, exc_info=True)
-        return 1
+        return 5
+    except IngestError as error:
+        ctx.logger.error("Ingestion failed: %s", error, exc_info=True)
+        return 5
+    except Exception as error:  # pylint: disable=broad-except
+        ctx.logger.error("Ingestion failed unexpectedly: %s", error, exc_info=True)
+        return 5
 
 
 if __name__ == "__main__":

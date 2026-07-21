@@ -4,6 +4,14 @@ Interfaces package exports.
 
 from .embedder import Embedder, EmbeddingsResult, OpenAIEmbedder
 from .event_sink import EventSink, JsonlPrometheusEventSink, MetricsReader
+from .fra_transaction_journal import (
+    FraJournalRecord,
+    FraJournalState,
+    FraTransactionJournal,
+    InMemoryFraTransactionJournal,
+    RedisFraTransactionJournal,
+    new_fra_journal_record,
+)
 from .ingest_file_registry import (
     FileRecord,
     IngestFileRegistry,
@@ -30,4 +38,10 @@ __all__ = [
     "EventSink",
     "JsonlPrometheusEventSink",
     "MetricsReader",
+    "FraJournalRecord",
+    "FraJournalState",
+    "FraTransactionJournal",
+    "InMemoryFraTransactionJournal",
+    "RedisFraTransactionJournal",
+    "new_fra_journal_record",
 ]

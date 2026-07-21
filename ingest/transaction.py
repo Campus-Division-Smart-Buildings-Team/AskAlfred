@@ -10,10 +10,13 @@ import time
 import uuid
 from collections import OrderedDict
 from concurrent.futures import ProcessPoolExecutor
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from threading import Lock, RLock
 from typing import TYPE_CHECKING, Any, Optional
 
+from building.normaliser import normalise_building_name
 from config import (
     FRA_LOCK_TIMEOUT_SECONDS,
     FRA_RISK_ITEMS_NAMESPACE,
@@ -27,15 +30,13 @@ from config import (
 )
 from config.constant import INGEST_METADATA_CACHE_SIZE
 from core.alfred_exceptions import (
+    CriticalInconsistentError,
     ExternalServiceError,
     IngestError,
-    ModelNotInitialisedError,
-    ParseError,
     RollbackError,
-    RoutingError,
-    ValidationError,
 )
 from core.pinecone_utils import NULL_SENTINEL
+from core.telemetry import get_telemetry
 from fra import (
     EnrichedRiskItem,
     FRAActionPlanParser,
@@ -48,7 +49,13 @@ from fra import (
     restore_superseded_items,
     sanitise_risk_item_for_metadata,
 )
-from interfaces import FileRecord, MetricsReader
+from interfaces import (
+    FileRecord,
+    FraJournalState,
+    JobRecord,
+    MetricsReader,
+    new_fra_journal_record,
+)
 
 from .document_content import (
     backoff_sleep,
@@ -56,6 +63,7 @@ from .document_content import (
     ext,
 )
 from .helpers import _extract_fra_layout_text
+from .registry_reconciliation import spool_registry_divergence
 from .utils import (
     upsert_vectors,
     validate_with_truncation,
@@ -80,6 +88,7 @@ class ThreadSafeStats(MetricsReader):
             "total_vectors": 0,
             "vectors_skipped": 0,
             "failed_files": [],
+            "file_terminal_states": {},
         }
 
     def increment(self, key: str, amount: int = 1) -> None:
@@ -92,7 +101,33 @@ class ThreadSafeStats(MetricsReader):
 
     def get_stats(self) -> dict[str, Any]:
         with self._lock:
-            return self._stats.copy()
+            snapshot = self._stats.copy()
+            snapshot["failed_files"] = list(self._stats["failed_files"])
+            snapshot["file_terminal_states"] = dict(
+                self._stats["file_terminal_states"]
+            )
+            return snapshot
+
+    def record_file_terminal(self, file_key: str, status: str) -> None:
+        """Record one terminal state without double-counting repeated writes."""
+
+        if not file_key:
+            return
+        with self._lock:
+            states = self._stats["file_terminal_states"]
+            previous = states.get(file_key)
+            if previous == status:
+                return
+            # Success must never promote an already incomplete/failed file.
+            if previous in {"partial", "failed", "critical_inconsistent"} and status in {
+                "success",
+                "success_with_skips",
+            }:
+                return
+            if previous == "critical_inconsistent":
+                return
+            states[file_key] = status
+        get_telemetry().record_ingest_outcome("file", status)
 
     def observe_timing(self, key: str, value: float) -> None:
         with self._lock:
@@ -181,6 +216,16 @@ class FileCompletionTracker:
                             "metadata": template.get("metadata") or {},
                             "namespace": namespace,
                             "_processing_token": template.get("_processing_token"),
+                            "_file_partial": template.get("_file_partial", False),
+                            "_file_partial_reason": template.get(
+                                "_file_partial_reason"
+                            ),
+                            "_file_terminal_status": template.get(
+                                "_file_terminal_status"
+                            ),
+                            "_file_terminal_reason": template.get(
+                                "_file_terminal_reason"
+                            ),
                         }
                         for namespace in namespaces
                     ]
@@ -192,13 +237,19 @@ class FileCompletionTracker:
                 self._namespaces.pop(file_id, None)
         return completed
 
-    def record_failure(self, batch: list[dict[str, Any]]) -> None:
-        """Make failure terminal so a later batch cannot overwrite it."""
+    def record_failure(self, batch: list[dict[str, Any]]) -> dict[str, str]:
+        """Return ``partial`` when earlier vectors for the file succeeded."""
+
+        outcomes: dict[str, str] = {}
         with self._lock:
             for vector in batch:
                 file_id = self._file_id(vector)
                 if file_id is not None:
+                    outcomes[file_id] = (
+                        "partial" if self._succeeded.get(file_id) else "failed"
+                    )
                     self._failed.add(file_id)
+        return outcomes
 
 
 # ============================================================================
@@ -458,7 +509,6 @@ class FraTransaction:
         self._vectors = vectors
         self._supersede_requests: list[tuple[str, str]] = []
         self._superseded_ids: list[str] = []
-        self._txn_log: FraSupersessionTxnLog | None = None
         self._tx_id: str | None = None
         self._lock_ctx = None
         self._lock_lost_event: threading.Event = (
@@ -477,6 +527,12 @@ class FraTransaction:
         self._supersede_requests = _filter_supersede_requests_with_registry(
             self._ctx, requests
         )
+        for building, _ in self._supersede_requests:
+            blocking_tx = self._ctx.fra_journal.blocking_transaction(building)
+            if blocking_tx:
+                raise CriticalInconsistentError(
+                    "FRA supersession is blocked pending reconciliation"
+                )
         return bool(self._supersede_requests)
 
     def acquire_locks(self):
@@ -485,8 +541,26 @@ class FraTransaction:
         Returns the lock context manager (caller must enter it).
         """
         buildings = sorted({b for b, _ in self._supersede_requests})
-        self._txn_log = FraSupersessionTxnLog(logger=self._ctx.logger)
-        self._tx_id = self._txn_log.begin(buildings, len(self._supersede_requests))
+        self._tx_id = uuid.uuid4().hex
+        vector_ids = [
+            str(vector["id"])
+            for vector in self._vectors
+            if vector.get("namespace") == FRA_RISK_ITEMS_NAMESPACE and vector.get("id")
+        ]
+        try:
+            self._ctx.fra_journal.begin(
+                new_fra_journal_record(
+                    tx_id=self._tx_id,
+                    buildings=buildings,
+                    requests=self._supersede_requests,
+                    vector_ids=vector_ids,
+                )
+            )
+            # The durable block is written before the first mutation. Locks
+            # protect a live process; this block survives a process crash.
+            self._ctx.fra_journal.block_buildings(self._tx_id, buildings)
+        except Exception as error:  # pylint: disable=broad-except
+            raise ExternalServiceError("FRA transaction journal unavailable") from error
         return _acquire_fra_locks(
             self._ctx,
             buildings,
@@ -515,34 +589,148 @@ class FraTransaction:
                 ctx=self._ctx,
                 building=building,
                 new_assessment_date=assessment_date,
+                before_update=self._journal_supersession_plan,
+                finalise_job=False,
             )
             self._superseded_ids.extend(superseded)
-            if self._txn_log is not None and self._tx_id is not None:
-                self._txn_log.record_superseded(self._tx_id, building, superseded)
+
+        self._transition(FraJournalState.SUPERSEDED)
 
         self._raise_if_lock_lost()
         upsert_vectors(self._ctx, self._vectors)
         self._ctx.stats.increment("batch_state_upserted_total")
+        self._transition(FraJournalState.UPSERTED)
 
-    def verify(self) -> list[str]:
+    def verify(self) -> "FraVerificationOutcome":
         """
         Confirm all FRA vectors are present in the index.
         Returns a list of missing IDs (empty on success).
         Commits the txn log on success.
         """
         self._raise_if_lock_lost()
-        missing_ids = _verify_fra_vectors_present(
-            self._ctx, self._vectors, attempts=INGEST_VERIFY_ATTEMPTS
+        outcome = _coerce_verification_outcome(
+            _verify_fra_vectors_present(
+                self._ctx, self._vectors, attempts=INGEST_VERIFY_ATTEMPTS
+            )
         )
-        if not missing_ids:
-            if self._txn_log is not None and self._tx_id is not None:
-                self._txn_log.commit(self._tx_id)
-        return missing_ids
+        if outcome.state is FraVerificationState.PRESENT:
+            self._transition(FraJournalState.VERIFIED)
+            self._finalise_jobs("success")
+            self._transition(FraJournalState.COMMITTED)
+            if self._tx_id:
+                self._ctx.fra_journal.unblock_buildings(
+                    self._tx_id, self.buildings
+                )
+        elif outcome.state is FraVerificationState.UNAVAILABLE:
+            self._transition(
+                FraJournalState.VERIFICATION_UNAVAILABLE,
+                failure_code="vector.verification_unavailable",
+            )
+            if self._tx_id:
+                self._ctx.fra_journal.block_buildings(
+                    self._tx_id, self.buildings
+                )
+        return outcome
 
     def rollback(self, reason: str) -> None:
-        """Restore superseded items and roll back the txn log."""
-        if self._txn_log and self._tx_id:
-            self._txn_log.rollback(self._tx_id, self._ctx, reason=reason)
+        """Restore and verify every planned supersession item."""
+
+        if self._tx_id is None:
+            return
+        self._transition(
+            FraJournalState.ROLLBACK_PENDING,
+            failure_code="fra.supersession_failed",
+        )
+        record = self._ctx.fra_journal.get(self._tx_id)
+        item_ids = list(record.superseded_ids) if record else self._superseded_ids
+        restored = restore_superseded_items(self._ctx, item_ids)
+        verified = _verify_restored_fra_items(self._ctx, item_ids)
+        if restored != len(item_ids) or not verified:
+            self._mark_critical_inconsistent(reason, item_ids, restored)
+        self._finalise_jobs("failed")
+        self._transition(FraJournalState.ROLLED_BACK)
+        self._ctx.fra_journal.unblock_buildings(self._tx_id, self.buildings)
+        self._ctx.stats.increment("fra_rollbacks_total")
+
+    @property
+    def buildings(self) -> list[str]:
+        return sorted({building for building, _ in self._supersede_requests})
+
+    def _journal_supersession_plan(self, item_ids: list[str]) -> None:
+        if self._tx_id is None:
+            raise ExternalServiceError("FRA transaction journal was not initialised")
+        self._ctx.fra_journal.append_superseded(self._tx_id, item_ids)
+
+    def _transition(
+        self,
+        state: FraJournalState,
+        *,
+        failure_code: str | None = None,
+    ) -> None:
+        if self._tx_id is None:
+            raise ExternalServiceError("FRA transaction journal was not initialised")
+        self._ctx.fra_journal.transition(
+            self._tx_id, state, failure_code=failure_code
+        )
+
+    def _finalise_jobs(self, status: str) -> None:
+        now = datetime.now(timezone.utc).isoformat() + "Z"
+        for building, assessment_date in self._supersede_requests:
+            registry_id = (
+                f"fra_supersede:{normalise_building_name(building)}:{assessment_date}"
+            )
+            self._ctx.job_registry.upsert(
+                JobRecord(
+                    job_id=registry_id,
+                    job_type="fra_supersession",
+                    status=status,
+                    started_at_iso=now,
+                    finished_at_iso=now,
+                    error=None if status == "success" else "transaction_rolled_back",
+                    meta={
+                        "building": building,
+                        "assessment_date": assessment_date,
+                        "tx_id": self._tx_id,
+                    },
+                )
+            )
+
+    def _mark_critical_inconsistent(
+        self, reason: str, item_ids: list[str], restored: int
+    ) -> None:
+        if self._tx_id is None:
+            raise CriticalInconsistentError("FRA rollback could not be verified")
+        try:
+            self._ctx.fra_journal.transition(
+                self._tx_id,
+                FraJournalState.CRITICAL_INCONSISTENT,
+                failure_code="fra.rollback_failed",
+            )
+            self._ctx.fra_journal.block_buildings(self._tx_id, self.buildings)
+        finally:
+            self._ctx.stats.increment("critical_inconsistent_total")
+            self._ctx.stats.increment("rollback_failures_total")
+            get_telemetry().record_ingest_integrity(
+                "rollback", "critical_inconsistent"
+            )
+            try:
+                self._ctx.event_sink.emit_event(
+                    {
+                        "event_type": "fra_critical_inconsistent",
+                        "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
+                        "transaction_id": self._tx_id,
+                        "affected_count": len(item_ids),
+                        "restored_count": restored,
+                        "buildings": len(self.buildings),
+                    }
+                )
+            except Exception as alert_error:  # pylint: disable=broad-except
+                self._ctx.logger.error(
+                    "Critical FRA alert emission failed: %s", alert_error
+                )
+        raise CriticalInconsistentError(
+            f"FRA rollback incomplete for transaction {self._tx_id}: {reason}"
+        )
 
     # -- private --
 
@@ -593,6 +781,49 @@ def _handle_verification_failure(
     )
 
 
+def _record_registry_divergence(
+    ctx: "IngestContext", vectors: list[dict[str, Any]]
+) -> None:
+    """Make vector-success/registry-failure visible at run level."""
+
+    ctx.stats.increment("registry_divergence_total")
+    get_telemetry().record_ingest_integrity("registry", "diverged")
+    ctx.logger.error(
+        "Vector write succeeded but file registry update failed; reconciliation required"
+    )
+    try:
+        spooled = spool_registry_divergence(ctx, vectors)
+        ctx.stats.increment("registry_reconciliation_spooled_total", spooled)
+    except Exception as spool_error:  # pylint: disable=broad-except
+        ctx.stats.increment("registry_reconciliation_spool_failures_total")
+        ctx.logger.error("Registry reconciliation artifact failed: %s", spool_error)
+    try:
+        ctx.event_sink.emit_event(
+            {
+                "event_type": "ingest_registry_diverged",
+                "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
+                "affected_vectors": len(vectors),
+            }
+        )
+    except Exception as alert_error:  # pylint: disable=broad-except
+        ctx.logger.warning("Registry divergence alert failed: %s", alert_error)
+
+
+def _record_verification_unavailable(
+    ctx: "IngestContext", vectors: list[dict[str, Any]]
+) -> None:
+    ctx.stats.increment("verification_unavailable_total")
+    try:
+        _record_ingested_files(
+            ctx,
+            vectors,
+            status="partial",
+            error="verification_read_unavailable",
+        )
+    except Exception:  # pylint: disable=broad-except
+        _record_registry_divergence(ctx, vectors)
+
+
 def upsert_vectors_atomic(ctx: "IngestContext", vectors: list[dict[str, Any]]) -> None:
     """
     Two-phase commit for FRA risk items:
@@ -611,46 +842,59 @@ def upsert_vectors_atomic(ctx: "IngestContext", vectors: list[dict[str, Any]]) -
         # Simple path: no supersession needed
         upsert_vectors(ctx, vectors)
         ctx.stats.increment("batch_state_upserted_total")
-        missing_ids = _verify_fra_vectors_present(
-            ctx, vectors, attempts=INGEST_VERIFY_ATTEMPTS
+        verification = _coerce_verification_outcome(
+            _verify_fra_vectors_present(
+                ctx, vectors, attempts=INGEST_VERIFY_ATTEMPTS
+            )
         )
-        if missing_ids:
-            _handle_verification_failure(ctx, vectors, missing_ids)
+        if verification.state is FraVerificationState.UNAVAILABLE:
+            _record_verification_unavailable(ctx, vectors)
+            return
+        if verification.state is FraVerificationState.MISSING:
+            _handle_verification_failure(
+                ctx, vectors, list(verification.missing_ids)
+            )
         ctx.stats.increment("batch_state_verified_total")
         try:
             _record_ingested_files(ctx, vectors, status="success")
         except Exception as error:  # pylint: disable=broad-except
             ctx.logger.warning("FileRegistry update failed: %s", error)
+            _record_registry_divergence(ctx, vectors)
         return
 
     # Transactional path: acquire locks and run all phases
     with txn.acquire_locks():
         try:
             txn.execute()
-            missing_ids = txn.verify()
-            if missing_ids:
-                _handle_verification_failure(ctx, vectors, missing_ids)
+            verification = txn.verify()
+            if verification.state is FraVerificationState.UNAVAILABLE:
+                _record_verification_unavailable(ctx, vectors)
+                return
+            if verification.state is FraVerificationState.MISSING:
+                _handle_verification_failure(
+                    ctx, vectors, list(verification.missing_ids)
+                )
 
             ctx.stats.increment("batch_state_verified_total")
             try:
                 _record_ingested_files(ctx, vectors, status="success")
             except Exception as error:  # pylint: disable=broad-except
                 ctx.logger.warning("FileRegistry update failed: %s", error)
+                _record_registry_divergence(ctx, vectors)
 
-        except (
-            ExternalServiceError,
-            IngestError,
-            ValidationError,
-            RoutingError,
-            ParseError,
-            ModelNotInitialisedError,
-        ) as error:
-            txn.rollback(str(error))
+        except BaseException as error:
+            txn.rollback(type(error).__name__)
             ctx.stats.increment("batch_state_failed_total")
             try:
-                _record_ingested_files(ctx, vectors, status="failed", error=str(error))
+                _record_ingested_files(
+                    ctx,
+                    vectors,
+                    status="failed",
+                    error="fra_transaction_failed",
+                )
             except Exception as record_error:  # pylint: disable=broad-except
                 ctx.logger.warning("FileRegistry update failed: %s", record_error)
+                _record_registry_divergence(ctx, vectors)
             raise
 
 
@@ -747,10 +991,9 @@ def _filter_supersede_requests_with_registry(
         try:
             existing = ctx.job_registry.get(registry_id)
         except Exception as error:  # pylint: disable=broad-except
-            ctx.logger.warning(
-                "JobRegistry lookup failed for %s: %s", registry_id, error
-            )
-            existing = None
+            raise ExternalServiceError(
+                "FRA idempotency registry lookup unavailable"
+            ) from error
         if existing and existing.status == "success":
             ctx.logger.info(
                 "Supersession already recorded for %s (assessment: %s); skipping",
@@ -758,15 +1001,45 @@ def _filter_supersede_requests_with_registry(
                 assessment_date,
             )
             continue
+        if existing is not None:
+            raise ExternalServiceError(
+                "FRA supersession is already active or requires reconciliation"
+            )
         filtered.append((building, assessment_date))
     return filtered
+
+
+class FraVerificationState(str, Enum):
+    PRESENT = "present"
+    MISSING = "missing"
+    UNAVAILABLE = "unavailable"
+
+
+@dataclass(frozen=True)
+class FraVerificationOutcome:
+    state: FraVerificationState
+    missing_ids: tuple[str, ...] = ()
+
+
+def _coerce_verification_outcome(
+    value: FraVerificationOutcome | list[str],
+) -> FraVerificationOutcome:
+    """Accept the legacy missing-ID list while callers migrate."""
+
+    if isinstance(value, FraVerificationOutcome):
+        return value
+    if value:
+        return FraVerificationOutcome(
+            FraVerificationState.MISSING, tuple(str(item) for item in value)
+        )
+    return FraVerificationOutcome(FraVerificationState.PRESENT)
 
 
 def _verify_fra_vectors_present(
     ctx: "IngestContext",
     vectors: list[dict[str, Any]],
     attempts: int = 1,
-) -> list[str]:
+) -> FraVerificationOutcome:
     fra_ids = [
         vector.get("id")
         for vector in vectors
@@ -774,27 +1047,28 @@ def _verify_fra_vectors_present(
     ]
     fra_ids = [vector_id for vector_id in fra_ids if vector_id]
     if not fra_ids:
-        return []
+        return FraVerificationOutcome(FraVerificationState.PRESENT)
 
     batch_size = INGEST_VERIFY_FETCH_BATCH_SIZE
     missing_ids = set(fra_ids)
 
     for attempt in range(attempts):
         still_missing = set()
+        read_unavailable = False
         for i in range(0, len(fra_ids), batch_size):
             batch = fra_ids[i : i + batch_size]
             try:
                 response = ctx.vector_store.fetch(
                     ids=batch, namespace=FRA_RISK_ITEMS_NAMESPACE
                 )
-            except ExternalServiceError as error:
+            except Exception as error:  # pylint: disable=broad-except
                 ctx.logger.error(
                     "FRA verification fetch failed (attempt %d/%d): %s",
                     attempt + 1,
                     attempts,
                     error,
                 )
-                still_missing.update(batch)
+                read_unavailable = True
                 continue
 
             if not response or not getattr(response, "vectors", None):
@@ -805,7 +1079,8 @@ def _verify_fra_vectors_present(
             still_missing.update(set(batch) - found_ids)
 
         if not still_missing:
-            return []
+            if not read_unavailable:
+                return FraVerificationOutcome(FraVerificationState.PRESENT)
 
         missing_ids = still_missing
         if attempt + 1 < attempts:
@@ -815,7 +1090,47 @@ def _verify_fra_vectors_present(
                 cap=INGEST_VERIFY_BACKOFF_CAP,
             )
 
-    return sorted(missing_ids)
+        if attempt + 1 == attempts and read_unavailable:
+            return FraVerificationOutcome(FraVerificationState.UNAVAILABLE)
+
+    return FraVerificationOutcome(
+        FraVerificationState.MISSING,
+        tuple(sorted(missing_ids)),
+    )
+
+
+def _verify_restored_fra_items(ctx: "IngestContext", item_ids: list[str]) -> bool:
+    """Verify rollback metadata for every affected ID using healthy reads."""
+
+    if not item_ids:
+        return True
+    for start in range(0, len(item_ids), INGEST_VERIFY_FETCH_BATCH_SIZE):
+        batch = item_ids[start : start + INGEST_VERIFY_FETCH_BATCH_SIZE]
+        try:
+            response = ctx.vector_store.fetch(
+                ids=batch, namespace=FRA_RISK_ITEMS_NAMESPACE
+            )
+        except Exception:  # pylint: disable=broad-except
+            return False
+        vectors = getattr(response, "vectors", None)
+        if vectors is None and isinstance(response, dict):
+            vectors = response.get("vectors")
+        if not isinstance(vectors, dict):
+            return False
+        for item_id in batch:
+            item = vectors.get(item_id)
+            if item is None:
+                return False
+            metadata = (
+                item.get("metadata", {})
+                if isinstance(item, dict)
+                else getattr(item, "metadata", {})
+            )
+            if metadata.get("is_current") is not True:
+                return False
+            if metadata.get("superseded_by") not in {None, ""}:
+                return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -835,18 +1150,66 @@ def _record_ingested_files(
 
     batches = [batch]
     completion_tracker = getattr(ctx, "completion_tracker", None)
+    failure_statuses: dict[str, str] = {}
     if completion_tracker is not None:
         if status == "success":
             batches = completion_tracker.record_success(batch)
         elif status == "failed":
-            completion_tracker.record_failure(batch)
+            failure_statuses = completion_tracker.record_failure(batch)
+
+    if status == "failed" and failure_statuses:
+        by_file: dict[str, list[dict[str, Any]]] = {}
+        for vector in batch:
+            file_id = FileCompletionTracker._file_id(vector)
+            if file_id is not None:
+                by_file.setdefault(file_id, []).append(vector)
+        for file_id, file_batch in by_file.items():
+            _write_ingested_file_records(
+                ctx,
+                file_batch,
+                status=failure_statuses.get(file_id, "failed"),
+                error=error,
+            )
+        return
 
     for completed_batch in batches:
+        final_status = status
+        final_error = error
+        if status == "success" and any(
+            vector.get("_file_partial") for vector in completed_batch
+        ):
+            final_status = "partial"
+            final_error = next(
+                (
+                    str(vector.get("_file_partial_reason"))
+                    for vector in completed_batch
+                    if vector.get("_file_partial_reason")
+                ),
+                "embedding_partial",
+            )
+        override = next(
+            (
+                vector.get("_file_terminal_status")
+                for vector in completed_batch
+                if vector.get("_file_terminal_status")
+            ),
+            None,
+        )
+        if status == "success" and override:
+            final_status = str(override)
+            final_error = next(
+                (
+                    str(vector.get("_file_terminal_reason"))
+                    for vector in completed_batch
+                    if vector.get("_file_terminal_reason")
+                ),
+                final_error,
+            )
         _write_ingested_file_records(
             ctx,
             completed_batch,
-            status=status,
-            error=error,
+            status=final_status,
+            error=final_error,
         )
 
 
@@ -889,19 +1252,28 @@ def _write_ingested_file_records(
 
     for file_id, payload in records.items():
         ns_tuple = tuple(sorted(namespaces.get(file_id, set())))
-        ctx.file_registry.upsert_with_token(
-            FileRecord(
-                file_id=payload["file_id"],
-                source_path=payload["source_path"],
-                source_key=payload["source_key"],
-                content_hash=payload["content_hash"],
-                ingested_at_iso=payload["ingested_at_iso"],
-                namespaces=ns_tuple,
-                status=payload["status"],
-                error=payload["error"],
-            ),
-            processing_token=tokens.get(file_id),
-        )
+        try:
+            ctx.file_registry.upsert_with_token(
+                FileRecord(
+                    file_id=payload["file_id"],
+                    source_path=payload["source_path"],
+                    source_key=payload["source_key"],
+                    content_hash=payload["content_hash"],
+                    ingested_at_iso=payload["ingested_at_iso"],
+                    namespaces=ns_tuple,
+                    status=payload["status"],
+                    error=payload["error"],
+                ),
+                processing_token=tokens.get(file_id),
+            )
+        except ValueError as error:
+            if "token mismatch" in str(error).lower():
+                if hasattr(ctx, "stats"):
+                    ctx.stats.increment("stale_worker_rejections_total")
+            raise
+        source_key = payload["source_key"] or file_id
+        if hasattr(ctx, "stats") and hasattr(ctx.stats, "record_file_terminal"):
+            ctx.stats.record_file_terminal(source_key, payload["status"])
 
 
 def _mark_batch_state(
@@ -949,8 +1321,13 @@ def _mark_batch_state(
                 content_hash=payload["content_hash"],
                 namespaces=tuple(sorted(namespaces.get(file_id, set()))),
             )
+            source_key = payload["source_key"] or file_id
+            ctx.stats.record_file_terminal(source_key, status)
         except Exception as err:  # pylint: disable=broad-except
             ctx.logger.warning("FileRegistry state update failed: %s", err)
+            if "token mismatch" in str(err).lower():
+                ctx.stats.increment("stale_worker_rejections_total")
+            ctx.stats.increment("registry_divergence_total")
 
 
 def _mark_batch_failed(
@@ -966,6 +1343,7 @@ def _mark_batch_failed(
         _record_ingested_files(ctx, batch, status="failed", error=reason)
     except Exception as error:  # pylint: disable=broad-except
         ctx.logger.warning("FileRegistry update failed: %s", error)
+        ctx.stats.increment("registry_divergence_total")
 
 
 # ---------------------------------------------------------------------------
@@ -1155,6 +1533,7 @@ def extract_fra_risk_items_integration(
             "missing_action_plan": missing_action_plan,
             "fra_assessment_date": None,
             "fra_assessment_date_int": None,
+            "embedding_failures": 0,
         }
 
     ctx.logger.info(
@@ -1183,6 +1562,7 @@ def extract_fra_risk_items_integration(
             "missing_action_plan": missing_action_plan,
             "fra_assessment_date": assessment_date,
             "fra_assessment_date_int": assessment_date_int,
+            "embedding_failures": 0,
         }
 
     if getattr(ctx.config, "dry_run", False):
@@ -1195,6 +1575,7 @@ def extract_fra_risk_items_integration(
             "missing_action_plan": missing_action_plan,
             "fra_assessment_date": assessment_date,
             "fra_assessment_date_int": assessment_date_int,
+            "embedding_failures": 0,
         }
 
     summaries: list[str] = []
@@ -1216,6 +1597,10 @@ def extract_fra_risk_items_integration(
 
     embed_start = time.perf_counter()
     result = embed_texts_batch(ctx, summaries)
+    if result.fatal_error:
+        raise IngestError("FRA embedding configuration is invalid")
+    if result.errors_by_index and not result.embeddings_by_index:
+        raise ExternalServiceError("FRA embedding service is unavailable")
     embeddings_by_index: dict[int, list[float]] = result.embeddings_by_index
     embed_elapsed = time.perf_counter() - embed_start
     ctx.logger.debug(
@@ -1305,4 +1690,5 @@ def extract_fra_risk_items_integration(
         "missing_action_plan": missing_action_plan,
         "fra_assessment_date": assessment_date,
         "fra_assessment_date_int": assessment_date_int,
+        "embedding_failures": len(result.errors_by_index),
     }

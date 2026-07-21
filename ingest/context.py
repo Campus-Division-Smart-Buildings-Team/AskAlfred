@@ -26,13 +26,16 @@ from core.redis_lock_manager import DryRunRedisLockManager, RedisLockManager
 from interfaces import (
     Embedder,
     EventSink,
+    FraTransactionJournal,
     IngestFileRegistry,
+    InMemoryFraTransactionJournal,
     JobRegistry,
     JsonlPrometheusEventSink,
     NoOpIngestFileRegistry,
     NoOpJobRegistry,
     OpenAIEmbedder,
     PineconeVectorStore,
+    RedisFraTransactionJournal,
     RedisIngestFileRegistry,
     RedisJobRegistry,
     VectorStore,
@@ -84,12 +87,15 @@ class IngestContext:
         self._event_sink: EventSink | None = None
         self._file_registry: IngestFileRegistry | None = None
         self._job_registry: JobRegistry | None = None
+        self._fra_journal: FraTransactionJournal | None = None
         # Thread-safe utilities
         self.stats = ThreadSafeStats()
         self.cache = ThreadSafeCache()
         self.completion_tracker = FileCompletionTracker()
         self.export_events_lock = threading.Lock()
         self.upsert_stop_event: threading.Event | None = None
+        self.active_upsert_batches: dict[str, list[dict]] = {}
+        self.active_upsert_batches_lock = threading.Lock()
 
     @property
     def pinecone(self) -> Pinecone:
@@ -200,6 +206,17 @@ class IngestContext:
             else:
                 self._job_registry = RedisJobRegistry(self.redis, prefix="ingest:job:")
         return self._job_registry
+
+    @property
+    def fra_journal(self) -> FraTransactionJournal:
+        """Durable journal required before an FRA supersession mutation."""
+
+        if self._fra_journal is None:
+            if getattr(self.config, "dry_run", False):
+                self._fra_journal = InMemoryFraTransactionJournal()
+            else:
+                self._fra_journal = RedisFraTransactionJournal(self.redis)
+        return self._fra_journal
 
     @property
     def event_sink(self) -> EventSink:

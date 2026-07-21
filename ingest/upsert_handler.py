@@ -589,6 +589,11 @@ def _upsert_worker(
             batch = queued.batch
             retry_index = queued.retry_index
             split_depth = queued.split_depth
+            active_batches = getattr(ctx, "active_upsert_batches", None)
+            active_lock = getattr(ctx, "active_upsert_batches_lock", None)
+            if active_batches is not None and active_lock is not None:
+                with active_lock:
+                    active_batches[threading.current_thread().name] = batch
 
             # Honour the retry backoff deadline. The wait is on stop_event so
             # shutdown interrupts it immediately.
@@ -630,6 +635,12 @@ def _upsert_worker(
             if isinstance(action, _FailAction):
                 if action.reason == "rollback_failure":
                     ctx.logger.critical("Upsert worker rollback failed: %s", error)
+                    _mark_batch_state(
+                        ctx,
+                        batch,
+                        status="critical_inconsistent",
+                        error="fra_rollback_failed",
+                    )
                     try:
                         ctx.stats.increment("rollback_failures_total")
                         ctx.event_sink.emit_event(
@@ -705,4 +716,9 @@ def _upsert_worker(
                     upsert_queue.put(UpsertQueueItem(batch[mid:], 0, split_depth + 1))
 
         finally:
+            active_batches = getattr(ctx, "active_upsert_batches", None)
+            active_lock = getattr(ctx, "active_upsert_batches_lock", None)
+            if active_batches is not None and active_lock is not None:
+                with active_lock:
+                    active_batches.pop(threading.current_thread().name, None)
             upsert_queue.task_done()

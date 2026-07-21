@@ -14,6 +14,7 @@ from config.constant import (
     INGEST_FILE_TTL_PROCESSING_SECONDS,
     INGEST_FILE_TTL_SUCCESS_SECONDS,
 )
+from core.ingest_outcomes import TERMINAL_FILE_STATUSES
 
 
 @dataclass(frozen=True)
@@ -24,7 +25,7 @@ class FileRecord:
     content_hash: str | None
     ingested_at_iso: str
     namespaces: tuple[str, ...]
-    status: str  # "success" | "failed" | "partial"
+    status: str
     error: str | None = None
     processing_token: str | None = None
     processing_expires_at: str | None = None
@@ -132,6 +133,7 @@ class RedisIngestFileRegistry:
                 "status", status,
                 "error", "",
                 "processing_token", token,
+                "transition_token", token,
                 "processing_expires_at", expires_iso,
                 "processing_expires_at_epoch", tostring(expires_epoch)
             )
@@ -165,6 +167,7 @@ class RedisIngestFileRegistry:
                 "status", "discovered",
                 "error", "",
                 "processing_token", "",
+                "transition_token", "",
                 "processing_expires_at", "",
                 "processing_expires_at_epoch", ""
             )
@@ -187,6 +190,39 @@ class RedisIngestFileRegistry:
             local terminal = ARGV[12] == "1"
 
             local current_status = redis.call("HGET", key, "status")
+            local current_transition_token = redis.call(
+                "HGET", key, "transition_token"
+            ) or ""
+            local current_is_terminal = (
+                current_status == "success" or
+                current_status == "success_with_skips" or
+                current_status == "empty_input" or
+                current_status == "skipped" or
+                current_status == "dry_run" or
+                current_status == "needs_review" or
+                current_status == "partial" or
+                current_status == "unavailable" or
+                current_status == "failed" or
+                current_status == "cancelled" or
+                current_status == "critical_inconsistent"
+            )
+            if current_is_terminal then
+                if supplied_token == "" or supplied_token ~= current_transition_token then
+                    return 0
+                end
+                if current_status == "critical_inconsistent" and status ~= current_status then
+                    return 0
+                end
+                if current_status == "success" and status ~= current_status then
+                    return 0
+                end
+                if current_status == "failed" and status ~= "failed" and status ~= "critical_inconsistent" then
+                    return 0
+                end
+                if current_status == "partial" and status == "success" then
+                    return 0
+                end
+            end
             if current_status == "processing" then
                 local current_expiry = tonumber(
                     redis.call("HGET", key, "processing_expires_at_epoch") or "0"
@@ -207,6 +243,7 @@ class RedisIngestFileRegistry:
             end
 
             local processing_token = ""
+            local transition_token = supplied_token
             local processing_expires_at = ""
             local processing_expires_at_epoch = ""
             if not terminal then
@@ -217,6 +254,9 @@ class RedisIngestFileRegistry:
                 processing_expires_at_epoch = redis.call(
                     "HGET", key, "processing_expires_at_epoch"
                 ) or ""
+                transition_token = redis.call(
+                    "HGET", key, "transition_token"
+                ) or supplied_token
             end
 
             redis.call(
@@ -231,6 +271,7 @@ class RedisIngestFileRegistry:
                 "status", status,
                 "error", state_error,
                 "processing_token", processing_token,
+                "transition_token", transition_token,
                 "processing_expires_at", processing_expires_at,
                 "processing_expires_at_epoch", processing_expires_at_epoch
             )
@@ -245,7 +286,7 @@ class RedisIngestFileRegistry:
         normalized = (status or "").lower()
         if normalized == "success":
             return self._success_ttl_seconds
-        if normalized in ("failed", "partial"):
+        if normalized in TERMINAL_FILE_STATUSES:
             return self._failed_ttl_seconds
         if normalized in ("processing", "discovered"):
             if lease_seconds is None:
@@ -308,13 +349,10 @@ class RedisIngestFileRegistry:
         record = self.get(file_id)
         if not record:
             return False
-        return record.status in (
+        return record.status in TERMINAL_FILE_STATUSES or record.status in {
             "discovered",
             "processing",
-            "failed",
-            "partial",
-            "success",
-        )
+        }
 
     def is_success(self, file_id: str) -> bool:
         record = self.get(file_id)
@@ -343,6 +381,7 @@ class RedisIngestFileRegistry:
             "status": record.status,
             "error": record.error or "",
             "processing_token": record.processing_token or "",
+            "transition_token": record.processing_token or "",
             "processing_expires_at": record.processing_expires_at or "",
             "processing_expires_at_epoch": str(
                 record.processing_expires_at_epoch or ""
@@ -437,7 +476,12 @@ class RedisIngestFileRegistry:
         namespaces: tuple[str, ...] | None = None,
     ) -> None:
         now = datetime.now(timezone.utc)
-        terminal = status in ("success", "failed")
+        if status not in TERMINAL_FILE_STATUSES and status not in {
+            "discovered",
+            "processing",
+        }:
+            raise ValueError(f"Unknown ingest file state: {status!r}")
+        terminal = status in TERMINAL_FILE_STATUSES
         updated = self._mark_state_script(
             keys=[self._key(file_id)],
             args=[

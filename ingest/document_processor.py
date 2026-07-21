@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import random
+import threading
 import time
 import uuid
 from concurrent.futures import ProcessPoolExecutor
@@ -167,12 +168,50 @@ class DocumentProcessor:
         self.building_resolver = building_resolver
         self.cpu_pool: ProcessPoolExecutor | None = None
         self.parse_pool: ProcessPoolExecutor | None = None
+        self._active_lock = threading.Lock()
+        self._active_files: dict[str, tuple[str, str, str]] = {}
+        self._outcome_overrides: dict[str, tuple[str, str]] = {}
 
     def set_cpu_pool(self, pool: ProcessPoolExecutor | None) -> None:
         self.cpu_pool = pool
 
     def set_parse_pool(self, pool: ProcessPoolExecutor | None) -> None:
         self.parse_pool = pool
+
+    def mark_active_file_failed(
+        self, key: str, reason: str, *, status: str = "failed"
+    ) -> None:
+        """Finish a leased file after an unclassified processing exception."""
+
+        with self._active_lock:
+            active = self._active_files.pop(key, None)
+        if active is None:
+            return
+        file_id, processing_token, content_hash = active
+        self.ctx.file_registry.mark_state(
+            file_id=file_id,
+            processing_token=processing_token,
+            status=status,
+            error=reason,
+            source_path=self.base_path,
+            source_key=key,
+            content_hash=content_hash,
+        )
+        self.ctx.stats.record_file_terminal(key, status)
+
+    def note_file_outcome(self, file_id: str, status: str, reason: str) -> None:
+        """Retain extraction degradation until all file vectors are assembled."""
+
+        priority = {"needs_review": 1, "partial": 2}
+        with self._active_lock:
+            current = self._outcome_overrides.get(file_id)
+            if current and priority.get(current[0], 0) >= priority.get(status, 0):
+                return
+            self._outcome_overrides[file_id] = (status, reason)
+
+    def take_file_outcome(self, file_id: str) -> tuple[str, str] | None:
+        with self._active_lock:
+            return self._outcome_overrides.pop(file_id, None)
 
     def load_bytes_and_ids(
         self,
@@ -319,9 +358,7 @@ class DocumentProcessor:
                 content_hash=content_hash,
             )
         except (RedisError, OSError, ValueError, TypeError) as error:
-            self.ctx.logger.warning(
-                "FileRegistry discovery failed for %s: %s", key, error
-            )
+            raise ExternalServiceError("File registry discovery unavailable") from error
 
         if _should_skip_existing(self.ctx.config):
             try:
@@ -331,9 +368,7 @@ class DocumentProcessor:
                     )
                     return None, None, None, None
             except (RedisError, OSError, ValueError, TypeError) as error:
-                self.ctx.logger.warning(
-                    "FileRegistry check failed for %s: %s", key, error
-                )
+                raise ExternalServiceError("File registry lookup unavailable") from error
 
         processing_token = uuid.uuid4().hex
         try:
@@ -348,9 +383,10 @@ class DocumentProcessor:
             if not started:
                 raise IngestError(f"File already processing; aborting: {key}")
         except (RedisError, OSError, ValueError, TypeError) as error:
-            self.ctx.logger.warning(
-                "FileRegistry processing start failed for %s: %s", key, error
-            )
+            raise ExternalServiceError("File registry lease unavailable") from error
+
+        with self._active_lock:
+            self._active_files[key] = (file_id, processing_token, content_hash)
 
         return data, content_hash, file_id, processing_token
 
@@ -536,6 +572,11 @@ class DocumentProcessor:
             vectors_to_upsert=vectors_to_upsert,
             parse_pool=self.parse_pool,
         )
+        if extracted_result.get("embedding_failures", 0):
+            self.note_file_outcome(file_id, "partial", "embedding_partial")
+            for vector in vectors_to_upsert:
+                vector["_file_partial"] = True
+                vector["_file_partial_reason"] = "embedding_partial"
         if docs:
             try:
                 assessment_date = extracted_result.get("fra_assessment_date")
@@ -579,6 +620,9 @@ class DocumentProcessor:
 
                 # Set extraction status
                 if extracted_result.get("missing_action_plan"):
+                    self.note_file_outcome(
+                        file_id, "needs_review", "fra_no_action_plan"
+                    )
                     extra_metadata["fra_action_plan_missing"] = True
                     extra_metadata["fra_risk_item_extraction_status"] = (
                         "no_action_plan_found"
@@ -684,6 +728,7 @@ class DocumentProcessor:
         precomputed_chunks: dict[str, list[str]] | None = None,
     ) -> list[dict[str, Any]]:
         vectors_to_upsert: list[dict[str, Any]] = []
+        incomplete = False
         for doc_key, canonical, text, extra_metadata in docs:
             # Resolve doc_type + namespace *before* embedding
             doc_type = self._resolve_document_type(
@@ -728,7 +773,7 @@ class DocumentProcessor:
                 current_doc_type: str,
                 current_extra_metadata: dict[str, Any],
             ) -> None:
-                nonlocal batch_chunks, batch_indices
+                nonlocal batch_chunks, batch_indices, incomplete
                 if not batch_chunks:
                     return
                 max_seconds = getattr(self.ctx.config, "max_file_seconds", 0)
@@ -805,6 +850,7 @@ class DocumentProcessor:
                         )
                         self.ctx.stats.increment("vectors_invalid_metadata")
                         self.ctx.stats.append_failed(f"{key}:chunk_{index}")
+                        incomplete = True
                         continue
                     if sample_metadata:
                         try:
@@ -830,6 +876,23 @@ class DocumentProcessor:
                     self.ctx,
                     [chunk for _, chunk, _ in valid_chunks],
                 )
+                if result.fatal_error:
+                    raise IngestError("Embedding configuration is invalid")
+                if result.errors_by_index and not result.embeddings_by_index:
+                    transient_reasons = {
+                        "rate_limit",
+                        "network_error",
+                        "api_error",
+                        "unexpected_error",
+                        "failed_after_retries",
+                        "response_size_mismatch",
+                    }
+                    reasons = set(result.errors_by_index.values())
+                    if reasons & transient_reasons:
+                        raise ExternalServiceError(
+                            "Embedding service could not complete the file"
+                        )
+                    raise IngestError("No file chunks could be embedded")
                 embed_elapsed = time.perf_counter() - embed_start
                 self.ctx.logger.debug(
                     "Embedding batch %s: %.3fs (%d chunks, %d valid)",
@@ -853,6 +916,7 @@ class DocumentProcessor:
                     if idx_in_batch in result.errors_by_index:
                         self.ctx.stats.increment("vectors_embedding_failed")
                         self.ctx.stats.append_failed(f"{key}:chunk_{index}")
+                        incomplete = True
                         continue
                     embedding = result.embeddings_by_index.get(idx_in_batch)
                     if embedding is None:
@@ -924,6 +988,10 @@ class DocumentProcessor:
                 doc_key, resolved_namespace, canonical, doc_type, extra_metadata
             )
 
+        if incomplete:
+            for vector in vectors_to_upsert:
+                vector["_file_partial"] = True
+                vector["_file_partial_reason"] = "embedding_or_metadata_partial"
         return vectors_to_upsert
 
 
@@ -1049,6 +1117,21 @@ class Vectoriser:
             )
         )
 
+        if any(vector.get("_file_partial") for vector in vectors_to_upsert):
+            self._processor.note_file_outcome(
+                file_id, "partial", "embedding_or_metadata_partial"
+            )
+            for vector in vectors_to_upsert:
+                vector["_file_partial"] = True
+                vector.setdefault("_file_partial_reason", "embedding_partial")
+
+        override = self._processor.take_file_outcome(file_id)
+        if isinstance(override, tuple) and len(override) == 2:
+            terminal_status, reason = override
+            for vector in vectors_to_upsert:
+                vector["_file_terminal_status"] = terminal_status
+                vector["_file_terminal_reason"] = reason
+
         return vectors_to_upsert
 
 
@@ -1077,6 +1160,13 @@ class FileIngestOrchestrator:
 
     def set_parse_pool(self, pool: ProcessPoolExecutor | None) -> None:
         self._processor.set_parse_pool(pool)
+
+    def mark_failed(
+        self, obj: dict[str, Any], reason: str, *, status: str = "failed"
+    ) -> None:
+        key = str(obj.get("Key") or obj.get("key") or "")
+        if key:
+            self._processor.mark_active_file_failed(key, reason, status=status)
 
     def process(self, obj: dict[str, Any]) -> "FileProcessResult":
         start = time.perf_counter()
@@ -1119,6 +1209,20 @@ class FileIngestOrchestrator:
             is_fra_candidate=is_fra_candidate,
             precomputed_chunks=precomputed_chunks,
         )
+        if not vectors and not _is_dry_run(self._processor.ctx.config):
+            self._processor.ctx.file_registry.mark_state(
+                file_id=file_id,
+                processing_token=processing_token,
+                status="needs_review",
+                error="no_usable_vectors",
+                source_path=self._processor.base_path,
+                source_key=key,
+                content_hash=content_hash,
+            )
+            self._processor.ctx.stats.record_file_terminal(key, "needs_review")
+            return FileProcessResult(
+                status="needs_review", vectors=[], vector_count=0
+            )
         if _is_timeout_exceeded(start, max_seconds):
             self._processor.ctx.file_registry.mark_state(
                 file_id=file_id,

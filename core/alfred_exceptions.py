@@ -76,6 +76,18 @@ class RollbackError(IngestError):
     """Raised when a rollback fails or is incomplete."""
 
 
+class CriticalInconsistentError(RollbackError):
+    """Stored state is inconsistent and affected writes must remain blocked."""
+
+
+class VerificationReadUnavailable(ExternalServiceError):
+    """A verification read failed, so vector presence is currently unknown."""
+
+
+class RegistryDivergenceError(IngestError):
+    """Vector mutation succeeded but its registry transition did not."""
+
+
 class DeadlockError(RuntimeError):
     """Raised when FRA lock acquisition times out (possible deadlock)."""
 
