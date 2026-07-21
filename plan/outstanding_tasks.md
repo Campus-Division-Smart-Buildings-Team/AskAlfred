@@ -8,13 +8,6 @@ rollout.
 
 ## Ingestion and vector gaps
 
-### VECTOR-04 — Retry and alert on embedding response mismatch
-
-- Retry a provider response-size mismatch once when safe.
-- Then mark the file partial or failed and emit an operator alert.
-- Evidence: `interfaces/embedder.py:178` immediately records
-  `response_size_mismatch` without the planned retry or alert.
-
 ### VECTOR-06 — Bound aggregate upsert retries
 
 - Add a maximum total retry budget across retries and recursive batch splits.
@@ -77,6 +70,24 @@ plan and have not been completed by repository code alone:
 
 ## Recently completed
 
+- **VECTOR-04:** A provider embedding response whose length differs from the
+  request is now treated as a contract breach rather than an immediate failure.
+  `OpenAIEmbedder.embed_texts` re-issues the batch once (the call is idempotent,
+  so the retry is always safe); a healthy retry recovers every embedding, and a
+  mismatch that survives the single retry is recorded per item as
+  `response_size_mismatch` so the file finishes `partial` (some chunks succeeded)
+  or `failed` (none did) through the existing downstream handling —
+  `INGEST_EMBEDDING_RESPONSE_INVALID` in the acceptance contract. The retry is
+  bounded to one attempt, not the transient-error retry budget, and does not
+  trigger adaptive batch reduction. `EmbeddingsResult` now carries
+  `response_mismatch_retries` and `response_mismatch_batches`. At the ingestion
+  boundary, `embed_texts_batch` increments `embed_response_mismatch_retries_total`
+  and, on a persistent mismatch, emits an operator alert:
+  `embed_response_mismatch_total` run stats, low-cardinality
+  `ingest_integrity_total{event=embedding,state=response_mismatch}` telemetry, an
+  operator-facing error log, and an `embed_response_size_mismatch` event via the
+  event sink. Covered by embedder retry/recovery and persistence tests plus an
+  ingestion-boundary alert test.
 - **INGEST-08:** A file that produces no usable vectors now finishes
   `needs_review` with a distinct, operator-actionable reason instead of a
   generic `no_usable_vectors`: `empty_document` when nothing could be extracted,

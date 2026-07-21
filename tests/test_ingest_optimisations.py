@@ -249,6 +249,109 @@ def test_embed_batch_size_recovers_after_single_item_failure():
     assert calls[-1] == 4
 
 
+def test_embed_response_size_mismatch_retries_once_and_recovers():
+    """VECTOR-04: a short provider response is retried once; a healthy retry
+    recovers every embedding without recording a contract failure."""
+    attempts = {"count": 0}
+
+    class _Embeddings:
+        @staticmethod
+        def create(*, model, input, timeout=None):  # noqa: A002 - OpenAI kwarg
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                # First response drops the final embedding (count mismatch).
+                data = [SimpleNamespace(embedding=[0.0]) for _ in input[:-1]]
+            else:
+                data = [SimpleNamespace(embedding=[0.0]) for _ in input]
+            return SimpleNamespace(data=data)
+
+    class _Client:
+        embeddings = _Embeddings()
+
+    embedder = OpenAIEmbedder(client=_Client())
+
+    result = embedder.embed_texts(["a", "b", "c"], model="m", max_batch=3)
+
+    assert attempts["count"] == 2  # original call + exactly one safe retry
+    assert set(result.embeddings_by_index) == {0, 1, 2}
+    assert result.errors_by_index == {}
+    assert result.response_mismatch_retries == 1
+    assert result.response_mismatch_batches == 0
+
+
+def test_embed_response_size_mismatch_persists_after_single_retry():
+    """A mismatch that survives the one safe retry is recorded per item and
+    flagged so the ingestion boundary can alert; it is not retried endlessly."""
+    attempts = {"count": 0}
+
+    class _Embeddings:
+        @staticmethod
+        def create(*, model, input, timeout=None):  # noqa: A002 - OpenAI kwarg
+            attempts["count"] += 1
+            # Always return one fewer embedding than requested.
+            return SimpleNamespace(
+                data=[SimpleNamespace(embedding=[0.0]) for _ in input[:-1]]
+            )
+
+    class _Client:
+        embeddings = _Embeddings()
+
+    embedder = OpenAIEmbedder(client=_Client())
+
+    result = embedder.embed_texts(["a", "b", "c"], model="m", max_batch=3)
+
+    assert attempts["count"] == 2  # one retry only, not an unbounded loop
+    assert result.embeddings_by_index == {}
+    assert set(result.errors_by_index.values()) == {"response_size_mismatch"}
+    assert set(result.errors_by_index) == {0, 1, 2}
+    assert result.response_mismatch_retries == 1
+    assert result.response_mismatch_batches == 1
+
+
+def test_embed_texts_batch_alerts_on_persistent_response_mismatch():
+    """A persistent response-size mismatch surfaces a run stat, integrity
+    telemetry, and an operator event (VECTOR-04)."""
+    from core.telemetry import get_telemetry
+
+    get_telemetry().reset()
+    events: list[dict] = []
+
+    embedder = Mock()
+    embedder.embed_texts.return_value = EmbeddingsResult(
+        embeddings_by_index={},
+        errors_by_index={0: "response_size_mismatch", 1: "response_size_mismatch"},
+        response_mismatch_retries=1,
+        response_mismatch_batches=1,
+    )
+    ctx = SimpleNamespace(
+        config=SimpleNamespace(
+            embed_model="text-embedding-3-small",
+            openai_timeout=60.0,
+            embed_batch=96,
+            dry_run=False,
+        ),
+        embedder=embedder,
+        stats=Mock(),
+        event_sink=SimpleNamespace(emit_event=events.append),
+        logger=Mock(),
+    )
+
+    embed_texts_batch(ctx, ["one", "two"])
+
+    ctx.stats.increment.assert_any_call("embed_response_mismatch_total", 1)
+    ctx.stats.increment.assert_any_call("embed_response_mismatch_retries_total", 1)
+    assert (
+        get_telemetry().get(
+            "ingest_integrity_total", event="embedding", state="response_mismatch"
+        )
+        == 1
+    )
+    assert len(events) == 1
+    assert events[0]["event_type"] == "embed_response_size_mismatch"
+    assert events[0]["affected_batches"] == 1
+    ctx.logger.error.assert_called()
+
+
 def test_fra_upsert_verification_retries_before_failing(monkeypatch):
     """Post-upsert verification must be given several fetch attempts to absorb
     read-after-write lag, not fail the whole batch (and force a re-upsert) on

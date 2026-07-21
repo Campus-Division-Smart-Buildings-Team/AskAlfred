@@ -50,6 +50,12 @@ class EmbeddingsResult:
     rate_limit_errors: int = 0
     error_summary: str | None = None
     fatal_error: bool = False
+    # VECTOR-04: number of one-shot safe retries issued because a provider
+    # response length differed from the request length, and the number of
+    # batches that still mismatched after that retry (a provider contract
+    # breach the ingestion boundary alerts on).
+    response_mismatch_retries: int = 0
+    response_mismatch_batches: int = 0
 
 
 class OpenAIEmbedder:
@@ -159,6 +165,8 @@ class OpenAIEmbedder:
         retry_attempts = 0
         batch_reductions = 0
         rate_limit_errors = 0
+        response_mismatch_retries = 0
+        response_mismatch_batches = 0
         terminal_fatal_error = False
         i = 0
         batch_size = initial_batch_size
@@ -176,6 +184,26 @@ class OpenAIEmbedder:
                 batch_size = initial_batch_size
                 continue
             if result is not None and len(result) != len(batch):
+                # VECTOR-04: a response whose length differs from the request is
+                # a provider contract breach. Re-issuing an embeddings call has
+                # no side effects, so retry the same batch once before giving up;
+                # a transient mismatch usually clears on the retry.
+                response_mismatch_retries += 1
+                retry_result, retries_used, rate_limit_used, _reason, _fatal = (
+                    self._embed_batch(batch, model=model, timeout=timeout)
+                )
+                retry_attempts += retries_used
+                rate_limit_errors += rate_limit_used
+                if retry_result is not None and len(retry_result) == len(batch):
+                    for offset, embedding in enumerate(retry_result):
+                        embeddings_by_index[i + offset] = embedding
+                    i += batch_size
+                    batch_size = initial_batch_size
+                    continue
+                # Still mismatched after one safe retry: record the contract
+                # failure per item so the file finishes partial/failed, and flag
+                # the batch so the ingestion boundary can alert operators.
+                response_mismatch_batches += 1
                 for offset in range(len(batch)):
                     errors_by_index[i + offset] = "response_size_mismatch"
                 errors.append("response_size_mismatch")
@@ -215,6 +243,8 @@ class OpenAIEmbedder:
             rate_limit_errors=rate_limit_errors,
             error_summary="; ".join(errors) if errors else None,
             fatal_error=terminal_fatal_error,
+            response_mismatch_retries=response_mismatch_retries,
+            response_mismatch_batches=response_mismatch_batches,
         )
 
 

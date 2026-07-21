@@ -19,6 +19,7 @@ import tempfile
 import time
 import zipfile
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -47,6 +48,7 @@ from config import (
     INGEST_PDF_MAX_PAGES,
 )
 from core.alfred_exceptions import ParseError, ValidationError
+from core.telemetry import get_telemetry
 from domain.maintenance_utils import normalise_priority
 from interfaces import EmbeddingsResult
 from security.file_operations_validator import (
@@ -774,7 +776,47 @@ def embed_texts_batch(
         ctx.stats.increment("embed_batch_reductions_total", result.batch_reductions)
     if result.rate_limit_errors:
         ctx.stats.increment("embed_rate_limit_total", result.rate_limit_errors)
+    if result.response_mismatch_retries:
+        ctx.stats.increment(
+            "embed_response_mismatch_retries_total",
+            result.response_mismatch_retries,
+        )
+    if result.response_mismatch_batches:
+        _alert_embed_response_mismatch(ctx, result.response_mismatch_batches)
     return result
+
+
+def _alert_embed_response_mismatch(ctx: "IngestContext", batches: int) -> None:
+    """Record and alert on a persistent embedding response-size mismatch.
+
+    A response length that still differs from the request length after the
+    embedder's one safe retry is a provider contract breach (VECTOR-04). The
+    affected chunks are already recorded as ``response_size_mismatch`` so the
+    file finishes partial/failed; this makes the breach observable to operators
+    through a run-level stat, process-wide integrity telemetry, and an event.
+    """
+    ctx.stats.increment("embed_response_mismatch_total", batches)
+    try:
+        get_telemetry().record_ingest_integrity("embedding", "response_mismatch")
+    except Exception:  # pylint: disable=broad-except
+        ctx.logger.warning("Embedding mismatch telemetry failed", exc_info=True)
+    ctx.logger.error(
+        "Embedding provider returned a mismatched response size for %d batch(es) "
+        "after a safe retry; affected chunks recorded as response_size_mismatch",
+        batches,
+    )
+    try:
+        ctx.event_sink.emit_event(
+            {
+                "event_type": "embed_response_size_mismatch",
+                "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
+                "affected_batches": batches,
+            }
+        )
+    except Exception as alert_error:  # pylint: disable=broad-except
+        ctx.logger.warning(
+            "Embedding mismatch alert emission failed: %s", alert_error
+        )
 
 
 def load_building_names_with_aliases(
