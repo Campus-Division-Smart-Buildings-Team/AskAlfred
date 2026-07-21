@@ -8,6 +8,7 @@ Query Manager - Centralised query orchestration for AskAlfred.
 import copy
 import json
 import logging
+import re
 import time
 from typing import Any, Optional
 
@@ -57,7 +58,7 @@ from query_preprocessors import (
     SpellCheckPreprocessor,
 )
 from security.log_sanitiser import sanitise_error
-from ui.emojis import EMOJI_CAUTION, EMOJI_CROSS, EMOJI_TICK, EMOJI_TIME
+from ui.emojis import EMOJI_CROSS, EMOJI_TICK, EMOJI_TIME
 
 # ============================================================================
 # FOLLOWUP CONFIGs
@@ -75,6 +76,7 @@ _CACHEABLE_STATUSES = frozenset(
 
 _QUERY_ROUTING_COMPONENT = "query_routing"
 _DEPENDENCY_READINESS_COMPONENT = "dependency_readiness"
+_BUILDING_SCOPE_DISCARDED_COMPONENT = "building_scope_discarded"
 
 _PREPROCESSOR_COMPONENTS = {
     SpellCheckPreprocessor: "spell_check_preprocessor",
@@ -431,6 +433,7 @@ class QueryManager:
 
         # Create context
         context = QueryContext(query=query, **kwargs)
+        requested_building_filter = context.building_filter
 
         # Fail closed before retrieval when an authenticated session has no
         # usable access context. Otherwise the deny-all filter below yields
@@ -518,16 +521,19 @@ class QueryManager:
         # Preprocessors
         # ---------------------------------------------------
         preprocessor_degradations = self._run_preprocessors(context)
-        # 🔧 Normalise / clean building extracted by preprocessors
-        if context.building and context.building.lower() in INVALID_BUILDING_NAMES:
-            self.logger.info(
-                "%s Discarding invalid building from preprocessors: %r",
-                EMOJI_CAUTION,
-                context.building,
+        building_scope_discarded, clarification_required = (
+            self._discard_invalid_building_scope(
+                context, requested_building_filter=requested_building_filter
             )
-            context.building = None
-            context.building_filter = None
-            context.routing_notes.append("invalid_building_cleared")
+        )
+        if clarification_required:
+            result = self._building_scope_clarification_result(
+                query, start_time
+            )
+            self._apply_preprocessor_degradation(
+                result, context, preprocessor_degradations
+            )
+            return result
 
         self._maybe_inherit_followup_context(context)
 
@@ -551,6 +557,9 @@ class QueryManager:
 
             self._apply_preprocessor_degradation(
                 query_result, context, preprocessor_degradations
+            )
+            self._apply_building_scope_discarded(
+                query_result, building_scope_discarded
             )
 
             # persist context snapshot
@@ -625,6 +634,9 @@ class QueryManager:
         # result and trigger the UI's concise degraded-capability warning.
         self._apply_preprocessor_degradation(
             query_result, context, preprocessor_degradations
+        )
+        self._apply_building_scope_discarded(
+            query_result, building_scope_discarded
         )
 
         # A building-scoped query answered while the building directory is
@@ -765,6 +777,45 @@ class QueryManager:
         self._record_outcome_telemetry(result)
         return result
 
+    def _building_scope_clarification_result(
+        self, query: str, start_time: float
+    ) -> QueryResult:
+        """Return an explicit ROUTE-02 clarification without running retrieval."""
+        failure = FailureInfo.from_code(
+            FailureCode.INPUT_BUILDING_SCOPE_INVALID,
+            _QUERY_ROUTING_COMPONENT,
+        )
+        elapsed_ms = (time.time() - start_time) * 1000
+        result = QueryResult(
+            query=query,
+            answer=(
+                "Which building did you mean? Please provide a valid building name."
+            ),
+            results=[],
+            handler_used=_QUERY_ROUTING_COMPONENT,
+            query_type=_QUERY_ROUTING_COMPONENT,
+            status=OutcomeStatus.REJECTED,
+            failure=failure,
+            processing_time_ms=elapsed_ms,
+            metadata={
+                "building_scope_discarded": True,
+                "clarification_required": True,
+            },
+        )
+        self.logger.info(
+            "building_scope_clarification code=%s component=%s",
+            failure.code.value,
+            failure.component,
+        )
+        self._update_stats(
+            handler_class_name=_QUERY_ROUTING_COMPONENT,
+            query_type=_QUERY_ROUTING_COMPONENT,
+            elapsed_ms=elapsed_ms,
+            success=False,
+        )
+        self._record_outcome_telemetry(result)
+        return result
+
     def _record_building_directory_readiness(self, context: QueryContext) -> bool:
         """Publish building-directory readiness; return True if it degrades this query.
 
@@ -835,6 +886,14 @@ class QueryManager:
         if material_components and query_result.status in _CACHEABLE_STATUSES:
             query_result.status = OutcomeStatus.DEGRADED
 
+    @staticmethod
+    def _apply_building_scope_discarded(
+        query_result: QueryResult, discarded: bool
+    ) -> None:
+        """Attach the ROUTE-02 event to a result that safely continued."""
+        if discarded:
+            query_result.metadata["building_scope_discarded"] = True
+
     def _record_outcome_telemetry(self, query_result: QueryResult) -> None:
         """Record the terminal request outcome by status and failure code."""
         failure_code = (
@@ -845,6 +904,74 @@ class QueryManager:
     # =========================================================================
     # Preprocessor execution
     # =========================================================================
+
+    def _discard_invalid_building_scope(
+        self,
+        context: QueryContext,
+        *,
+        requested_building_filter: str | None,
+    ) -> tuple[bool, bool]:
+        """Discard invalid scope and report whether explicit clarification is needed."""
+        invalid_candidate = context.get_from_cache("building_invalid_candidate")
+        if not invalid_candidate and context.building:
+            normalised_building = context.building.strip().lower()
+            if normalised_building in INVALID_BUILDING_NAMES:
+                invalid_candidate = context.building
+        if not invalid_candidate and context.building_filter:
+            normalised_filter = context.building_filter.strip().lower()
+            if normalised_filter in INVALID_BUILDING_NAMES:
+                invalid_candidate = context.building_filter
+
+        if not invalid_candidate:
+            return False, False
+
+        candidate = str(invalid_candidate).strip()
+        candidate_key = candidate.lower()
+        explicit_filter = bool(
+            requested_building_filter
+            and requested_building_filter.strip().lower() == candidate_key
+        )
+        clarification_required = explicit_filter or self._query_depends_on_building_scope(
+            context.query, candidate
+        )
+
+        if context.building and context.building.strip().lower() == candidate_key:
+            context.building = None
+        if (
+            context.building_filter
+            and context.building_filter.strip().lower() == candidate_key
+        ):
+            context.building_filter = None
+        context.buildings = [
+            building
+            for building in context.buildings
+            if str(building).strip().lower() != candidate_key
+        ]
+
+        context.add_to_cache("building_scope_discarded", True)
+        context.routing_notes.append("building_scope_discarded")
+        get_telemetry().record_fallback(_BUILDING_SCOPE_DISCARDED_COMPONENT)
+        self.logger.info(
+            "building_scope_discarded clarification_required=%s",
+            clarification_required,
+        )
+        return True, clarification_required
+
+    @staticmethod
+    def _query_depends_on_building_scope(query: str, candidate: str) -> bool:
+        """Conservatively identify explicit natural-language building scope."""
+        candidate_pattern = re.escape(candidate.strip().lower())
+        if not candidate_pattern:
+            return False
+        query_text = query.strip().lower()
+        patterns = (
+            rf"\b(?:building|property|site|location|premises)\s+"
+            rf"(?:(?:called|named)\s+)?(?:the\s+)?{candidate_pattern}\b",
+            rf"\b{candidate_pattern}\s+"
+            rf"(?:building|property|site|location|premises)\b",
+            rf"\b(?:at|within)\s+(?:the\s+)?{candidate_pattern}\b",
+        )
+        return any(re.search(pattern, query_text) for pattern in patterns)
 
     def _run_preprocessors(self, context: QueryContext) -> list[str]:
         """Run preprocessors, retaining stable request-scoped failure details."""

@@ -31,6 +31,7 @@ class FailureCode(str, Enum):
     ACCESS_AUTHORIZED_SCOPE_EMPTY = "access.authorized_scope_empty"
 
     INPUT_INSUFFICIENT_DETAIL = "input.insufficient_detail"
+    INPUT_BUILDING_SCOPE_INVALID = "input.building_scope_invalid"
 
     ROUTING_GRAPH_INVALID = "routing.graph_invalid"
     HANDLER_EXECUTION_FAILED = "handler.execution_failed"
@@ -96,6 +97,7 @@ _NON_RETRYABLE_CODES = {
     FailureCode.ACCESS_ACL_METADATA_INVALID,
     FailureCode.ACCESS_AUTHORIZED_SCOPE_EMPTY,
     FailureCode.INPUT_INSUFFICIENT_DETAIL,
+    FailureCode.INPUT_BUILDING_SCOPE_INVALID,
     FailureCode.ROUTING_GRAPH_INVALID,
     FailureCode.SEARCH_CONTRACT_INVALID,
     FailureCode.SEARCH_EMBEDDING_FAILED,

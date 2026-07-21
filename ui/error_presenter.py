@@ -130,6 +130,12 @@ _STATUS_PRESENTATION: dict[OutcomeStatus, dict[str, object]] = {
 # rejection must not reveal whether inaccessible documents exist, so it reads as
 # an account-provisioning problem rather than a search result.
 _FAILURE_CODE_OVERRIDES: dict[FailureCode, dict[str, object]] = {
+    FailureCode.INPUT_BUILDING_SCOPE_INVALID: {
+        "severity": "warning",
+        "message": "I couldn't identify the building in that request.",
+        "action": "Please provide the building name and try again.",
+        "retry_suggested": False,
+    },
     FailureCode.ACCESS_CONTEXT_INVALID: {
         "severity": "error",
         "message": "Your account could not be assigned data access.",

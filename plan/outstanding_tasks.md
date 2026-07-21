@@ -8,13 +8,6 @@ rollout.
 
 ## Structured-outcome gaps
 
-### ROUTE-02 — Handle discarded building scope
-
-- Record `building_scope_discarded` when an extracted building is rejected.
-- Ask for clarification when the query clearly depends on that building.
-- Current behavior only records the internal routing note
-  `invalid_building_cleared`.
-
 ### ROUTE-04 — Preserve handler-negotiation failure
 
 - Record failures from `can_handle()` as partial routing degradation.
@@ -122,6 +115,13 @@ plan and have not been completed by repository code alone:
 
 ## Recently completed
 
+- **ROUTE-02:** Invalid or maintenance-like extracted building scope is now
+  removed without clearing a separate valid explicit filter and recorded as
+  `building_scope_discarded` in request context, routing notes, fallback
+  telemetry, and result metadata. Queries with an invalid explicit filter or
+  unmistakable natural-language building scope stop before retrieval with a
+  typed `rejected/input.building_scope_invalid` clarification; incidental
+  maintenance terms continue without an unnecessary warning.
 - **ROUTE-01:** Preprocessor exceptions now record a stable component name in
   request context, routing notes, fallback telemetry, result metadata, and
   `degraded_components`, while later preprocessors continue. Missing building or
