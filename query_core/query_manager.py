@@ -76,6 +76,19 @@ _CACHEABLE_STATUSES = frozenset(
 _QUERY_ROUTING_COMPONENT = "query_routing"
 _DEPENDENCY_READINESS_COMPONENT = "dependency_readiness"
 
+_PREPROCESSOR_COMPONENTS = {
+    SpellCheckPreprocessor: "spell_check_preprocessor",
+    BuildingExtractor: "building_extractor",
+    BusinessTermExtractor: "business_term_extractor",
+    QueryComplexityAnalyser: "query_complexity_analyser",
+}
+_MATERIAL_CONTEXT_PREPROCESSORS = frozenset(
+    {
+        "building_extractor",
+        "business_term_extractor",
+    }
+)
+
 _HANDLER_TYPES = {
     handler_type.__name__: handler_type
     for handler_type in (
@@ -504,7 +517,7 @@ class QueryManager:
         # ---------------------------------------------------
         # Preprocessors
         # ---------------------------------------------------
-        self._run_preprocessors(context)
+        preprocessor_degradations = self._run_preprocessors(context)
         # 🔧 Normalise / clean building extracted by preprocessors
         if context.building and context.building.lower() in INVALID_BUILDING_NAMES:
             self.logger.info(
@@ -535,6 +548,10 @@ class QueryManager:
             self.stats["cached_queries"] += 1
 
             query_result = cached
+
+            self._apply_preprocessor_degradation(
+                query_result, context, preprocessor_degradations
+            )
 
             # persist context snapshot
             SessionManager.set_last_query_context(context)
@@ -603,6 +620,13 @@ class QueryManager:
         if isinstance(route.metadata, dict):
             query_result.metadata.update(route.metadata)
 
+        # Record every failed preprocessor on this request. Only failures that
+        # removed context needed by a non-conversational answer downgrade the
+        # result and trigger the UI's concise degraded-capability warning.
+        self._apply_preprocessor_degradation(
+            query_result, context, preprocessor_degradations
+        )
+
         # A building-scoped query answered while the building directory is
         # degraded may have reduced recall; mark it degraded so the UI can warn
         # and so the reduced-recall answer is not cached (ROUTE-03).
@@ -623,7 +647,11 @@ class QueryManager:
         # Cache result. Only cache trustworthy terminal outcomes: a transient
         # failed/unavailable/partial/degraded result must not be replayed from
         # cache until its TTL expires (plan section A / ROUTE-12).
-        if self.cache_enabled and query_result.status in _CACHEABLE_STATUSES:
+        if (
+            self.cache_enabled
+            and query_result.status in _CACHEABLE_STATUSES
+            and not preprocessor_degradations
+        ):
             self._store_cached_result(cache_key, query_result)
 
         # ---------------------------------------------------
@@ -779,6 +807,34 @@ class QueryManager:
         get_readiness().mark_degraded(COMPONENT_INTENT_CLASSIFIER)
         get_telemetry().record_fallback(COMPONENT_INTENT_CLASSIFIER)
 
+    def _apply_preprocessor_degradation(
+        self,
+        query_result: QueryResult,
+        context: QueryContext,
+        degraded_components: list[str] | None,
+    ) -> None:
+        """Attach ROUTE-01 failures and warn only for materially reduced context."""
+        components = list(dict.fromkeys(degraded_components or []))
+        if not components:
+            return
+
+        for component in components:
+            if component not in query_result.degraded_components:
+                query_result.degraded_components.append(component)
+        query_result.metadata["preprocessor_degradations"] = components
+
+        if query_result.query_type == QueryType.CONVERSATIONAL.value:
+            return
+
+        material_components = set(components) & _MATERIAL_CONTEXT_PREPROCESSORS
+        # Building extraction is immaterial when explicit or inherited scope is
+        # already available despite the failed extractor.
+        if context.building_filter:
+            material_components.discard("building_extractor")
+
+        if material_components and query_result.status in _CACHEABLE_STATUSES:
+            query_result.status = OutcomeStatus.DEGRADED
+
     def _record_outcome_telemetry(self, query_result: QueryResult) -> None:
         """Record the terminal request outcome by status and failure code."""
         failure_code = (
@@ -790,19 +846,36 @@ class QueryManager:
     # Preprocessor execution
     # =========================================================================
 
-    def _run_preprocessors(self, context: QueryContext):
-        """Run all preprocessors in order."""
+    def _run_preprocessors(self, context: QueryContext) -> list[str]:
+        """Run preprocessors, retaining stable request-scoped failure details."""
+        degraded_components: list[str] = []
         for pre in self.preprocessors:
             try:
                 if pre.should_run(context):
                     pre.process(context)
             except Exception as e:
+                component = _PREPROCESSOR_COMPONENTS.get(
+                    type(pre), "query_preprocessor"
+                )
+                if component not in degraded_components:
+                    degraded_components.append(component)
+                    get_telemetry().record_fallback(component)
                 self.logger.error(
-                    "Preprocessor %s failed: %s",
-                    pre.__class__.__name__,
+                    "preprocessor_degraded component=%s error=%s",
+                    component,
                     sanitise_error(e),
                     exc_info=False,
                 )
+
+        if degraded_components:
+            context.add_to_cache(
+                "preprocessor_degradations", list(degraded_components)
+            )
+            context.routing_notes.extend(
+                f"preprocessor_degraded:{component}"
+                for component in degraded_components
+            )
+        return degraded_components
 
     # =========================================================================
     # Query routing

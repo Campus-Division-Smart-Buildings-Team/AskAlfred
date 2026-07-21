@@ -6,26 +6,7 @@ The plan currently marks Phases 0–5 as complete, but the items below are eithe
 not implemented, only partially implemented, or still require operational
 rollout.
 
-## High-priority implementation gaps
-
-### START-09 / START-10 — Complete dependency readiness checks
-
-- Validate required OpenAI, Pinecone, and Redis configuration once at startup.
-- Publish readiness for each required and optional component.
-- Map missing required dependencies to `unavailable` before query execution.
-- Keep configuration details in logs and operator diagnostics only.
-- Current readiness updates cover rate limiting, the building directory, and
-  the intent classifier, but not all required services.
-
 ## Structured-outcome gaps
-
-### ROUTE-01 — Record preprocessor degradation
-
-- Record which preprocessor failed.
-- Attach the degradation to the affected request.
-- Warn only when the failure can materially change or narrow the answer.
-- Current behavior logs the exception and continues with a nominally healthy
-  request.
 
 ### ROUTE-02 — Handle discarded building scope
 
@@ -141,6 +122,24 @@ plan and have not been completed by repository code alone:
 
 ## Recently completed
 
+- **ROUTE-01:** Preprocessor exceptions now record a stable component name in
+  request context, routing notes, fallback telemetry, result metadata, and
+  `degraded_components`, while later preprocessors continue. Missing building or
+  business-term context downgrades otherwise trustworthy non-conversational
+  results to `degraded`; existing building scope and conversational answers are
+  retained without a user warning. Spell-check failures now reach this shared
+  boundary, and failed-preprocessing requests are not cached.
+- **START-09 / START-10:** A controlled-startup dependency check
+  (`core/startup_readiness.py`, wired into `main.py`) validates OpenAI and
+  Pinecone credentials and the Redis host/port/timeout configuration once and
+  publishes coarse component readiness for each. Required dependencies (OpenAI,
+  Pinecone) that are unconfigured are marked `unavailable`; the optional Redis
+  dependency (query rate limiting fails open, ingestion requires it) is marked
+  `degraded`. `QueryManager.process_query` now maps a missing required
+  dependency to a typed `unavailable/dependency.unavailable` outcome before the
+  query executes. The detailed configuration cause stays in logs/operator
+  diagnostics; the readiness surface and user-facing result carry only the
+  coarse state and stable failure code.
 - **INPUT-10:** Semantic queries below either the character or word threshold
   now return a non-retryable `rejected/input.insufficient_detail` outcome.
   Parameterised handler tests cover both threshold branches and ensure neither

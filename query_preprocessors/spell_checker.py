@@ -12,7 +12,6 @@ from building import (
     normalise_building_name,
 )
 from query_preprocessors.base_preprocessor import BasePreprocessor
-from security.log_sanitiser import sanitise_error
 
 
 class SpellCheckPreprocessor(BasePreprocessor):
@@ -192,31 +191,26 @@ class SpellCheckPreprocessor(BasePreprocessor):
             # Extra guard for type checkers / runtime
             return
 
-        try:
-            # Compute a candidate correction while protecting tokens
-            protected_tokens = self._build_protected_tokens(context)
-            protected_text, replacements = self._protect_text(
-                context.query, protected_tokens
-            )
-            corrected = str(textblob_cls(protected_text).correct())
-            corrected = self._restore_text(corrected, replacements)
+        # Compute a candidate correction while protecting tokens. QueryManager
+        # owns the preprocessor exception boundary so failures are attached to
+        # the affected request instead of being reduced to a server log
+        # (ROUTE-01).
+        protected_tokens = self._build_protected_tokens(context)
+        protected_text, replacements = self._protect_text(
+            context.query, protected_tokens
+        )
+        corrected = str(textblob_cls(protected_text).correct())
+        corrected = self._restore_text(corrected, replacements)
 
-            if corrected != context.query:
-                self.corrections_made += 1
+        if corrected != context.query:
+            self.corrections_made += 1
 
-                # Keep originals in cache for traceability
-                context.add_to_cache("original_query", context.query)
-                context.add_to_cache("spell_corrected", True)
+            # Keep originals in cache for traceability
+            context.add_to_cache("original_query", context.query)
+            context.add_to_cache("spell_corrected", True)
 
-                context.update_query(corrected)
+            context.update_query(corrected)
 
-                self.logger.debug("Spell correction applied to query")
-            else:
-                context.add_to_cache("spell_corrected", False)
-
-        except Exception as e:
-            # Never fail the pipeline because of spell check
-            self.logger.error(
-                "SpellCheckPreprocessor failed: %s", sanitise_error(e), exc_info=False
-            )
+            self.logger.debug("Spell correction applied to query")
+        else:
             context.add_to_cache("spell_corrected", False)
