@@ -1016,6 +1016,14 @@ class DryRunIndex:
 
         return _Result()
 
+    def delete(self, **kwargs):
+        self.logger.info(
+            "[DRY-RUN] Would delete %d vectors from %s",
+            len(kwargs.get("ids") or []),
+            kwargs.get("namespace"),
+        )
+        return {"deleted_count": len(kwargs.get("ids") or [])}
+
     def update(self, **kwargs):
         self.logger.info(f"[DRY-RUN] Would update with {kwargs}")
         return {"updated_count": 0}

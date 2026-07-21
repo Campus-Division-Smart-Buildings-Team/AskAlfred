@@ -8,16 +8,6 @@ rollout.
 
 ## High-priority implementation gaps
 
-### AUTH-10 / Phase 3 item 5 — Remediate non-conformant ACL vectors
-
-- Build an operator workflow that identifies vectors missing the required ACL
-  envelope.
-- Quarantine or re-ingest each affected vector.
-- Record reconciliation status and retain privacy-preserving telemetry.
-- Define and verify the required deployment conformance threshold.
-- Current code measures and alerts on ACL metadata drops, but does not perform
-  the required quarantine or re-ingestion.
-
 ### START-09 / START-10 — Complete dependency readiness checks
 
 - Validate required OpenAI, Pinecone, and Redis configuration once at startup.
@@ -154,6 +144,9 @@ plan and have not been completed by repository code alone:
 3. Capture a real traffic baseline and compare empty, partial, unavailable,
    failed, and degraded rates using `tools/compare_outcome_rates.py`.
 4. Record operator approval of the stable user-facing copy and alert thresholds.
+5. Run the AUTH-10 ACL audit against every target namespace, review the
+   privacy-safe report, quarantine or re-ingest every non-conformant vector, and
+   capture evidence that the deployment meets `ACL_CONFORMANCE_THRESHOLD`.
 
 ## Recently completed
 
@@ -162,6 +155,12 @@ plan and have not been completed by repository code alone:
   `QueryResult` with the stable `handler.execution_failed` code and an opaque
   correlation reference. Parameterised behavioral coverage verifies the same
   serialisable result contract for UI, API, and direct Python callers.
+- **AUTH-10 / Phase 3 item 5:** The ingestion CLI now provides an audit-by-default
+  ACL reconciliation workflow across current and legacy namespaces, an explicit
+  quarantine action, bounded vector fetching, post-action threshold
+  verification, privacy-safe reports and low-cardinality telemetry. The
+  deployment threshold defaults to full conformance (`1.0`) and can be set with
+  `ACL_CONFORMANCE_THRESHOLD`.
 
 ## Completion criteria
 

@@ -14,6 +14,7 @@ class VectorStore(Protocol):
     ) -> Any: ...
     def fetch(self, ids: list[str], namespace: Optional[str] = None) -> Any: ...
     def query(self, **kwargs: Any) -> Any: ...
+    def delete(self, ids: list[str], namespace: Optional[str] = None) -> Any: ...
     def list_prefix(
         self, prefix: str, namespace: Optional[str] = None
     ) -> Iterable[list[str]]: ...
@@ -47,6 +48,12 @@ class PineconeVectorStore:
             if "namespace" in kwargs:
                 kwargs["namespace"] = normalise_ns(kwargs.get("namespace"))
             return self._index.query(**kwargs)
+        except Exception as error:  # pylint: disable=broad-except
+            raise ExternalServiceError(str(error)) from error
+
+    def delete(self, ids: list[str], namespace: Optional[str] = None) -> Any:
+        try:
+            return self._index.delete(ids=ids, namespace=normalise_ns(namespace))
         except Exception as error:  # pylint: disable=broad-except
             raise ExternalServiceError(str(error)) from error
 

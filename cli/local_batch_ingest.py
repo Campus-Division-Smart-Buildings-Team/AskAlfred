@@ -26,8 +26,10 @@ from core.alfred_exceptions import (
     UnexpectedError,
 )
 from ingest import (
+    AclRemediationAction,
     IngestContext,
     ingest_local_directory_with_progress,
+    reconcile_acl_vectors,
     validate_namespace_routing,
 )
 from ingest.fra_reconciliation import reconcile_fra_transactions
@@ -109,6 +111,26 @@ def parse_args() -> argparse.Namespace:
         "--reconcile-registry",
         action="store_true",
         help="Replay vector-success/file-registry divergence records.",
+    )
+    parser.add_argument(
+        "--reconcile-acl",
+        choices=[action.value for action in AclRemediationAction],
+        help="Audit ACL metadata, or explicitly quarantine non-conformant vectors.",
+    )
+    parser.add_argument(
+        "--acl-namespace",
+        action="append",
+        help="Namespace to scan (repeatable); defaults to ingestion namespaces.",
+    )
+    parser.add_argument(
+        "--acl-threshold",
+        type=float,
+        help="Required ACL conformance ratio (defaults to ACL_CONFORMANCE_THRESHOLD).",
+    )
+    parser.add_argument(
+        "--acl-report",
+        default="logs/acl_reconciliation.json",
+        help="Privacy-safe ACL reconciliation report path.",
     )
 
     return parser.parse_args()
@@ -224,6 +246,30 @@ def main() -> int:
                 report.examined,
                 report.reconciled,
                 report.remaining,
+            )
+            return report.exit_code
+
+        if args.reconcile_acl:
+            acl_kwargs = {
+                "action": args.reconcile_acl,
+                "namespaces": args.acl_namespace,
+                "report_path": args.acl_report,
+            }
+            if args.acl_threshold is not None:
+                acl_kwargs["threshold"] = args.acl_threshold
+            report = reconcile_acl_vectors(ctx, **acl_kwargs)
+            logging.info(
+                "ACL reconciliation status=%s action=%s scanned=%d "
+                "nonconformant=%d remediated=%d failed=%d ratio=%.4f "
+                "threshold=%.4f",
+                report.status.value,
+                report.action.value,
+                report.scanned,
+                report.nonconformant,
+                report.remediated,
+                report.failed,
+                report.conformance_ratio,
+                report.threshold,
             )
             return report.exit_code
 

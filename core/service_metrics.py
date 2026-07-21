@@ -24,6 +24,7 @@ from typing import Optional
 
 from core.telemetry import (
     METRIC_ACL_METADATA_DROP,
+    METRIC_ACL_RECONCILIATION,
     METRIC_FALLBACK_ACTIVATED,
     METRIC_INGEST_INTEGRITY,
     METRIC_INGEST_OUTCOME,
@@ -46,6 +47,7 @@ _METRIC_HELP: dict[str, str] = {
     METRIC_FALLBACK_ACTIVATED: "Reduced-capability fallback activations by component.",
     METRIC_SERVICE_DEGRADED: "Degraded-service (fail-open/backend outage) events by component and code.",
     METRIC_ACL_METADATA_DROP: "Matches dropped for missing/invalid ACL metadata under an active filter.",
+    METRIC_ACL_RECONCILIATION: "ACL vector audit and remediation outcomes by action and state.",
     METRIC_INGEST_OUTCOME: "Ingestion file/run terminal states by scope and status.",
     METRIC_INGEST_INTEGRITY: "Registry/rollback/reconciliation state transitions.",
 }

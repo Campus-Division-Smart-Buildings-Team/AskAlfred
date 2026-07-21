@@ -48,6 +48,7 @@ METRIC_SOURCE_OUTCOME = "source_outcome_total"
 METRIC_FALLBACK_ACTIVATED = "fallback_activated_total"
 METRIC_SERVICE_DEGRADED = "service_degraded_total"
 METRIC_ACL_METADATA_DROP = "acl_metadata_drop_total"
+METRIC_ACL_RECONCILIATION = "acl_reconciliation_total"
 METRIC_INGEST_OUTCOME = "ingest_outcome_total"
 METRIC_INGEST_INTEGRITY = "ingest_integrity_total"
 
@@ -195,6 +196,19 @@ class Telemetry:
         if count > 0:
             self.increment(METRIC_ACL_METADATA_DROP, value=count)
 
+    def record_acl_reconciliation(
+        self, action: str, state: str, count: int = 1
+    ) -> None:
+        """Record privacy-safe ACL audit/remediation counts (AUTH-10)."""
+
+        if count > 0:
+            self.increment(
+                METRIC_ACL_RECONCILIATION,
+                value=count,
+                action=action,
+                state=state,
+            )
+
     def record_ingest_outcome(
         self, scope: str, status: IngestTerminalStatus | str
     ) -> None:
@@ -296,6 +310,7 @@ __all__ = [
     "COMPONENT_RESOURCE_LEASE",
     "COMPONENT_RETRIEVAL",
     "METRIC_ACL_METADATA_DROP",
+    "METRIC_ACL_RECONCILIATION",
     "METRIC_FALLBACK_ACTIVATED",
     "METRIC_REQUEST_OUTCOME",
     "METRIC_INGEST_OUTCOME",

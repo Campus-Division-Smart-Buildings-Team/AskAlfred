@@ -63,6 +63,9 @@ INGEST_DEFAULT_ALLOWED_ROLES = tuple(
     for role in os.getenv("INGEST_DEFAULT_ALLOWED_ROLES", "base_view").split(",")
     if role.strip()
 )
+# P0 access-control data must be fully conformant before deployment. Operators
+# may temporarily lower this only as an explicit rollout decision.
+ACL_CONFORMANCE_THRESHOLD = float(os.getenv("ACL_CONFORMANCE_THRESHOLD", "1.0"))
 
 DEFAULT_NAMESPACE: Optional[str] = None  # None means default namespace
 
@@ -431,6 +434,7 @@ __all__ = [
     "INGEST_FILE_TTL_SUCCESS_SECONDS",
     "INGEST_FILE_TTL_FAILED_SECONDS",
     "INGEST_FILE_TTL_PROCESSING_SECONDS",
+    "ACL_CONFORMANCE_THRESHOLD",
     "INGEST_JOB_TTL_DEFAULT_SECONDS",
     "INGEST_JOB_TTL_SUPERSEDE_SECONDS",
     "OPENAI_TIMEOUT_DEFAULT_S",
