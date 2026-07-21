@@ -26,13 +26,22 @@ redis = ">=7.1.0"
 textblob = ">=0.19.0"
 hf_hub_ctranslate2 = ">=2.13.0"
 # hf-hub-ctranslate2 imports torch at module load but does not declare it.
-torch = ">=2.9.0"
+# Its classifier runs through CTranslate2, so Linux does not need a CUDA torch build.
+torch = [
+    { version = ">=2.9.0,<2.11.0", markers = "sys_platform == 'linux'", source = "pytorch-cpu" },
+    { version = ">=2.9.0,<2.11.0", markers = "sys_platform != 'linux'" },
+]
 python-dotenv = ">=1.1.0"
 tqdm = ">=4.67.0"
 MarkupSafe = "*"
 markdown-pdf = ">=1.13.2"
 Send2Trash = ">=2.1.0"
 pywin32 = { version = ">=311", markers = "sys_platform == 'win32'" }
+
+[[tool.poetry.source]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+priority = "explicit"
 
 [build-system]
 requires = ["poetry-core>=1.8.0"]
