@@ -15,6 +15,58 @@ from config.constant import (
     INGEST_FILE_TTL_SUCCESS_SECONDS,
 )
 from core.ingest_outcomes import TERMINAL_FILE_STATUSES
+from core.telemetry import get_telemetry
+
+# VECTOR-13: stable, low-cardinality reasons a token-guarded file transition can
+# be rejected. They are emitted as the ``reason`` label of the
+# ``ingest_stale_writer_total`` metric and must never carry a file identifier.
+STALE_WRITER_TERMINAL_TOKEN = "stale_terminal_token"
+STALE_WRITER_STATE_PRECEDENCE = "state_precedence"
+STALE_WRITER_PROCESSING_TOKEN = "stale_processing_token"
+# Used only when a rejection is observed but its cause cannot be re-derived
+# (e.g. a script return without an explicit reason).
+STALE_WRITER_INDETERMINATE = "indeterminate"
+
+
+def classify_mark_state_transition(
+    *,
+    current_status: str | None,
+    current_transition_token: str,
+    current_processing_token: str,
+    processing_unexpired: bool,
+    supplied_token: str,
+    new_status: str,
+) -> str | None:
+    """Return ``None`` if a ``mark_state`` transition is allowed, else the stable
+    rejection reason.
+
+    This is the single, testable definition of the token/precedence guard. The
+    atomic Lua in :class:`RedisIngestFileRegistry` mirrors it exactly and MUST be
+    kept in sync; keeping the decision here lets every terminal transition be
+    exercised without a live Redis Lua runtime (VECTOR-13).
+    """
+
+    current_is_terminal = current_status in TERMINAL_FILE_STATUSES
+    if current_is_terminal:
+        if supplied_token == "" or supplied_token != current_transition_token:
+            return STALE_WRITER_TERMINAL_TOKEN
+        if current_status == "critical_inconsistent" and new_status != current_status:
+            return STALE_WRITER_STATE_PRECEDENCE
+        if current_status == "success" and new_status != current_status:
+            return STALE_WRITER_STATE_PRECEDENCE
+        if current_status == "failed" and new_status not in (
+            "failed",
+            "critical_inconsistent",
+        ):
+            return STALE_WRITER_STATE_PRECEDENCE
+        if current_status == "partial" and new_status in ("success", "degraded"):
+            return STALE_WRITER_STATE_PRECEDENCE
+        if current_status == "degraded" and new_status == "success":
+            return STALE_WRITER_STATE_PRECEDENCE
+    if current_status == "processing" and processing_unexpired:
+        if supplied_token == "" or supplied_token != current_processing_token:
+            return STALE_WRITER_PROCESSING_TOKEN
+    return None
 
 
 @dataclass(frozen=True)
@@ -207,24 +259,26 @@ class RedisIngestFileRegistry:
                 current_status == "cancelled" or
                 current_status == "critical_inconsistent"
             )
+            -- VECTOR-13: rejections return {0, reason}; the reasons mirror
+            -- classify_mark_state_transition() and become telemetry labels.
             if current_is_terminal then
                 if supplied_token == "" or supplied_token ~= current_transition_token then
-                    return 0
+                    return {0, "stale_terminal_token"}
                 end
                 if current_status == "critical_inconsistent" and status ~= current_status then
-                    return 0
+                    return {0, "state_precedence"}
                 end
                 if current_status == "success" and status ~= current_status then
-                    return 0
+                    return {0, "state_precedence"}
                 end
                 if current_status == "failed" and status ~= "failed" and status ~= "critical_inconsistent" then
-                    return 0
+                    return {0, "state_precedence"}
                 end
                 if current_status == "partial" and (status == "success" or status == "degraded") then
-                    return 0
+                    return {0, "state_precedence"}
                 end
                 if current_status == "degraded" and status == "success" then
-                    return 0
+                    return {0, "state_precedence"}
                 end
             end
             if current_status == "processing" then
@@ -234,7 +288,7 @@ class RedisIngestFileRegistry:
                 if current_expiry > now_epoch then
                     local current_token = redis.call("HGET", key, "processing_token") or ""
                     if supplied_token == "" or supplied_token ~= current_token then
-                        return 0
+                        return {0, "stale_processing_token"}
                     end
                 end
             end
@@ -486,7 +540,7 @@ class RedisIngestFileRegistry:
         }:
             raise ValueError(f"Unknown ingest file state: {status!r}")
         terminal = status in TERMINAL_FILE_STATUSES
-        updated = self._mark_state_script(
+        result = self._mark_state_script(
             keys=[self._key(file_id)],
             args=[
                 str(int(now.timestamp())),
@@ -507,8 +561,35 @@ class RedisIngestFileRegistry:
                 "1" if terminal else "0",
             ],
         )
+        updated, reason = self._parse_mark_state_result(result)
         if not updated:
+            # VECTOR-13: the token guard rejected a stale/invalid transition.
+            # Emit a stable, low-cardinality metric so stale writers are visible
+            # to operators. The exception message keeps the legacy "token
+            # mismatch" text that batch-level callers still match on.
+            get_telemetry().record_stale_writer_rejection(
+                reason or STALE_WRITER_INDETERMINATE
+            )
             raise ValueError(f"Rejecting state update for {file_id}: token mismatch")
+
+    @staticmethod
+    def _parse_mark_state_result(result: object) -> tuple[bool, Optional[str]]:
+        """Split the mark-state script return into ``(applied, reason)``.
+
+        The script returns ``1`` when applied and ``{0, reason}`` when the token
+        guard rejects the transition. Legacy/fake returns of a bare ``0``/``1``
+        are still accepted (reason ``None``).
+        """
+
+        if isinstance(result, (list, tuple)):
+            applied = bool(result[0]) if result else False
+            reason = (
+                RedisIngestFileRegistry._decode_value(result[1])
+                if len(result) > 1
+                else None
+            )
+            return applied, reason
+        return bool(result), None
 
     def delete(self, file_id: str) -> None:
         self._client.delete(self._key(file_id))
@@ -595,4 +676,9 @@ __all__ = [
     "IngestFileRegistry",
     "RedisIngestFileRegistry",
     "NoOpIngestFileRegistry",
+    "classify_mark_state_transition",
+    "STALE_WRITER_TERMINAL_TOKEN",
+    "STALE_WRITER_STATE_PRECEDENCE",
+    "STALE_WRITER_PROCESSING_TOKEN",
+    "STALE_WRITER_INDETERMINATE",
 ]

@@ -926,6 +926,8 @@ class MetricsExporter:
                 "fra_lock_acquire_attempts_total",
                 "fra_lock_contended_total",
                 "rollback_failures_total",
+                "observability_event_export_failures_total",
+                "observability_metrics_export_failures_total",
                 "vectors_embedding_failed",
                 "fra_embeddings_failed",
             ]

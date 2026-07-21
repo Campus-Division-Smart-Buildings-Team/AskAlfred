@@ -68,6 +68,7 @@ class FailureCode(str, Enum):
     INGEST_WORKER_STALE = "ingest.worker_stale"
     INGEST_RUN_PARTIAL = "ingest.run_partial"
     INGEST_RUN_FAILED = "ingest.run_failed"
+    OBSERVABILITY_EXPORT_FAILED = "observability.export_failed"
 
     FRA_LOCK_UNAVAILABLE = "fra.lock_unavailable"
     FRA_JOURNAL_UNAVAILABLE = "fra.journal_unavailable"

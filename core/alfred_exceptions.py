@@ -10,6 +10,18 @@ class IngestError(AskAlfredError):
     """Raised when ingestion pipeline fails."""
 
 
+class ObservabilityError(IngestError):
+    """An observability export failed without failing the ingestion data path.
+
+    ``retained`` indicates whether an event was durably spooled for replay.
+    Metrics exports are snapshots and therefore do not use this flag.
+    """
+
+    def __init__(self, message: str, *, retained: bool = False):
+        super().__init__(message)
+        self.retained = retained
+
+
 class ExternalServiceError(IngestError):
     """Raised when an external service fails (OpenAI/Pinecone)."""
 

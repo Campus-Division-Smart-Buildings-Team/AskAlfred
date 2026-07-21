@@ -225,17 +225,20 @@ class IngestContext:
             if getattr(self.config, "dry_run", False):
                 self._event_sink = JsonlPrometheusEventSink(
                     events_path="",
+                    spool_path="",
                     lock=self.export_events_lock,
                 )
                 return self._event_sink
             if not getattr(self.config, "export_events", False):
                 self._event_sink = JsonlPrometheusEventSink(
                     events_path="",
+                    spool_path="",
                     lock=self.export_events_lock,
                 )
                 return self._event_sink
             self._event_sink = JsonlPrometheusEventSink(
                 events_path=getattr(self.config, "export_events_file", ""),
+                spool_path=getattr(self.config, "event_spool_file", ""),
                 lock=self.export_events_lock,
             )
         return self._event_sink

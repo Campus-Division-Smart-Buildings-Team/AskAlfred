@@ -42,6 +42,7 @@ COMPONENT_CONVERSATION_MEMORY = "conversation_memory"
 COMPONENT_RETRIEVAL = "retrieval"
 COMPONENT_ANSWER_GENERATION = "answer_generation"
 COMPONENT_ACCESS_CONTROL = "access_control"
+COMPONENT_OBSERVABILITY = "observability"
 
 # External dependency components validated at startup (START-09 / START-10).
 # These are the *dependencies* (credential/connection configuration) rather than
@@ -61,6 +62,7 @@ METRIC_ACL_RECONCILIATION = "acl_reconciliation_total"
 METRIC_INGEST_OUTCOME = "ingest_outcome_total"
 METRIC_INGEST_REVIEW = "ingest_review_total"
 METRIC_INGEST_INTEGRITY = "ingest_integrity_total"
+METRIC_INGEST_STALE_WRITER = "ingest_stale_writer_total"
 
 # A label value must be a short, low-cardinality token. Enum values are coerced
 # to their ``.value`` first; anything else must match this pattern.
@@ -236,6 +238,17 @@ class Telemetry:
 
         self.increment(METRIC_INGEST_INTEGRITY, event=event, state=state)
 
+    def record_stale_writer_rejection(self, reason: str) -> None:
+        """Record a token-guard rejection of a stale/invalid file transition.
+
+        Emitted whenever the file registry rejects a terminal (or processing)
+        transition because the processing/transition token is stale or the new
+        status would overwrite a newer state (VECTOR-13). ``reason`` is a stable,
+        low-cardinality label, never a file identifier or exception string.
+        """
+
+        self.increment(METRIC_INGEST_STALE_WRITER, reason=reason)
+
 
 class ReadinessRegistry:
     """Thread-safe registry of coarse component readiness states."""
@@ -323,6 +336,7 @@ __all__ = [
     "COMPONENT_CONVERSATION_MEMORY",
     "COMPONENT_INTENT_CLASSIFIER",
     "COMPONENT_OPENAI",
+    "COMPONENT_OBSERVABILITY",
     "COMPONENT_PINECONE",
     "COMPONENT_RATE_LIMITER",
     "COMPONENT_REDIS",
@@ -334,6 +348,7 @@ __all__ = [
     "METRIC_REQUEST_OUTCOME",
     "METRIC_INGEST_OUTCOME",
     "METRIC_INGEST_INTEGRITY",
+    "METRIC_INGEST_STALE_WRITER",
     "METRIC_SERVICE_DEGRADED",
     "METRIC_SOURCE_OUTCOME",
     "Readiness",

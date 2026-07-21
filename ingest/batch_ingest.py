@@ -28,7 +28,6 @@ from config import (
 from core.alfred_exceptions import (
     CriticalInconsistentError,
     ExternalServiceError,
-    IngestError,
 )
 from core.fault_injection import FaultPoint, maybe_fail
 from core.ingest_outcomes import IngestTerminalStatus, exit_code_for_status
@@ -44,6 +43,7 @@ from .document_content import (
 )
 from .document_processor import DocumentProcessor, FileIngestOrchestrator, Writer
 from .helpers import UpsertQueueItem
+from .observability import emit_event_safely, mark_observability_degraded
 from .transaction import (
     _mark_batch_failed,
     extract_fra_risk_items_integration,
@@ -83,6 +83,8 @@ class IngestReport:
     file_outcomes: dict[str, str] = field(default_factory=dict)
     worker_queue_timed_out: bool = False
     lingering_workers: tuple[str, ...] = ()
+    observability_degraded: bool = False
+    observability_failures: list[str] = field(default_factory=list)
 
     @property
     def exit_code(self) -> int:
@@ -155,6 +157,8 @@ def _derive_run_status(
         return IngestTerminalStatus.NEEDS_REVIEW
     if "needs_review" in states and successful:
         return IngestTerminalStatus.PARTIAL
+    if stats.get("observability_event_export_failures_total", 0):
+        return IngestTerminalStatus.DEGRADED
     # Every file completed, but at least one only through a lossy encoding
     # fallback: the run committed all its vectors yet cannot claim full
     # fidelity (INGEST-06).
@@ -398,7 +402,6 @@ def run_ingest(
         upsert_errors=upsert_errors,
         teardown=teardown,
     )
-    get_telemetry().record_ingest_outcome("run", run_status)
     files_failed = sum(
         status in {"failed", "cancelled", "critical_inconsistent"}
         for status in file_outcomes.values()
@@ -426,6 +429,18 @@ def run_ingest(
         file_outcomes=file_outcomes,
         worker_queue_timed_out=teardown.queue_timed_out,
         lingering_workers=teardown.lingering_workers,
+        observability_degraded=bool(
+            stats.get("observability_event_export_failures_total", 0)
+            or stats.get("observability_metrics_export_failures_total", 0)
+        ),
+        observability_failures=[
+            channel
+            for channel, key in (
+                ("event_export", "observability_event_export_failures_total"),
+                ("metrics_export", "observability_metrics_export_failures_total"),
+            )
+            if stats.get(key, 0)
+        ],
     )
 
 
@@ -683,7 +698,8 @@ def _emit_ingest_metrics(
                 upsert_workers=ctx.config.upsert_workers,
             )
             ctx.logger.info("Exported Prometheus metrics to %s", prom_path)
-        except IngestError as error:
+        except Exception as error:  # pylint: disable=broad-except
+            mark_observability_degraded(ctx, "metrics_export", report=report)
             ctx.logger.warning("Could not export Prometheus metrics: %s", error)
 
     if getattr(ctx.config, "export_events", False):
@@ -699,10 +715,12 @@ def _emit_ingest_metrics(
             "failures": report.files_failed,
             "terminal_status": report.status.value,
         }
-        try:
-            ctx.event_sink.emit_event(metrics)
-        except IngestError as error:
-            ctx.logger.warning("Could not write ingestion summary event: %s", error)
+        emit_event_safely(
+            ctx,
+            metrics,
+            description="Ingestion summary event export",
+            report=report,
+        )
 
 
 def _log_ingest_summary(ctx: IngestContext, report: IngestReport) -> None:
@@ -789,8 +807,8 @@ def ingest_local_directory_with_progress(
             duration_seconds=0.0,
             status=IngestTerminalStatus.EMPTY_INPUT,
         )
-        get_telemetry().record_ingest_outcome("run", report.status)
         _emit_ingest_metrics(ctx, report, base_path)
+        get_telemetry().record_ingest_outcome("run", report.status)
         _log_ingest_summary(ctx, report)
         return report
 
@@ -917,5 +935,6 @@ def ingest_local_directory_with_progress(
             worker_pool.shutdown(wait=True)
 
     _emit_ingest_metrics(ctx, report, base_path)
+    get_telemetry().record_ingest_outcome("run", report.status)
     _log_ingest_summary(ctx, report)
     return report

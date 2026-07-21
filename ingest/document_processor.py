@@ -56,6 +56,7 @@ from .document_content import (
     is_bms_document,
     is_fire_risk_assessment,
 )
+from .observability import emit_event_safely
 from .utils import (
     enrich_with_building_metadata,
     validate_namespace_routing,
@@ -704,11 +705,11 @@ class DocumentProcessor:
                     ),
                     "fra_parsing_warnings": extracted_result.get("parsing_warnings"),
                 }
-                with self.ctx.export_events_lock:
-                    with open(
-                        self.ctx.config.export_events_file, "a", encoding="utf-8"
-                    ) as f:
-                        f.write(json.dumps(event, ensure_ascii=False) + "\n")
+                emit_event_safely(
+                    self.ctx,
+                    event,
+                    description="Missing FRA action-plan event export",
+                )
 
             # IMPORTANT: fall back to normal document ingestion
             return False
@@ -746,25 +747,19 @@ class DocumentProcessor:
         if not getattr(self.ctx.config, "export_events", False):
             return
 
-        try:
-            event = {
-                "event_type": "building_assignment",
-                "file": key,
-                "canonical_building_name": canonical,
-                "document_type": doc_type,
-                "namespace_guess": resolved_namespace,
-                "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
-            }
-            event_path = getattr(self.ctx.config, "export_events_file")
-            if event_path:
-                line = json.dumps(event, ensure_ascii=False) + "\n"
-                with self.ctx.export_events_lock:
-                    with open(event_path, "a", encoding="utf-8") as file_handle:
-                        file_handle.write(line)
-        except (OSError, ValueError, TypeError) as error:
-            self.ctx.logger.warning(
-                "Could not write building event for %s: %s", key, error
-            )
+        event = {
+            "event_type": "building_assignment",
+            "file": key,
+            "canonical_building_name": canonical,
+            "document_type": doc_type,
+            "namespace_guess": resolved_namespace,
+            "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
+        }
+        emit_event_safely(
+            self.ctx,
+            event,
+            description="Building-assignment event export",
+        )
 
     def _build_vectors_from_docs(
         self,

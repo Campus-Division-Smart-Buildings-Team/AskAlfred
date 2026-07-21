@@ -173,6 +173,7 @@ class BatchIngestConfig:
 
     export_events: bool = False
     export_events_file: str = "building_events.jsonl"
+    event_spool_file: str = "logs/ingest_event_spool.jsonl"
     prometheus_metrics_file: str = ""
     registry_reconciliation_file: str = (
         "logs/ingest_registry_reconciliation.jsonl"
@@ -275,6 +276,9 @@ class BatchIngestConfig:
             in ("1", "true", "yes"),
             export_events_file=os.getenv(
                 "EXPORT_EVENTS_FILE", defaults.export_events_file
+            ),
+            event_spool_file=os.getenv(
+                "EVENT_SPOOL_FILE", defaults.event_spool_file
             ),
             prometheus_metrics_file=os.getenv(
                 "PROMETHEUS_METRICS_FILE", defaults.prometheus_metrics_file

@@ -57,6 +57,7 @@ from .helpers import (
     _is_rate_limit_error,
     _summarise_batch_namespaces,
 )
+from .observability import emit_event_safely
 from .transaction import (
     _mark_batch_failed,
     _mark_batch_state,
@@ -700,20 +701,16 @@ def _upsert_worker(
                         status="critical_inconsistent",
                         error="fra_rollback_failed",
                     )
-                    try:
-                        ctx.stats.increment("rollback_failures_total")
-                        ctx.event_sink.emit_event(
-                            {
-                                "event_type": "rollback_failure",
-                                "timestamp": datetime.now(timezone.utc).isoformat()
-                                + "Z",
-                                "error": str(error),
-                            }
-                        )
-                    except Exception as alert_error:  # pylint: disable=broad-except
-                        ctx.logger.warning(
-                            "Rollback alert emission failed: %s", alert_error
-                        )
+                    ctx.stats.increment("rollback_failures_total")
+                    emit_event_safely(
+                        ctx,
+                        {
+                            "event_type": "rollback_failure",
+                            "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
+                            "error": str(error),
+                        },
+                        description="Rollback alert event export",
+                    )
                     errors.append(error)
                     stop_event.set()
                 else:

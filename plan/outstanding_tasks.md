@@ -6,20 +6,6 @@ The plan currently marks Phases 0–5 as complete, but the items below are eithe
 not implemented, only partially implemented, or still require operational
 rollout.
 
-## Ingestion and vector gaps
-
-### VECTOR-13 — Add stale-writer telemetry
-
-- Emit a stable metric whenever a processing token rejects a stale terminal
-  transition.
-- Test every terminal transition, not only selected state-precedence cases.
-
-### VECTOR-15 — Handle observability failures explicitly
-
-- Mark metrics or event-export failures as observability degradation.
-- Add durable local spooling and replay where event retention is required.
-- Current metrics export failure handling only logs a warning.
-
 ## Remaining silent-failure debt
 
 Remove or replace every entry still permitted by
@@ -64,6 +50,33 @@ plan and have not been completed by repository code alone:
 
 ## Recently completed
 
+- **VECTOR-13:** Stale-writer rejections by the file registry's token guard are
+  now observable. The atomic mark-state Lua script returns a stable rejection
+  reason (`stale_terminal_token`, `state_precedence`, or `stale_processing_token`)
+  and `RedisIngestFileRegistry.mark_state` emits a low-cardinality
+  `ingest_stale_writer_total{reason}` metric on every rejection — at the single
+  registry choke point, so it covers all callers rather than only the batch-level
+  path that previously string-matched the exception. The guard decision is
+  mirrored by a pure `classify_mark_state_transition` contract function that is
+  the single tested definition (the Lua cannot run without a live Redis). The
+  exception message keeps its legacy `token mismatch` text so existing batch-level
+  counters are unchanged. Covered by a full terminal-transition matrix (every
+  current→new pair with matching and stale tokens, plus the processing-token
+  case) driven through `mark_state` via a faithful in-memory fake that reuses the
+  contract function.
+- **VECTOR-15:** Metrics and event-export errors now cross a shared ingestion
+  observability boundary instead of being reduced to warnings. A failure records
+  stable run stats, `ingest_integrity_total{event=observability,state=...}` and
+  `service_degraded_total{component=observability,code=observability.export_failed}`
+  telemetry, marks observability readiness degraded, and annotates the
+  `IngestReport`; otherwise healthy runs finish `degraded` while worse data-path
+  outcomes retain their primary status. All ingestion event producers now use
+  this boundary, so alerting remains independent of vector writes. The JSONL
+  sink durably flushes failed events to the separately configurable
+  `EVENT_SPOOL_FILE` (default `logs/ingest_event_spool.jsonl`) and replays the
+  spool before the next live event with at-least-once delivery; metrics remain
+  replaceable snapshots and are not spooled. Covered by behavioral tests for
+  metrics degradation, retained event failures, and ordered spool replay.
 - **VECTOR-06:** The upsert path now enforces a single aggregate retry budget
   (`INGEST_UPSERT_MAX_TOTAL_RETRIES`, default `6`) across both retries and
   recursive batch splits. Previously each split reset the per-batch retry

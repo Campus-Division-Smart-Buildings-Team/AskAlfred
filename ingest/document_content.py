@@ -58,6 +58,8 @@ from security.file_operations_validator import (
     validate_file_safety,
 )
 
+from .observability import emit_event_safely
+
 if TYPE_CHECKING:
     from .context import IngestContext
 
@@ -805,18 +807,15 @@ def _alert_embed_response_mismatch(ctx: "IngestContext", batches: int) -> None:
         "after a safe retry; affected chunks recorded as response_size_mismatch",
         batches,
     )
-    try:
-        ctx.event_sink.emit_event(
-            {
-                "event_type": "embed_response_size_mismatch",
-                "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
-                "affected_batches": batches,
-            }
-        )
-    except Exception as alert_error:  # pylint: disable=broad-except
-        ctx.logger.warning(
-            "Embedding mismatch alert emission failed: %s", alert_error
-        )
+    emit_event_safely(
+        ctx,
+        {
+            "event_type": "embed_response_size_mismatch",
+            "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
+            "affected_batches": batches,
+        },
+        description="Embedding mismatch alert event export",
+    )
 
 
 def load_building_names_with_aliases(

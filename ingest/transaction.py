@@ -64,6 +64,7 @@ from .document_content import (
     ext,
 )
 from .helpers import _extract_fra_layout_text
+from .observability import emit_event_safely
 from .registry_reconciliation import spool_registry_divergence
 from .utils import (
     upsert_vectors,
@@ -742,21 +743,18 @@ class FraTransaction:
             get_telemetry().record_ingest_integrity(
                 "rollback", "critical_inconsistent"
             )
-            try:
-                self._ctx.event_sink.emit_event(
-                    {
-                        "event_type": "fra_critical_inconsistent",
-                        "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
-                        "transaction_id": self._tx_id,
-                        "affected_count": len(item_ids),
-                        "restored_count": restored,
-                        "buildings": len(self.buildings),
-                    }
-                )
-            except Exception as alert_error:  # pylint: disable=broad-except
-                self._ctx.logger.error(
-                    "Critical FRA alert emission failed: %s", alert_error
-                )
+            emit_event_safely(
+                self._ctx,
+                {
+                    "event_type": "fra_critical_inconsistent",
+                    "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
+                    "transaction_id": self._tx_id,
+                    "affected_count": len(item_ids),
+                    "restored_count": restored,
+                    "buildings": len(self.buildings),
+                },
+                description="Critical FRA alert event export",
+            )
         raise CriticalInconsistentError(
             f"FRA rollback incomplete for transaction {self._tx_id}: {reason}"
         )
@@ -777,20 +775,17 @@ def _emit_verification_failure_event(
     ctx: "IngestContext",
     missing_ids: list[str],
 ) -> None:
-    try:
-        ctx.event_sink.emit_event(
-            {
-                "event_type": "fra_verification_failed",
-                "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
-                "missing_count": len(missing_ids),
-                "missing_ids": missing_ids[:50],
-                "namespace": FRA_RISK_ITEMS_NAMESPACE,
-            }
-        )
-    except Exception as alert_error:  # pylint: disable=broad-except
-        ctx.logger.warning(
-            "Verification failure alert emission failed: %s", alert_error
-        )
+    emit_event_safely(
+        ctx,
+        {
+            "event_type": "fra_verification_failed",
+            "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
+            "missing_count": len(missing_ids),
+            "missing_ids": missing_ids[:50],
+            "namespace": FRA_RISK_ITEMS_NAMESPACE,
+        },
+        description="Verification failure alert event export",
+    )
 
 
 def _handle_verification_failure(
@@ -826,16 +821,15 @@ def _record_registry_divergence(
     except Exception as spool_error:  # pylint: disable=broad-except
         ctx.stats.increment("registry_reconciliation_spool_failures_total")
         ctx.logger.error("Registry reconciliation artifact failed: %s", spool_error)
-    try:
-        ctx.event_sink.emit_event(
-            {
-                "event_type": "ingest_registry_diverged",
-                "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
-                "affected_vectors": len(vectors),
-            }
-        )
-    except Exception as alert_error:  # pylint: disable=broad-except
-        ctx.logger.warning("Registry divergence alert failed: %s", alert_error)
+    emit_event_safely(
+        ctx,
+        {
+            "event_type": "ingest_registry_diverged",
+            "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
+            "affected_vectors": len(vectors),
+        },
+        description="Registry divergence alert event export",
+    )
 
 
 def _record_verification_unavailable(

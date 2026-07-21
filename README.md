@@ -421,7 +421,9 @@ if is_safe_extension(filename):
   collector.
 - **JSONL event sink** (`interfaces/event_sink.py`) records structured ingestion
   and verification events; analyse them with `tools/analyse_events_jsonl.py`.
-  Event export is gated by `EXPORT_EVENTS`.
+  Event export is gated by `EXPORT_EVENTS`. Failed writes are retained in a
+  durable local spool and replayed before the next event; configure its separate
+  location with `EVENT_SPOOL_FILE`.
 
 ---
 
@@ -469,7 +471,7 @@ LOG_LEVEL=INFO
 | OpenAI timeouts | `OPENAI_TIMEOUT`, `OPENAI_CONNECT_TIMEOUT`, `OPENAI_READ_TIMEOUT`, `OPENAI_WRITE_TIMEOUT`, `OPENAI_POOL_TIMEOUT` |
 | Safety limits | `MAX_FILE_SECONDS`, `MAX_MEMORY_MB`, `MAX_METADATA_SIZE`, `DRY_RUN` |
 | Redis behaviour | `DECODE_RESPONSES`, `HEALTH_CHECK_INTERVAL`, `REDIS_DB`, `REDIS_SSL`, `REDIS_SOCKET_TIMEOUT`, `REDIS_SOCKET_CONNECT_TIMEOUT`, `REDIS_HEALTH_CHECK_INTERVAL` |
-| Observability | `EXPORT_EVENTS`, `PROGRESS_LOG_INTERVAL` |
+| Observability | `EXPORT_EVENTS`, `EXPORT_EVENTS_FILE`, `EVENT_SPOOL_FILE`, `PROMETHEUS_METRICS_FILE`, `PROGRESS_LOG_INTERVAL` |
 | Feature flags | `ENABLE_SERVICE_STATUS`, `VALIDATE_BUSINESS_TERMS` |
 
 **Local `.env` loading**
