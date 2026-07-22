@@ -7570,39 +7570,39 @@ files:
       -
         name: "DEFAULT_OUTPUT"
         kind: "constant"
-        line: 14
+        line: 16
       -
         name: "DEFAULT_OVERRIDES"
         kind: "constant"
-        line: 15
+        line: 17
       -
         name: "discover_repository_files"
         kind: "function"
-        line: 23
+        line: 25
       -
         name: "load_overrides"
         kind: "function"
-        line: 69
+        line: 71
       -
         name: "inspect_python_file"
         kind: "function"
-        line: 120
+        line: 122
       -
         name: "build_project_map"
         kind: "function"
-        line: 272
+        line: 274
       -
         name: "render_project_map"
         kind: "function"
-        line: 411
+        line: 413
       -
         name: "write_or_check"
         kind: "function"
-        line: 420
+        line: 422
       -
         name: "main"
         kind: "function"
-        line: 458
+        line: 460
     tests:
       - "tests/test_generate_project_map.py"
   -
