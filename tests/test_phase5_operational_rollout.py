@@ -141,11 +141,11 @@ def test_service_metrics_render_counters_and_readiness():
         (OutcomeStatus.UNAVAILABLE, FailureCode.SEARCH_BACKEND_UNAVAILABLE),
     )
     readiness = ReadinessRegistry()
-    readiness.mark_unavailable(
-        "retrieval", FailureCode.SEARCH_BACKEND_UNAVAILABLE
-    )
+    readiness.mark_unavailable("retrieval", FailureCode.SEARCH_BACKEND_UNAVAILABLE)
 
-    text = render_service_metrics(telemetry, readiness)
+    text = render_service_metrics(
+        telemetry, readiness, export_timestamp_seconds=1_700_000_000
+    )
 
     assert "# TYPE askalfred_request_outcome_total counter" in text
     assert 'askalfred_request_outcome_total{status="success"} 1' in text
@@ -154,12 +154,20 @@ def test_service_metrics_render_counters_and_readiness():
         'askalfred_component_readiness{component="retrieval",'
         'readiness="unavailable",code="search.backend_unavailable"} 1' in text
     )
+    assert "askalfred_metrics_export_timestamp_seconds 1700000000.000000" in text
 
 
-def test_service_metrics_empty_is_empty_string():
+def test_service_metrics_empty_still_emits_export_timestamp():
     from core.service_metrics import render_service_metrics
 
-    assert render_service_metrics(Telemetry(), ReadinessRegistry()) == ""
+    text = render_service_metrics(
+        Telemetry(),
+        ReadinessRegistry(),
+        export_timestamp_seconds=1_700_000_000,
+    )
+    assert "askalfred_request_outcome_total" not in text
+    assert "askalfred_component_readiness" not in text
+    assert "askalfred_metrics_export_timestamp_seconds 1700000000.000000" in text
 
 
 def test_service_metrics_write_is_atomic(tmp_path):
@@ -171,7 +179,7 @@ def test_service_metrics_write_is_atomic(tmp_path):
 
     assert out.exists()
     assert "askalfred_request_outcome_total" in out.read_text(encoding="utf-8")
-    assert not (out.parent / "service.prom.tmp").exists()
+    assert not list(out.parent.glob(".service.prom.*.tmp"))
 
 
 # ---------------------------------------------------------------------------
@@ -375,16 +383,16 @@ def test_fault_injection_answer_seam_retains_results_as_partial(monkeypatch):
         "search_one_index_with_outcome",
         lambda *_args, **_kwargs: (
             [hit],
-            SourceOutcome(
-                source="index", status=OutcomeStatus.SUCCESS, result_count=1
-            ),
+            SourceOutcome(source="index", status=OutcomeStatus.SUCCESS, result_count=1),
         ),
     )
     monkeypatch.setattr(semantic_search, "deduplicate_results", lambda values: values)
     monkeypatch.setattr(
         semantic_search, "apply_occupancy_capacity_boost", lambda values, _q: values
     )
-    monkeypatch.setattr(semantic_search, "get_effective_score", lambda value: value["score"])
+    monkeypatch.setattr(
+        semantic_search, "get_effective_score", lambda value: value["score"]
+    )
     get_fault_injector().arm(FaultPoint.OPENAI_ANSWER, TimeoutError, count=1)
 
     outcome = semantic_search.semantic_search_with_outcome("query", 5)
@@ -416,11 +424,14 @@ def test_fault_injection_auth_callback_has_terminal_code_and_telemetry(monkeypat
     failure = fake_streamlit.session_state[auth_manager.AUTH_FAILURE_SESSION_KEY]
     assert failure["code"] == FailureCode.AUTH_PROVIDER_UNAVAILABLE.value
     assert failure["retryable"] is True
-    assert get_telemetry().get(
-        METRIC_AUTH_OUTCOME,
-        status=OutcomeStatus.UNAVAILABLE,
-        code=FailureCode.AUTH_PROVIDER_UNAVAILABLE,
-    ) == 1
+    assert (
+        get_telemetry().get(
+            METRIC_AUTH_OUTCOME,
+            status=OutcomeStatus.UNAVAILABLE,
+            code=FailureCode.AUTH_PROVIDER_UNAVAILABLE,
+        )
+        == 1
+    )
 
 
 def test_fault_injection_registry_write_seam_is_not_nominal_success():
@@ -500,11 +511,14 @@ def test_fault_injection_fra_rollback_seam_is_critical_and_observable():
         txn.rollback("injected_failure")
 
     assert journal.get("tx-fault").state is FraJournalState.CRITICAL_INCONSISTENT
-    assert get_telemetry().get(
-        METRIC_INGEST_INTEGRITY,
-        event="rollback",
-        state="critical_inconsistent",
-    ) == 1
+    assert (
+        get_telemetry().get(
+            METRIC_INGEST_INTEGRITY,
+            event="rollback",
+            state="critical_inconsistent",
+        )
+        == 1
+    )
 
 
 # ---------------------------------------------------------------------------

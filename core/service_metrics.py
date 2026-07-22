@@ -19,6 +19,9 @@ hand-off).
 
 from __future__ import annotations
 
+import os
+import threading
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -39,6 +42,8 @@ from core.telemetry import (
 
 _PREFIX = "askalfred"
 _READINESS_METRIC = f"{_PREFIX}_component_readiness"
+_EXPORT_TIMESTAMP_METRIC = f"{_PREFIX}_metrics_export_timestamp_seconds"
+_WRITE_LOCK = threading.Lock()
 
 # Human-readable help text keyed by the raw telemetry metric name.
 _METRIC_HELP: dict[str, str] = {
@@ -62,15 +67,15 @@ def _escape_label_value(value: str) -> str:
 def _render_labels(labels: tuple[tuple[str, str], ...]) -> str:
     if not labels:
         return ""
-    inner = ",".join(
-        f'{name}="{_escape_label_value(value)}"' for name, value in labels
-    )
+    inner = ",".join(f'{name}="{_escape_label_value(value)}"' for name, value in labels)
     return "{" + inner + "}"
 
 
 def render_service_metrics(
     telemetry: Optional[Telemetry] = None,
     readiness: Optional[ReadinessRegistry] = None,
+    *,
+    export_timestamp_seconds: Optional[float] = None,
 ) -> str:
     """Render current service telemetry and readiness as Prometheus text.
 
@@ -81,6 +86,8 @@ def render_service_metrics(
 
     telemetry = telemetry or get_telemetry()
     readiness = readiness or get_readiness()
+    if export_timestamp_seconds is None:
+        export_timestamp_seconds = time.time()
 
     # Group counter samples by their (prefixed) metric family name.
     families: dict[str, list[tuple[tuple[tuple[str, str], ...], int]]] = {}
@@ -88,9 +95,7 @@ def render_service_metrics(
     for metric, labels, count in telemetry.samples():
         family = f"{_PREFIX}_{metric}"
         families.setdefault(family, []).append((labels, count))
-        help_for.setdefault(
-            family, _METRIC_HELP.get(metric, f"{metric} counter.")
-        )
+        help_for.setdefault(family, _METRIC_HELP.get(metric, f"{metric} counter."))
 
     lines: list[str] = []
     for family in sorted(families):
@@ -117,11 +122,20 @@ def render_service_metrics(
             code = state.get("code")
             if code:
                 label_pairs.append(("code", str(code)))
-            lines.append(
-                f"{_READINESS_METRIC}{_render_labels(tuple(label_pairs))} 1"
-            )
+            lines.append(f"{_READINESS_METRIC}{_render_labels(tuple(label_pairs))} 1")
 
-    return "\n".join(lines) + "\n" if lines else ""
+    lines.extend(
+        [
+            (
+                f"# HELP {_EXPORT_TIMESTAMP_METRIC} Unix timestamp of the most "
+                "recent service metrics snapshot."
+            ),
+            f"# TYPE {_EXPORT_TIMESTAMP_METRIC} gauge",
+            f"{_EXPORT_TIMESTAMP_METRIC} {float(export_timestamp_seconds):.6f}",
+        ]
+    )
+
+    return "\n".join(lines) + "\n"
 
 
 def write_service_metrics(
@@ -137,10 +151,26 @@ def write_service_metrics(
 
     text = render_service_metrics(telemetry, readiness)
     out = Path(output_path)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = out.with_suffix(out.suffix + ".tmp")
-    tmp_path.write_text(text, encoding="utf-8")
-    tmp_path.replace(out)
+
+    # Streamlit runs sessions concurrently in one process. Serialising the
+    # complete temp-write/replace operation prevents two sessions from racing on
+    # the same destination, while the process/thread-specific temporary name
+    # also avoids collisions if an operator accidentally starts two instances.
+    with _WRITE_LOCK:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = out.with_name(
+            f".{out.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+        )
+        try:
+            tmp_path.write_text(text, encoding="utf-8")
+            tmp_path.replace(out)
+        finally:
+            # A failed replace can leave a temporary file behind. Do not mask
+            # the original error if best-effort cleanup also fails.
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 __all__ = [

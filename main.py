@@ -37,9 +37,13 @@ from config import (
 from config.constant import IS_PRODUCTION
 from core.clients import ClientManager
 from core.model_archive import initialise_local_model_archive
+from core.observability_runtime import (
+    configure_rotating_file_logging,
+    start_service_metrics_publisher,
+)
 from core.outcomes import OutcomeStatus
 from core.startup_readiness import check_dependency_readiness
-from core.telemetry import Readiness
+from core.telemetry import Readiness, get_telemetry
 from query_core.intent_classifier import NLPIntentClassifier, warm_encoder_runtime_async
 from query_core.query_context import build_access_filter, validate_access_context
 from query_core.query_manager import QueryManager
@@ -98,24 +102,41 @@ class ContextFilter(logging.Filter):
         return True
 
 
+_LOG_FORMAT = (
+    "%(asctime)s [%(levelname)s] %(name)s [%(category)s] [%(file_key)s]: %(message)s"
+)
+
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s [%(category)s] [%(file_key)s]: %(message)s",
+    format=_LOG_FORMAT,
     handlers=[logging.StreamHandler()],
 )
 
 root_logger = logging.getLogger()
 root_logger.setLevel(logging.INFO)
 context_filter = ContextFilter()
-root_logger.addFilter(context_filter)
+setattr(context_filter, "_askalfred_filter_key", "askalfred_context_filter")
+if not any(
+    getattr(item, "_askalfred_filter_key", "") == "askalfred_context_filter"
+    for item in root_logger.filters
+):
+    root_logger.addFilter(context_filter)
+
+sanitised_formatter = SanitisedFormatter(_LOG_FORMAT)
 for handler in root_logger.handlers:
-    handler.addFilter(context_filter)
+    if not any(
+        getattr(item, "_askalfred_filter_key", "") == "askalfred_context_filter"
+        for item in handler.filters
+    ):
+        handler.addFilter(context_filter)
     # Redact credentials/tokens in every record, including exception tracebacks.
-    handler.setFormatter(
-        SanitisedFormatter(
-            "%(asctime)s [%(levelname)s] %(name)s [%(category)s] [%(file_key)s]: %(message)s"
-        )
-    )
+    handler.setFormatter(sanitised_formatter)
+
+configure_rotating_file_logging(
+    logger=root_logger,
+    formatter=sanitised_formatter,
+    filters=(context_filter,),
+)
 
 # Silence noisy libraries
 for n in ("torch", "torch._dynamo", "torch._subclasses.fake_tensor"):
@@ -521,6 +542,7 @@ def render_result_item(
         snippet = snippet[:max_snippet_length] + "..."
     st.write(snippet)
 
+
 # ============================================================================
 # MAIN APPLICATION
 # ============================================================================
@@ -541,6 +563,11 @@ def main():
     # dependency is mapped to an ``unavailable`` outcome before query execution
     # (START-09 / START-10).
     check_dependency_readiness_once()
+
+    # Start one process-wide publisher. It writes immediately and then refreshes
+    # the Prometheus textfile on a bounded interval without using Streamlit APIs
+    # from its daemon thread.
+    start_service_metrics_publisher()
 
     auth_context = ensure_authentication()
 
@@ -603,6 +630,9 @@ def handle_search_query(query: str, top_k: int):
             auth_mandatory=authentication_required(),
         )
         if access_failure is not None:
+            get_telemetry().record_request_outcome(
+                OutcomeStatus.REJECTED, access_failure.code
+            )
             logging.warning(
                 "access_context_rejected code=%s correlation_id=%s component=%s",
                 access_failure.code.value,
@@ -631,6 +661,10 @@ def handle_search_query(query: str, top_k: int):
                         auth_mandatory=authentication_required(),
                     ),
                 )
+                failure_code = (
+                    outcome.failure.code if outcome.failure is not None else None
+                )
+                get_telemetry().record_request_outcome(outcome.status, failure_code)
 
                 st.session_state.last_results = outcome.results
                 render_legacy_semantic_outcome(outcome)
@@ -647,9 +681,7 @@ def render_legacy_semantic_outcome(outcome):
     # A required-source outage must not read as "no results" (Phase 2 exit).
     if status in _MANAGER_FAILURE_STATUSES or status is OutcomeStatus.EMPTY:
         content = render_query_failure(safe_present_outcome(status, outcome.failure))
-        st.session_state.messages.append(
-            {"role": "assistant", "content": content}
-        )
+        st.session_state.messages.append({"role": "assistant", "content": content})
         return
 
     if outcome.score_too_low:
@@ -660,9 +692,7 @@ def render_legacy_semantic_outcome(outcome):
         )
     else:
         content = render_query_failure(safe_present_outcome(status, outcome.failure))
-        st.session_state.messages.append(
-            {"role": "assistant", "content": content}
-        )
+        st.session_state.messages.append({"role": "assistant", "content": content})
         return
 
     # Concise capability warning for incomplete coverage.

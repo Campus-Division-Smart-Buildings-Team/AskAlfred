@@ -419,6 +419,11 @@ if is_safe_extension(filename):
   `askalfred_ingest_vectors_per_second`. Output files use the `.prom` extension
   (git-ignored) and can be picked up by the Prometheus node-exporter textfile
   collector.
+- **Live service metrics** are refreshed by a single process-wide publisher at
+  `SERVICE_METRICS_FILE`. They include request outcomes, component readiness,
+  and `askalfred_metrics_export_timestamp_seconds` so an operator can detect a
+  stale snapshot after the Streamlit process stops. Configure the refresh rate
+  with `SERVICE_METRICS_INTERVAL_SECONDS` (default: 15 seconds).
 - **JSONL event sink** (`interfaces/event_sink.py`) records structured ingestion
   and verification events; analyse them with `tools/analyse_events_jsonl.py`.
   Event export is gated by `EXPORT_EVENTS`. Failed writes are retained in a
@@ -471,7 +476,7 @@ LOG_LEVEL=INFO
 | OpenAI timeouts | `OPENAI_TIMEOUT`, `OPENAI_CONNECT_TIMEOUT`, `OPENAI_READ_TIMEOUT`, `OPENAI_WRITE_TIMEOUT`, `OPENAI_POOL_TIMEOUT` |
 | Safety limits | `MAX_FILE_SECONDS`, `MAX_MEMORY_MB`, `MAX_METADATA_SIZE`, `DRY_RUN` |
 | Redis behaviour | `DECODE_RESPONSES`, `HEALTH_CHECK_INTERVAL`, `REDIS_DB`, `REDIS_SSL`, `REDIS_SOCKET_TIMEOUT`, `REDIS_SOCKET_CONNECT_TIMEOUT`, `REDIS_HEALTH_CHECK_INTERVAL` |
-| Observability | `EXPORT_EVENTS`, `EXPORT_EVENTS_FILE`, `EVENT_SPOOL_FILE`, `PROMETHEUS_METRICS_FILE`, `PROGRESS_LOG_INTERVAL` |
+| Observability | `EXPORT_EVENTS`, `EXPORT_EVENTS_FILE`, `EVENT_SPOOL_FILE`, `PROMETHEUS_METRICS_FILE`, `SERVICE_METRICS_FILE`, `SERVICE_METRICS_INTERVAL_SECONDS`, `ASKALFRED_LOG_FILE`, `ASKALFRED_LOG_MAX_BYTES`, `ASKALFRED_LOG_BACKUP_COUNT`, `PROGRESS_LOG_INTERVAL` |
 | Feature flags | `ENABLE_SERVICE_STATUS`, `VALIDATE_BUSINESS_TERMS` |
 
 **Local `.env` loading**
@@ -500,6 +505,9 @@ redis = ClientManager.get_redis()  # Redis client with connection pooling
 - Configured globally in `main.py` via `logging.basicConfig()`.
 - All handlers inherit their logger from `BaseQueryHandler`.
 - The Streamlit log level is forced to INFO via `STREAMLIT_LOG_LEVEL=info`.
+- When `ASKALFRED_LOG_FILE` is set, the app attaches one UTF-8 rotating file
+  handler shared across Streamlit sessions. Defaults are 10 MiB per file and
+  five backups; every handler uses `SanitisedFormatter` before persistence.
 
 ---
 
