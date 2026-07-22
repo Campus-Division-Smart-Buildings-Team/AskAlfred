@@ -13,6 +13,7 @@ from typing import Optional, TypedDict
 
 from core.alfred_exceptions import ConfigError, RoutingError
 from core.env_bootstrap import load_local_env
+from security.log_sanitiser import mask_host
 
 load_local_env()
 
@@ -475,7 +476,7 @@ class BatchIngestConfig:
                 )
             logging.info(
                 "Redis target: %s:%s",
-                self.redis_host,
+                mask_host(self.redis_host),
                 self.redis_port,
             )
 

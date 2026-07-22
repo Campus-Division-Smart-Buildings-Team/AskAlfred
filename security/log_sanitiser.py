@@ -9,7 +9,14 @@ sensitive information from log messages and stack traces.
 
 import logging
 import re
+from pathlib import Path
 from typing import Any
+
+# Repo root, used to render filesystem paths relative to the project so logs
+# do not leak the user's home directory / account name. This module lives one
+# level below the root (security/), matching the parents[1] convention used
+# across the codebase.
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 # Patterns for sensitive data that should be redacted
 SENSITIVE_PATTERNS = {
@@ -71,6 +78,59 @@ def sanitise_message(message: str) -> str:
             continue
 
     return sanitised
+
+
+def mask_host(host: str) -> str:
+    """Mask a hostname so logs can identify the target without exposing a
+    connectable FQDN.
+
+    Keeps only the first DNS label — enough to tell environments/instances
+    apart when debugging — and replaces the remaining labels, which carry the
+    region, cluster and provider domain needed to actually reach the host,
+    with a marker. IPv4 addresses and single-label hosts carry no useful
+    "instance" label and are masked wholesale.
+
+    Args:
+        host: The hostname (or IP) to mask.
+
+    Returns:
+        A masked host string, e.g. "redis-15280.***masked***".
+    """
+    if not host:
+        return host
+
+    labels = host.split(".")
+    if len(labels) == 4 and all(label.isdigit() for label in labels):
+        return "***masked***"
+    if len(labels) <= 1:
+        return "***masked***"
+    return f"{labels[0]}.***masked***"
+
+
+def relativise_path(path: Any) -> str:
+    """Render a filesystem path relative to the project root for logging.
+
+    Paths under the project root are returned relative (e.g. ``data`` or
+    ``logs\\ingest.log``), stripping the user's home directory and account
+    name. Paths outside the root fall back to their final component so no
+    unrelated absolute path is leaked.
+
+    Args:
+        path: A path-like value to render.
+
+    Returns:
+        A project-relative path string, or the final path component if the
+        path lies outside the project root.
+    """
+    try:
+        resolved = Path(path).resolve()
+    except (OSError, ValueError, TypeError):
+        return str(path)
+
+    try:
+        return str(resolved.relative_to(_PROJECT_ROOT))
+    except ValueError:
+        return resolved.name
 
 
 def sanitise_error(error: Exception) -> str:

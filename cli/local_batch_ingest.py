@@ -38,6 +38,7 @@ from security.file_operations_validator import (
     FileOperationSecurityError,
     validate_directory_safety,
 )
+from security.log_sanitiser import relativise_path
 
 
 def parse_args() -> argparse.Namespace:
@@ -158,7 +159,7 @@ def main() -> int:
     log_path = configure_logging()
     load_dotenv()
     args = parse_args()
-    logging.info("Writing ingest log to %s", log_path)
+    logging.info("Writing ingest log to %s", relativise_path(log_path))
 
     try:
         config = BatchIngestConfig.from_env()
@@ -168,7 +169,9 @@ def main() -> int:
             try:
                 validated_path = validate_directory_safety(args.path)
                 config.local_path = str(validated_path)
-                logging.info("Validated ingest directory: %s", validated_path)
+                logging.info(
+                    "Validated ingest directory: %s", relativise_path(validated_path)
+                )
             except FileOperationSecurityError as e:
                 logging.error("Invalid path argument: %s", e)
                 return 2

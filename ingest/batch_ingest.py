@@ -36,6 +36,7 @@ from security.file_operations_validator import (
     FileOperationSecurityError,
     validate_directory_safety,
 )
+from security.log_sanitiser import relativise_path
 
 from .context import IngestContext
 from .document_content import (
@@ -778,7 +779,7 @@ def ingest_local_directory_with_progress(
     try:
         validated_path = validate_directory_safety(base_path)
         base_path = str(validated_path)
-        ctx.logger.info("Validated ingest directory: %s", validated_path)
+        ctx.logger.info("Validated ingest directory: %s", relativise_path(validated_path))
     except FileOperationSecurityError as e:
         ctx.logger.error("Invalid ingest directory: %s", e)
         raise FileNotFoundError(f"Invalid directory: {base_path}") from e
@@ -794,7 +795,9 @@ def ingest_local_directory_with_progress(
         for obj in objs
         if Path(str(obj.get("Key", ""))).name.lower() != "resolved_buildings.csv"
     ]
-    ctx.logger.info("Found %d files to process in %s", len(objs), base_path)
+    ctx.logger.info(
+        "Found %d files to process in %s", len(objs), relativise_path(base_path)
+    )
 
     if not objs:
         ctx.logger.warning("No files found to process")

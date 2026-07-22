@@ -785,7 +785,10 @@ def enrich_with_building_metadata(
             cached.get("building_aliases"),
         )
         if chunk_idx == 0:
-            ctx.logger.info(
+            # Per-building line: DEBUG so the estate's building names are not
+            # emitted at the default INFO level (and thus never shipped to
+            # centralised logging). Raise the logger to DEBUG to see them.
+            ctx.logger.debug(
                 "✅ Added aliases for %s (%s): %d total",
                 canonical_key,
                 doc_type,

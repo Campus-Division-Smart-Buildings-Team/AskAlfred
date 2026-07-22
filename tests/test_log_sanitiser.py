@@ -13,9 +13,12 @@ Tests security controls:
 """
 
 import logging
+from pathlib import Path
 
 from security.log_sanitiser import (
     SanitisedFormatter,
+    mask_host,
+    relativise_path,
     sanitise_dict,
     sanitise_error,
     sanitise_message,
@@ -434,3 +437,65 @@ class TestEdgeCases:
         assert sanitised["enabled"] is False
         assert sanitised["count"] == 0
         assert "secret" not in str(sanitised)
+
+
+class TestMaskHost:
+    """Test hostname masking for log lines."""
+
+    def test_masks_fqdn_but_keeps_first_label(self):
+        """FQDN keeps only its first label; the connectable domain is masked."""
+        host = "redis-15280.c266.us-east-1-3.ec2.cloud.redislabs.com"
+        masked = mask_host(host)
+        assert masked == "redis-15280.***masked***"
+        assert "redislabs.com" not in masked
+        assert "us-east-1-3" not in masked
+
+    def test_masks_ipv4_wholesale(self):
+        """IPv4 addresses carry no useful instance label and are fully masked."""
+        assert mask_host("10.1.2.3") == "***masked***"
+        assert mask_host("127.0.0.1") == "***masked***"
+
+    def test_masks_single_label_host(self):
+        """Single-label hosts are masked wholesale."""
+        assert mask_host("localhost") == "***masked***"
+
+    def test_empty_host_unchanged(self):
+        """Empty/falsy host is returned unchanged."""
+        assert mask_host("") == ""
+
+
+class TestRelativisePath:
+    """Test rendering paths relative to the project root for logs."""
+
+    def test_path_under_root_is_relativised(self):
+        """A path inside the project root is rendered relative, dropping the home dir."""
+        root = Path(__file__).resolve().parents[1]
+        target = root / "logs" / "ingest_test.log"
+        relativised = relativise_path(target)
+        assert relativised == str(Path("logs") / "ingest_test.log")
+        assert "rd23091" not in relativised
+        assert str(root) not in relativised
+
+    def test_root_itself_relativises_to_dot(self):
+        """The project root resolves to '.' relative to itself."""
+        root = Path(__file__).resolve().parents[1]
+        assert relativise_path(root) == "."
+
+    def test_path_outside_root_falls_back_to_name(self):
+        """A path outside the root leaks only its final component."""
+        outside = Path(root_drive_temp())
+        relativised = relativise_path(outside / "some_dir" / "secret_report.txt")
+        assert relativised == "secret_report.txt"
+        assert "some_dir" not in relativised
+
+    def test_non_path_input_is_stringified(self):
+        """Unrenderable input degrades gracefully to its string form."""
+        assert relativise_path(None) == "None"
+
+
+def root_drive_temp() -> str:
+    """A temp-like directory guaranteed to sit outside the project root."""
+    root = Path(__file__).resolve().parents[1]
+    # Use the drive/anchor of the project root so the path is valid on this OS
+    # yet clearly not under the repo directory.
+    return str(Path(root.anchor) / "windows_temp_outside_repo")
