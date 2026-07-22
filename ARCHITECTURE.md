@@ -473,7 +473,7 @@ Important degradation policies are:
 ```mermaid
 flowchart TB
     Browser[Browser] --> WAF[TLS ingress / reverse proxy]
-    WAF --> App[Streamlit app instance<br/>Python 3.12]
+    WAF --> App[Streamlit app instance<br/>Python 3.10-3.12]
 
     Scheduler[Approved scheduler / operator] --> Job[Ephemeral ingest or<br/>reconciliation runner]
     Sources[(Read-only source volume)] --> Job
@@ -505,9 +505,10 @@ query caches and model caches are process-local. If horizontal scaling is needed
 5. load-test Pinecone namespace fan-out and OpenAI limits before increasing
    instance count.
 
-The repository does not currently contain a Dockerfile, deployment manifest or
-infrastructure-as-code. Those are deployment deliverables, not implicit features
-of the present implementation.
+The repository contains no application Dockerfile or container build; the only
+infrastructure-as-code is the optional local monitoring stack under
+`ops/monitoring/` (see §11). Application deployment artifacts remain a
+deliverable, not an implicit feature of the present implementation.
 
 ### Network policy
 
@@ -528,6 +529,10 @@ and inaccessible from browsers or public networks.
   controls suitable for operational data.
 - Alert rules are maintained in `ops/askalfred_alerts.yml`; generated rules should
   be checked into the monitoring deployment alongside the application version.
+- Metrics and logs reach a backend by collecting the exported textfiles: in the
+  reference deployment Grafana Alloy reads them and `remote_write`s to Grafana
+  Cloud, while `ops/monitoring/` provides an optional self-hosted Prometheus +
+  Alertmanager + Grafana stack for offline or local use.
 
 Minimum production alerts should cover required dependency unavailability,
 non-success request/ingest outcome rate, ACL metadata drops, registry divergence,
