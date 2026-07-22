@@ -21,6 +21,8 @@ would explode metric cardinality and leak sensitive data (plan section H).
 
 from __future__ import annotations
 
+import bisect
+import math
 import re
 import threading
 from enum import Enum
@@ -64,6 +66,29 @@ METRIC_INGEST_OUTCOME = "ingest_outcome_total"
 METRIC_INGEST_REVIEW = "ingest_review_total"
 METRIC_INGEST_INTEGRITY = "ingest_integrity_total"
 METRIC_INGEST_STALE_WRITER = "ingest_stale_writer_total"
+
+# End-to-end user request latency. Unlike the counters above this is a histogram
+# metric (see :meth:`Telemetry.observe`).
+METRIC_REQUEST_DURATION = "request_duration_seconds"
+
+# Fixed histogram bucket upper bounds (seconds) for end-to-end request latency.
+# The span deliberately covers cache-hit responses (tens of ms) through
+# OpenAI-bound answer generation (tens of seconds). Bounds are a stable exposition
+# contract: changing them re-buckets historical series, so treat an edit as a
+# coordinated dashboard/alert migration rather than a routine tweak.
+REQUEST_DURATION_BUCKETS: tuple[float, ...] = (
+    0.05,
+    0.1,
+    0.25,
+    0.5,
+    1.0,
+    2.5,
+    5.0,
+    10.0,
+    20.0,
+    30.0,
+    60.0,
+)
 
 # A label value must be a short, low-cardinality token. Enum values are coerced
 # to their ``.value`` first; anything else must match this pattern.
@@ -109,12 +134,39 @@ def _label_key(labels: dict[str, object]) -> tuple[tuple[str, str], ...]:
     return tuple(sorted(validated))
 
 
+class _Histogram:
+    """Fixed-bound histogram accumulator for a single metric/label series."""
+
+    __slots__ = ("bounds", "counts", "sum", "count")
+
+    def __init__(self, bounds: tuple[float, ...]) -> None:
+        self.bounds = bounds
+        # One counter per finite bound plus a trailing +Inf overflow bucket.
+        self.counts = [0] * (len(bounds) + 1)
+        self.sum = 0.0
+        self.count = 0
+
+    def observe(self, value: float) -> None:
+        # ``bisect_left`` maps ``value`` to the first bound ``b`` with
+        # ``value <= b`` (Prometheus ``le`` semantics); a value above every bound
+        # lands in the trailing overflow bucket at index ``len(bounds)``.
+        self.counts[bisect.bisect_left(self.bounds, value)] += 1
+        self.sum += value
+        self.count += 1
+
+
 class Telemetry:
-    """Thread-safe in-process counter store with label-cardinality guardrails."""
+    """Thread-safe in-process counter/histogram store with label guardrails."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._counters: dict[tuple[str, tuple[tuple[str, str], ...]], int] = {}
+        self._histograms: dict[
+            tuple[str, tuple[tuple[str, str], ...]], _Histogram
+        ] = {}
+        # Bucket bounds are pinned to the first set seen per metric so the
+        # exposed series never changes bucketing mid-process.
+        self._histogram_bounds: dict[str, tuple[float, ...]] = {}
 
     # -- generic primitive --------------------------------------------------
 
@@ -126,6 +178,53 @@ class Telemetry:
         key = (metric, _label_key(labels))
         with self._lock:
             self._counters[key] = self._counters.get(key, 0) + int(value)
+
+    def observe(
+        self,
+        metric: str,
+        value: float,
+        *,
+        buckets: tuple[float, ...] = REQUEST_DURATION_BUCKETS,
+        **labels: object,
+    ) -> None:
+        """Record one observation into a fixed-bound histogram series.
+
+        ``buckets`` are ascending ``le`` upper bounds and are pinned to the first
+        set seen for ``metric``; a later, differing set is rejected so the
+        exposed histogram never re-buckets mid-process. Non-finite or negative
+        observations are dropped rather than corrupting the sum. Label safety is
+        the same as :meth:`increment`.
+        """
+
+        if not _METRIC_NAME_RE.fullmatch(metric):
+            raise ValueError(f"Unsafe telemetry metric name: {metric!r}")
+        numeric = float(value)
+        if math.isnan(numeric) or math.isinf(numeric) or numeric < 0:
+            return
+        key = (metric, _label_key(labels))
+        with self._lock:
+            histogram = self._histograms.get(key)
+            if histogram is None:
+                pinned = self._histogram_bounds.get(metric)
+                requested = tuple(float(bound) for bound in buckets)
+                if pinned is None:
+                    self._validate_bounds(requested)
+                    pinned = requested
+                    self._histogram_bounds[metric] = pinned
+                elif requested != pinned:
+                    raise ValueError(
+                        f"Inconsistent histogram bounds for metric {metric!r}"
+                    )
+                histogram = _Histogram(pinned)
+                self._histograms[key] = histogram
+            histogram.observe(numeric)
+
+    @staticmethod
+    def _validate_bounds(bounds: tuple[float, ...]) -> None:
+        if not bounds:
+            raise ValueError("A histogram needs at least one bucket bound")
+        if any(later <= earlier for earlier, later in zip(bounds, bounds[1:])):
+            raise ValueError("Histogram bounds must be strictly ascending")
 
     def get(self, metric: str, **labels: object) -> int:
         """Return the current counter value for ``metric``/labels (0 if unset)."""
@@ -162,11 +261,45 @@ class Telemetry:
                 for (metric, labels), count in self._counters.items()
             ]
 
+    def histogram_samples(
+        self,
+    ) -> list[
+        tuple[
+            str,
+            tuple[tuple[str, str], ...],
+            tuple[float, ...],
+            list[int],
+            float,
+            int,
+        ]
+    ]:
+        """Return ``(metric, labels, bounds, bucket_counts, sum, count)`` tuples.
+
+        ``bucket_counts`` holds one non-cumulative count per finite bound plus a
+        trailing +Inf overflow count; an exporter accumulates them into
+        cumulative ``le`` buckets for the Prometheus exposition format.
+        """
+
+        with self._lock:
+            return [
+                (
+                    metric,
+                    labels,
+                    histogram.bounds,
+                    list(histogram.counts),
+                    histogram.sum,
+                    histogram.count,
+                )
+                for (metric, labels), histogram in self._histograms.items()
+            ]
+
     def reset(self) -> None:
-        """Clear all counters (used by tests)."""
+        """Clear all counters and histograms (used by tests)."""
 
         with self._lock:
             self._counters.clear()
+            self._histograms.clear()
+            self._histogram_bounds.clear()
 
     # -- domain convenience -------------------------------------------------
 
@@ -181,6 +314,18 @@ class Telemetry:
         if failure_code is not None:
             labels["code"] = failure_code
         self.increment(METRIC_REQUEST_OUTCOME, **labels)
+
+    def record_request_duration(
+        self, seconds: float, status: OutcomeStatus
+    ) -> None:
+        """Record end-to-end request latency (seconds) bucketed by terminal status.
+
+        Deliberately labelled by ``status`` only (never the failure ``code``) so
+        the histogram's bucket count stays low-cardinality; the outcome counter
+        carries the finer code breakdown.
+        """
+
+        self.observe(METRIC_REQUEST_DURATION, seconds, status=status)
 
     def record_auth_outcome(
         self,
@@ -359,8 +504,10 @@ __all__ = [
     "METRIC_ACL_RECONCILIATION",
     "METRIC_FALLBACK_ACTIVATED",
     "METRIC_AUTH_OUTCOME",
+    "METRIC_REQUEST_DURATION",
     "METRIC_REQUEST_OUTCOME",
     "METRIC_INGEST_OUTCOME",
+    "REQUEST_DURATION_BUCKETS",
     "METRIC_INGEST_INTEGRITY",
     "METRIC_INGEST_STALE_WRITER",
     "METRIC_SERVICE_DEGRADED",

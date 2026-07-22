@@ -32,6 +32,7 @@ from core.telemetry import (
     METRIC_FALLBACK_ACTIVATED,
     METRIC_INGEST_INTEGRITY,
     METRIC_INGEST_OUTCOME,
+    METRIC_REQUEST_DURATION,
     METRIC_REQUEST_OUTCOME,
     METRIC_SERVICE_DEGRADED,
     METRIC_SOURCE_OUTCOME,
@@ -49,6 +50,7 @@ _WRITE_LOCK = threading.Lock()
 # Human-readable help text keyed by the raw telemetry metric name.
 _METRIC_HELP: dict[str, str] = {
     METRIC_REQUEST_OUTCOME: "User-facing request outcomes by terminal status and failure code.",
+    METRIC_REQUEST_DURATION: "End-to-end user request latency in seconds by terminal status.",
     METRIC_AUTH_OUTCOME: "Authentication outcomes by terminal status and failure code.",
     METRIC_SOURCE_OUTCOME: "Per-source retrieval outcomes by component and status.",
     METRIC_FALLBACK_ACTIVATED: "Reduced-capability fallback activations by component.",
@@ -71,6 +73,20 @@ def _render_labels(labels: tuple[tuple[str, str], ...]) -> str:
         return ""
     inner = ",".join(f'{name}="{_escape_label_value(value)}"' for name, value in labels)
     return "{" + inner + "}"
+
+
+def _format_bucket_bound(bound: float) -> str:
+    """Render a histogram bound as a stable ``le`` label value."""
+
+    if bound == int(bound):
+        return str(int(bound))
+    return repr(bound)
+
+
+def _format_sample_value(value: float) -> str:
+    """Render a float sample without scientific-notation surprises."""
+
+    return repr(float(value))
 
 
 def render_service_metrics(
@@ -105,6 +121,54 @@ def render_service_metrics(
         lines.append(f"# TYPE {family} counter")
         for labels, count in sorted(families[family], key=lambda item: item[0]):
             lines.append(f"{family}{_render_labels(labels)} {count}")
+
+    # Histogram families (e.g. request latency). Each series expands into
+    # cumulative ``_bucket`` lines terminated by ``le="+Inf"`` plus ``_sum`` and
+    # ``_count`` so a dashboard can derive quantiles and rates.
+    hist_families: dict[
+        str,
+        list[
+            tuple[
+                tuple[tuple[str, str], ...],
+                tuple[float, ...],
+                list[int],
+                float,
+                int,
+            ]
+        ],
+    ] = {}
+    hist_help: dict[str, str] = {}
+    for metric, labels, bounds, counts, total_sum, total_count in (
+        telemetry.histogram_samples()
+    ):
+        family = f"{_PREFIX}_{metric}"
+        hist_families.setdefault(family, []).append(
+            (labels, bounds, counts, total_sum, total_count)
+        )
+        hist_help.setdefault(family, _METRIC_HELP.get(metric, f"{metric} histogram."))
+
+    for family in sorted(hist_families):
+        lines.append(f"# HELP {family} {hist_help[family]}")
+        lines.append(f"# TYPE {family} histogram")
+        for labels, bounds, counts, total_sum, total_count in sorted(
+            hist_families[family], key=lambda item: item[0]
+        ):
+            cumulative = 0
+            for index, bound in enumerate(bounds):
+                cumulative += counts[index]
+                bucket_labels = labels + (("le", _format_bucket_bound(bound)),)
+                lines.append(
+                    f"{family}_bucket{_render_labels(bucket_labels)} {cumulative}"
+                )
+            # Trailing overflow bucket: le="+Inf" equals the total observation count.
+            cumulative += counts[len(bounds)]
+            inf_labels = labels + (("le", "+Inf"),)
+            lines.append(f"{family}_bucket{_render_labels(inf_labels)} {cumulative}")
+            lines.append(
+                f"{family}_sum{_render_labels(labels)} "
+                f"{_format_sample_value(total_sum)}"
+            )
+            lines.append(f"{family}_count{_render_labels(labels)} {total_count}")
 
     # Component readiness as a gauge: one line per component with its current
     # readiness carried as a label so a single series tracks health over time.

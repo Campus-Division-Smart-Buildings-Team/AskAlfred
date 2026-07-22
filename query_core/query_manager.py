@@ -481,11 +481,8 @@ class QueryManager:
                 access_failure.correlation_id,
                 access_failure.component,
             )
-            get_telemetry().record_request_outcome(
-                OutcomeStatus.REJECTED, access_failure.code
-            )
             elapsed_ms = (time.time() - start_time) * 1000
-            return QueryResult(
+            result = QueryResult(
                 query=query,
                 answer=None,
                 results=[],
@@ -495,6 +492,10 @@ class QueryManager:
                 failure=access_failure,
                 processing_time_ms=elapsed_ms,
             )
+            # Route through the single telemetry choke point so this early
+            # rejection contributes to both the outcome and duration metrics.
+            self._record_outcome_telemetry(result)
+            return result
 
         if context.access_filter is None:
             context.access_filter = build_access_filter(
@@ -634,6 +635,9 @@ class QueryManager:
             )
 
             elapsed_ms = (time.time() - start_time) * 1000
+            # Set the measured latency before recording so the duration
+            # histogram observes this turn's time, not the cached result's.
+            query_result.processing_time_ms = elapsed_ms
 
             # Record telemetry for cached responses (coerce None -> "unknown")
             self._update_stats(
@@ -644,7 +648,6 @@ class QueryManager:
             )
             self._record_outcome_telemetry(query_result)
 
-            query_result.processing_time_ms = elapsed_ms
             return query_result
 
         self.logger.debug("Final query before routing: %r", context.query)
@@ -1101,11 +1104,22 @@ class QueryManager:
             query_result.status = OutcomeStatus.DEGRADED
 
     def _record_outcome_telemetry(self, query_result: QueryResult) -> None:
-        """Record the terminal request outcome by status and failure code."""
+        """Record the terminal request outcome and end-to-end latency.
+
+        This is the single choke point for terminal query telemetry: it records
+        the outcome counter (status + failure code) and the request-duration
+        histogram (status only). Every terminal path sets ``processing_time_ms``
+        before calling this, so the latency observation is always available.
+        """
         failure_code = (
             query_result.failure.code if query_result.failure is not None else None
         )
-        get_telemetry().record_request_outcome(query_result.status, failure_code)
+        telemetry = get_telemetry()
+        telemetry.record_request_outcome(query_result.status, failure_code)
+        # Coerce a missing/negative measurement to 0 rather than skip the
+        # observation; observe() drops non-finite values defensively.
+        duration_seconds = max(query_result.processing_time_ms or 0.0, 0.0) / 1000.0
+        telemetry.record_request_duration(duration_seconds, query_result.status)
 
     # =========================================================================
     # Preprocessor execution
