@@ -1,5 +1,9 @@
 # 🦍 Alfred V3 — Modular, Hybrid-Intent Building-Aware Search Assistant
 
+> See [ARCHITECTURE.md](ARCHITECTURE.md) for the implementation-aligned system
+> design, runtime flows, security boundaries, deployment topology, and evolution
+> priorities.
+
 Alfred is an intelligent, Streamlit-based search assistant for the University of Bristol's Campus Division.
 
 It provides **multi-domain, building-aware search** across:

@@ -37,7 +37,7 @@ def spool_registry_divergence(ctx, vectors: list[dict[str, Any]]) -> int:
         vector_id = vector.get("id")
         if not vector_id:
             continue
-        file_id = str(vector_id).split(":", 1)[0]
+        file_id = str(vector.get("_file_id") or str(vector_id).split(":", 1)[0])
         metadata = vector.get("metadata") or {}
         record = records.setdefault(
             file_id,

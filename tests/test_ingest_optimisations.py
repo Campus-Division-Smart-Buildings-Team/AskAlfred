@@ -70,6 +70,28 @@ def test_registry_success_is_written_once_after_whole_file_completes():
     assert record.status == "success"
 
 
+def test_registry_uses_canonical_source_id_for_risk_vectors():
+    tracker = FileCompletionTracker()
+    registry = Mock()
+    ctx = SimpleNamespace(
+        config=SimpleNamespace(dry_run=False),
+        completion_tracker=tracker,
+        file_registry=registry,
+    )
+    first = {**_vector("risk_one", "fra_risk_items"), "_file_id": "source-file"}
+    second = {**_vector("risk_two", "fra_risk_items"), "_file_id": "source-file"}
+    tracker.register([first, second])
+
+    _record_ingested_files(ctx, [first], status="success")
+    registry.upsert_with_token.assert_not_called()
+
+    _record_ingested_files(ctx, [second], status="success")
+
+    registry.upsert_with_token.assert_called_once()
+    record = registry.upsert_with_token.call_args.args[0]
+    assert record.file_id == "source-file"
+
+
 def test_vectoriser_produces_both_fra_and_whole_document_artefacts():
     """A successful FRA risk-item extraction must not suppress whole-document
     indexing: the file yields both fra_risk_items (risk-item summaries) and

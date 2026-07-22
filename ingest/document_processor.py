@@ -989,6 +989,7 @@ class DocumentProcessor:
                             "values": embedding,
                             "metadata": metadata,
                             "namespace": current_resolved_namespace,
+                            "_file_id": file_id,
                             "_processing_token": processing_token,
                         }
                     )

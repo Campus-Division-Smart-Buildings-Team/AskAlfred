@@ -30,6 +30,7 @@ from ingest.registry_reconciliation import (
 )
 from ingest.transaction import (
     FileCompletionTracker,
+    FraTransaction,
     FraVerificationOutcome,
     FraVerificationState,
     ThreadSafeStats,
@@ -212,6 +213,104 @@ def test_incomplete_rollback_blocks_building_and_is_critical(monkeypatch):
     assert ctx.stats.get_stats()["critical_inconsistent_total"] == 1
 
 
+def test_shutdown_event_is_not_treated_as_redis_lock_loss():
+    ctx = _ctx()
+    ctx.upsert_stop_event = threading.Event()
+    ctx.upsert_stop_event.set()
+    txn = FraTransaction(ctx, [])
+
+    txn._raise_if_lock_lost()
+
+    txn._lock_lost_event.set()
+    with pytest.raises(ExternalServiceError, match="Redis lock lost"):
+        txn._raise_if_lock_lost()
+
+
+def test_same_building_transactions_are_serialised_before_blocker_check(monkeypatch):
+    class SerialLockManager:
+        def __init__(self):
+            self._global_lock = threading.Lock()
+            self.waiting_for_global_lock = threading.Event()
+
+        def lock(self, _name, **_kwargs):
+            manager = self
+
+            class LockContext:
+                def __enter__(self):
+                    if manager._global_lock.locked():
+                        manager.waiting_for_global_lock.set()
+                    manager._global_lock.acquire()
+                    return self
+
+                def __exit__(self, exc_type, exc, traceback):
+                    manager._global_lock.release()
+                    return False
+
+            return LockContext()
+
+        def lock_many(self, _names, **_kwargs):
+            return nullcontext()
+
+    ctx = _ctx()
+    ctx.config.fra_supersession_single_threaded = True
+    lock_manager = SerialLockManager()
+    ctx.redis_locks = lock_manager
+
+    first_upsert_started = threading.Event()
+    release_first_upsert = threading.Event()
+    call_guard = threading.Lock()
+    call_count = 0
+
+    def fake_upsert(_ctx, _vectors):
+        nonlocal call_count
+        with call_guard:
+            call_count += 1
+            current_call = call_count
+        if current_call == 1:
+            first_upsert_started.set()
+            assert release_first_upsert.wait(timeout=2)
+
+    monkeypatch.setattr("ingest.transaction.upsert_vectors", fake_upsert)
+    monkeypatch.setattr(
+        "ingest.transaction.mark_superseded_risk_items", lambda *_args, **_kwargs: []
+    )
+    monkeypatch.setattr(
+        "ingest.transaction._verify_fra_vectors_present", lambda *_args, **_kwargs: []
+    )
+    monkeypatch.setattr(
+        "ingest.transaction._record_ingested_files", lambda *_args, **_kwargs: None
+    )
+
+    errors: list[Exception] = []
+
+    def run_transaction():
+        try:
+            upsert_vectors_atomic(ctx, [_fra_vector()])
+        except Exception as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    first = threading.Thread(target=run_transaction)
+    second = threading.Thread(target=run_transaction)
+    first.start()
+    assert first_upsert_started.wait(timeout=2)
+    second.start()
+
+    second_waited_for_lock = lock_manager.waiting_for_global_lock.wait(timeout=1)
+    release_first_upsert.set()
+    first.join(timeout=2)
+    second.join(timeout=2)
+
+    assert second_waited_for_lock
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert errors == []
+    assert call_count == 2
+    assert [record.state for record in ctx.fra_journal._records.values()] == [
+        FraJournalState.COMMITTED,
+        FraJournalState.COMMITTED,
+    ]
+
+
 def test_crash_journal_is_recoverable_and_reconciliation_is_idempotent(monkeypatch):
     ctx = _ctx()
     record = new_fra_journal_record(
@@ -306,7 +405,8 @@ def test_registry_divergence_spool_replays_idempotent_partial(tmp_path):
     )
     vectors = [
         {
-            "id": "file:a:0",
+            "id": "risk_a",
+            "_file_id": "source-file",
             "namespace": "docs",
             "_processing_token": "token",
             "metadata": {
@@ -323,4 +423,5 @@ def test_registry_divergence_spool_replays_idempotent_partial(tmp_path):
     assert report.status is IngestTerminalStatus.SUCCESS
     assert report.reconciled == 1
     assert path.read_text(encoding="utf-8") == ""
+    assert registry.mark_state.call_args.kwargs["file_id"] == "source-file"
     assert registry.mark_state.call_args.kwargs["status"] == "partial"

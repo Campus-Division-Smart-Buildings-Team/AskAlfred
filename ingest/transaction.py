@@ -195,6 +195,9 @@ class FileCompletionTracker:
 
     @staticmethod
     def _file_id(vector: dict[str, Any]) -> str | None:
+        explicit_file_id = vector.get("_file_id")
+        if explicit_file_id:
+            return str(explicit_file_id)
         vector_id = vector.get("id")
         if not vector_id:
             return None
@@ -243,6 +246,7 @@ class FileCompletionTracker:
                             "id": template["id"],
                             "metadata": template.get("metadata") or {},
                             "namespace": namespace,
+                            "_file_id": file_id,
                             "_processing_token": template.get("_processing_token"),
                             "_file_partial": template.get("_file_partial", False),
                             "_file_partial_reason": template.get(
@@ -521,39 +525,57 @@ class FraSupersessionTxnLog:
 
 class FraTransaction:
     """
-    Encapsulates the four phases of an FRA atomic upsert:
+    Encapsulates the phases of an FRA atomic upsert:
 
-      prepare()  — collect supersession requests, acquire locks
+      collect_supersession_requests() — identify candidate buildings
+      acquire_locks() — serialise the complete transaction lifecycle
+      prepare()  — re-check idempotency, journal, and block while locked
       execute()  — mark superseded items, upsert vectors
       verify()   — confirm vectors are present in the index
       rollback() — restore superseded items on failure
 
-    Locks are held between prepare() and either verify() or rollback().
-    Use as a context manager for the lock scope, or call phases explicitly.
+    Locks are held from before prepare() through commit or rollback.
     """
 
     def __init__(self, ctx: "IngestContext", vectors: list[dict[str, Any]]) -> None:
         self._ctx = ctx
         self._vectors = vectors
+        self._candidate_requests: list[tuple[str, str]] = []
         self._supersede_requests: list[tuple[str, str]] = []
         self._superseded_ids: list[str] = []
         self._tx_id: str | None = None
         self._lock_ctx = None
-        self._lock_lost_event: threading.Event = (
-            ctx.upsert_stop_event or threading.Event()
-        )
+        # Lock ownership and run shutdown are different signals. Reusing the
+        # run-wide stop event here made one worker failure look like every
+        # active FRA transaction had lost its Redis locks, cascading a single
+        # error into multiple rollback failures.
+        self._lock_lost_event = threading.Event()
 
     # -- phase helpers --
 
+    def collect_supersession_requests(self) -> bool:
+        """
+        Collect candidate supersession requests without consulting mutable
+        transaction state. This phase is safe to run before locking.
+        """
+        self._candidate_requests = _collect_fra_supersede_requests(self._vectors)
+        return bool(self._candidate_requests)
+
     def prepare(self) -> bool:
+        """Prepare a transaction while holding all FRA locks.
+
+        The idempotency lookup, durable-block check and journal/block writes
+        must be inside the same lock scope. Otherwise a transaction waiting on
+        the global lock can publish a block that another live worker mistakes
+        for an abandoned transaction requiring reconciliation.
+
+        Returns True if a transactional supersession is required. A False
+        result means a preceding serial transaction already completed the
+        building/date request and the vectors can use the simple upsert path.
         """
-        Collect supersession requests and check the registry.
-        Returns True if a transactional supersession is required,
-        False if a simple upsert is sufficient.
-        """
-        requests = _collect_fra_supersede_requests(self._vectors)
+        self._raise_if_lock_lost()
         self._supersede_requests = _filter_supersede_requests_with_registry(
-            self._ctx, requests
+            self._ctx, self._candidate_requests
         )
         for building, _ in self._supersede_requests:
             blocking_tx = self._ctx.fra_journal.blocking_transaction(building)
@@ -561,14 +583,10 @@ class FraTransaction:
                 raise CriticalInconsistentError(
                     "FRA supersession is blocked pending reconciliation"
                 )
-        return bool(self._supersede_requests)
+        if not self._supersede_requests:
+            return False
 
-    def acquire_locks(self):
-        """
-        Acquire Redis locks for all buildings involved.
-        Returns the lock context manager (caller must enter it).
-        """
-        buildings = sorted({b for b, _ in self._supersede_requests})
+        buildings = self.buildings
         self._tx_id = uuid.uuid4().hex
         vector_ids = [
             str(vector["id"])
@@ -584,11 +602,20 @@ class FraTransaction:
                     vector_ids=vector_ids,
                 )
             )
-            # The durable block is written before the first mutation. Locks
-            # protect a live process; this block survives a process crash.
+            # The durable block is written only after the distributed locks
+            # are held. It survives a process crash without blocking sibling
+            # batches that are merely waiting for the same live lock.
             self._ctx.fra_journal.block_buildings(self._tx_id, buildings)
         except Exception as error:  # pylint: disable=broad-except
             raise ExternalServiceError("FRA transaction journal unavailable") from error
+        return True
+
+    def acquire_locks(self):
+        """
+        Acquire Redis locks for all buildings involved.
+        Returns the lock context manager (caller must enter it).
+        """
+        buildings = sorted({building for building, _ in self._candidate_requests})
         return _acquire_fra_locks(
             self._ctx,
             buildings,
@@ -872,10 +899,7 @@ def upsert_vectors_atomic(ctx: "IngestContext", vectors: list[dict[str, Any]]) -
     if not vectors:
         return
 
-    txn = FraTransaction(ctx, vectors)
-    needs_supersession = txn.prepare()
-
-    if not needs_supersession:
+    def simple_upsert_and_verify() -> None:
         # Simple path: no supersession needed
         upsert_vectors(ctx, vectors)
         ctx.stats.increment("batch_state_upserted_total")
@@ -897,10 +921,22 @@ def upsert_vectors_atomic(ctx: "IngestContext", vectors: list[dict[str, Any]]) -
         except Exception as error:  # pylint: disable=broad-except
             ctx.logger.warning("FileRegistry update failed: %s", error)
             _record_registry_divergence(ctx, vectors)
+
+    txn = FraTransaction(ctx, vectors)
+    has_candidates = txn.collect_supersession_requests()
+
+    if not has_candidates:
+        simple_upsert_and_verify()
         return
 
-    # Transactional path: acquire locks and run all phases
+    # Lock before consulting or publishing durable transaction blockers. The
+    # global lock (when configured) therefore serialises the complete mutable
+    # FRA lifecycle rather than only execute/verify.
     with txn.acquire_locks():
+        needs_supersession = txn.prepare()
+        if not needs_supersession:
+            simple_upsert_and_verify()
+            return
         try:
             txn.execute()
             verification = txn.verify()
@@ -1271,7 +1307,7 @@ def _write_ingested_file_records(
         vector_id = vector.get("id")
         if not vector_id:
             continue
-        file_id = str(vector_id).split(":", 1)[0]
+        file_id = FileCompletionTracker._file_id(vector)
         if not file_id:
             continue
         metadata = vector.get("metadata") or {}
@@ -1339,7 +1375,7 @@ def _mark_batch_state(
         vector_id = vector.get("id")
         if not vector_id:
             continue
-        file_id = str(vector_id).split(":", 1)[0]
+        file_id = FileCompletionTracker._file_id(vector)
         if not file_id:
             continue
         ns = get_display_namespace(vector.get("namespace"))
@@ -1723,6 +1759,7 @@ def extract_fra_risk_items_integration(
                 "values": embedding,
                 "metadata": metadata,
                 "namespace": FRA_RISK_ITEMS_NAMESPACE,
+                "_file_id": file_id,
                 "_processing_token": processing_token,
             }
         )
