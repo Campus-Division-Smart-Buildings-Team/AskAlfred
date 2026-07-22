@@ -74,7 +74,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(increase(askalfred_request_outcome_total{status=~\"unavailable|failed\"}[10m])) / clamp_min(sum(increase(askalfred_request_outcome_total[10m])), 1)"
+          "expr": "(sum(increase(askalfred_request_outcome_total{status=~\"unavailable|failed\"}[10m])) or vector(0)) / clamp_min(sum(increase(askalfred_request_outcome_total[10m])), 1)"
         }
       ]
     },
