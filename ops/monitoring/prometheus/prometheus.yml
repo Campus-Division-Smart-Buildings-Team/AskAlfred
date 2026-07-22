@@ -1,0 +1,33 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    service: askalfred
+
+rule_files:
+  # Application outcome alerts, generated from core.alerts by
+  # scripts/gen_alert_rules.py (mounted from ops/askalfred_alerts.yml).
+  - /etc/prometheus/rules/askalfred_alerts.yml
+  # Infrastructure alerts specific to the textfile-exporter deployment.
+  - /etc/prometheus/rules/infra_alerts.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - alertmanager:9093
+
+scrape_configs:
+  # AskAlfred application metrics. The app writes *.prom textfiles which
+  # node_exporter's textfile collector exposes at /metrics on :9100. The
+  # job label here is referenced by infra_alerts.yml (up{job=...}).
+  - job_name: askalfred-textfiles
+    static_configs:
+      - targets:
+          - node-exporter:9100
+
+  # Prometheus self-monitoring.
+  - job_name: prometheus
+    static_configs:
+      - targets:
+          - localhost:9090

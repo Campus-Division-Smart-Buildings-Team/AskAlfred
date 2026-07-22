@@ -1,0 +1,35 @@
+# Infrastructure alerts for the AskAlfred textfile-exporter deployment.
+#
+# These are hand-maintained and deliberately kept OUT of the generated
+# ops/askalfred_alerts.yml artifact (which a test pins to core.alerts). They
+# watch the delivery path — is the exporter up, are metrics fresh, did the
+# textfile parse — rather than application outcomes.
+groups:
+  - name: askalfred_infra_alerts
+    rules:
+      - alert: AskAlfredExporterDown
+        expr: up{job="askalfred-textfiles"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "AskAlfred metrics endpoint is down"
+          description: "Prometheus cannot scrape node_exporter serving AskAlfred textfile metrics. Dashboards and outcome alerts are blind until this recovers."
+
+      - alert: AskAlfredMetricsStale
+        expr: time() - askalfred_metrics_export_timestamp_seconds > 120
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "AskAlfred service metrics are stale"
+          description: "The service-metrics publisher has not refreshed the textfile in over 2 minutes (publish interval defaults to 15s). The app process or the publisher thread may be down."
+
+      - alert: AskAlfredTextfileScrapeError
+        expr: node_textfile_scrape_error > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "node_exporter failed to parse an AskAlfred textfile"
+          description: "The textfile collector reported a parse error; some AskAlfred metrics may be missing from the scrape."

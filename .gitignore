@@ -51,3 +51,7 @@ data/
 
 # generated security reports
 security_report*.html
+
+# monitoring stack config (override the *.json and *.md ignores above)
+!ops/monitoring/grafana/dashboards/*.json
+!ops/monitoring/README.md

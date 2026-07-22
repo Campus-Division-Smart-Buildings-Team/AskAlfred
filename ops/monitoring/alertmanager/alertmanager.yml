@@ -1,0 +1,43 @@
+# AskAlfred Alertmanager configuration.
+#
+# IMPORTANT: the receivers below are intentionally EMPTY (null receivers), so
+# this stack routes and de-duplicates alerts but sends nothing outbound until
+# you configure a real channel. Before relying on this in a live environment,
+# add slack_configs / email_configs / pagerduty_configs to the receivers and
+# record operator approval of the thresholds (rollout item 4).
+
+route:
+  receiver: default
+  group_by: ['alertname', 'severity']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    - matchers:
+        - severity = "critical"
+      receiver: critical
+      repeat_interval: 1h
+
+receivers:
+  - name: default
+    # No integrations configured — warnings are grouped but not delivered.
+    # Example (fill in and uncomment):
+    # slack_configs:
+    #   - api_url: https://hooks.slack.com/services/XXX/YYY/ZZZ
+    #     channel: '#askalfred-alerts'
+    #     send_resolved: true
+
+  - name: critical
+    # Page an operator for critical_inconsistent / component-unavailable alerts.
+    # Example (fill in and uncomment):
+    # pagerduty_configs:
+    #   - routing_key: <PAGERDUTY_ROUTING_KEY>
+    #     send_resolved: true
+
+inhibit_rules:
+  # A critical alert for an alertname silences a warning of the same name.
+  - source_matchers:
+      - severity = "critical"
+    target_matchers:
+      - severity = "warning"
+    equal: ['alertname']
