@@ -27,14 +27,30 @@ The remaining code and automated-test debt has been completed:
 - `ops/rollout_evidence.example.json` and
   `tools/validate_rollout_evidence.py` make the remaining deployment evidence a
   deterministic completion gate rather than an informal checklist.
+- The app-side observability runtime is built and wired. `core/observability_runtime.py`
+  runs a single process-wide service-metrics publisher (started from `main.py`)
+  that atomically snapshots request-outcome, auth-outcome, and component-readiness
+  telemetry to a Prometheus textfile (`SERVICE_METRICS_FILE`), alongside bounded
+  rotating file logging (`ASKALFRED_LOG_FILE`). This produces scrape-ready metrics
+  and the generated `ops/askalfred_alerts.yml` rules, but does not itself deploy or
+  connect an external Prometheus/Alertmanager/Grafana stack — see the split rollout
+  item below. Covered by `tests/test_observability_runtime.py` and the exporter/alert
+  tests in `tests/test_phase5_operational_rollout.py`.
 
 ## Operational rollout still required
 
 These activities are explicitly acknowledged as deployment-time work in the
 plan and have not been completed by repository code alone:
 
-1. Deploy and connect Prometheus, Alertmanager, and Grafana to the exported
-   metrics and `ops/askalfred_alerts.yml`.
+1. Monitoring stack. The app-side exporter is **built** (see "Repository work
+   complete" above): `core/observability_runtime.py` publishes scrape-ready
+   Prometheus textfiles and the repository ships `ops/askalfred_alerts.yml`. Still
+   **pending deployment**: stand up Prometheus, Alertmanager, and Grafana in the
+   target environment, point Prometheus at the exported textfile metrics, load
+   `ops/askalfred_alerts.yml` into Alertmanager, and build/connect Grafana
+   dashboards. No compose/`prometheus.yml`/dashboard definitions live in the
+   repository yet, and the rollout-evidence gate still requires
+   `monitoring.{prometheus,alertmanager,grafana}_connected`.
 2. Run the full fault-injection matrix in a live non-production environment for
    OpenAI embedding/answers, Pinecone index/query, Redis, auth callback,
    registry write, queue drain, and FRA rollback.
