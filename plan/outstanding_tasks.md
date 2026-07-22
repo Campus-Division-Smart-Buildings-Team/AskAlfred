@@ -32,25 +32,34 @@ The remaining code and automated-test debt has been completed:
   that atomically snapshots request-outcome, auth-outcome, and component-readiness
   telemetry to a Prometheus textfile (`SERVICE_METRICS_FILE`), alongside bounded
   rotating file logging (`ASKALFRED_LOG_FILE`). This produces scrape-ready metrics
-  and the generated `ops/askalfred_alerts.yml` rules, but does not itself deploy or
-  connect an external Prometheus/Alertmanager/Grafana stack — see the split rollout
-  item below. Covered by `tests/test_observability_runtime.py` and the exporter/alert
-  tests in `tests/test_phase5_operational_rollout.py`.
+  and the generated `ops/askalfred_alerts.yml` rules; delivering them to a backend
+  is a deployment concern, handled in this environment by Grafana Alloy →
+  Grafana Cloud (see the monitoring rollout item below). Covered by
+  `tests/test_observability_runtime.py` and the exporter/alert tests in
+  `tests/test_phase5_operational_rollout.py`.
 
 ## Operational rollout still required
 
 These activities are explicitly acknowledged as deployment-time work in the
 plan and have not been completed by repository code alone:
 
-1. Monitoring stack. The app-side exporter is **built** (see "Repository work
-   complete" above): `core/observability_runtime.py` publishes scrape-ready
-   Prometheus textfiles and the repository ships `ops/askalfred_alerts.yml`. Still
-   **pending deployment**: stand up Prometheus, Alertmanager, and Grafana in the
-   target environment, point Prometheus at the exported textfile metrics, load
-   `ops/askalfred_alerts.yml` into Alertmanager, and build/connect Grafana
-   dashboards. No compose/`prometheus.yml`/dashboard definitions live in the
-   repository yet, and the rollout-evidence gate still requires
-   `monitoring.{prometheus,alertmanager,grafana}_connected`.
+1. Monitoring stack. Collection is **live**: Grafana Alloy runs on the host,
+   reads the app's Prometheus textfiles with its `textfile` collector, drops the
+   `run_id`/`source_path` labels, and `remote_write`s to Grafana Cloud
+   (Prometheus/Mimir for metrics, Loki for logs). This path is verified flowing
+   (tens of thousands of samples remote-written with zero failures), and the
+   app-side exporter that feeds it is built (see "Repository work complete"
+   above). Still **pending**: load the generated `ops/askalfred_alerts.yml` PromQL
+   rules into the Grafana Cloud Mimir ruler (e.g. `mimirtool rules load`), import
+   an AskAlfred dashboard into Grafana Cloud, and — deferred until alerting is
+   wanted — configure Cloud contact points / notification policy. The self-hosted
+   stack under `ops/monitoring/` (Prometheus + Alertmanager + Grafana via
+   docker-compose) is an **optional, offline/local-only alternative** to the
+   Alloy→Cloud path, not the deployed monitoring — it is useful for running the
+   fault-injection matrix without pushing test traffic to Cloud. The
+   rollout-evidence gate still requires evidence for
+   `monitoring.{prometheus,alertmanager,grafana}_connected` (mapped to the Cloud
+   Mimir/alerting/Grafana equivalents) plus operator sign-off.
 2. Run the full fault-injection matrix in a live non-production environment for
    OpenAI embedding/answers, Pinecone index/query, Redis, auth callback,
    registry write, queue drain, and FRA rollback.
