@@ -463,7 +463,9 @@ def _try_complete_authentication() -> AuthContext | None:
         return None
     st.session_state.pop(AUTH_ERROR_SESSION_KEY, None)
     st.session_state.pop(AUTH_FAILURE_SESSION_KEY, None)
-    return _store_auth_context(auth_context)
+    stored_context = _store_auth_context(auth_context)
+    get_telemetry().record_auth_outcome(OutcomeStatus.SUCCESS)
+    return stored_context
 
 
 def _render_microsoft_sign_in_button(

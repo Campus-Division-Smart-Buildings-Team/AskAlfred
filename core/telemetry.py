@@ -183,11 +183,16 @@ class Telemetry:
         self.increment(METRIC_REQUEST_OUTCOME, **labels)
 
     def record_auth_outcome(
-        self, status: OutcomeStatus, failure_code: FailureCode
+        self,
+        status: OutcomeStatus,
+        failure_code: Optional[FailureCode] = None,
     ) -> None:
         """Record a terminal authentication attempt without user identifiers."""
 
-        self.increment(METRIC_AUTH_OUTCOME, status=status, code=failure_code)
+        labels: dict[str, object] = {"status": status}
+        if failure_code is not None:
+            labels["code"] = failure_code
+        self.increment(METRIC_AUTH_OUTCOME, **labels)
 
     def record_source_outcome(self, component: str, status: OutcomeStatus) -> None:
         """Record one per-source retrieval outcome for a named component."""

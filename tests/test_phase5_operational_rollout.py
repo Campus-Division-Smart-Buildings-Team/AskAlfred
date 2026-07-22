@@ -34,10 +34,13 @@ from query_core.query_result import QueryResult
 @pytest.fixture(autouse=True)
 def _clear_fault_injector():
     from core.fault_injection import get_fault_injector
+    from core.telemetry import get_telemetry
 
     get_fault_injector().clear()
+    get_telemetry().reset()
     yield
     get_fault_injector().clear()
+    get_telemetry().reset()
 
 
 def _telemetry_with(*outcomes) -> Telemetry:
@@ -155,6 +158,30 @@ def test_service_metrics_render_counters_and_readiness():
         'readiness="unavailable",code="search.backend_unavailable"} 1' in text
     )
     assert "askalfred_metrics_export_timestamp_seconds 1700000000.000000" in text
+
+
+def test_service_metrics_render_successful_and_failed_auth_outcomes():
+    from core.service_metrics import render_service_metrics
+
+    telemetry = Telemetry()
+    telemetry.record_auth_outcome(OutcomeStatus.SUCCESS)
+    telemetry.record_auth_outcome(
+        OutcomeStatus.FAILED,
+        FailureCode.AUTH_PROVIDER_RESPONSE_INVALID,
+    )
+
+    text = render_service_metrics(
+        telemetry,
+        ReadinessRegistry(),
+        export_timestamp_seconds=1_700_000_000,
+    )
+
+    assert "# TYPE askalfred_auth_outcome_total counter" in text
+    assert 'askalfred_auth_outcome_total{status="success"} 1' in text
+    assert (
+        'askalfred_auth_outcome_total{code="auth.provider_response_invalid",'
+        'status="failed"} 1' in text
+    )
 
 
 def test_service_metrics_empty_still_emits_export_timestamp():

@@ -28,6 +28,7 @@ from typing import Optional
 from core.telemetry import (
     METRIC_ACL_METADATA_DROP,
     METRIC_ACL_RECONCILIATION,
+    METRIC_AUTH_OUTCOME,
     METRIC_FALLBACK_ACTIVATED,
     METRIC_INGEST_INTEGRITY,
     METRIC_INGEST_OUTCOME,
@@ -48,6 +49,7 @@ _WRITE_LOCK = threading.Lock()
 # Human-readable help text keyed by the raw telemetry metric name.
 _METRIC_HELP: dict[str, str] = {
     METRIC_REQUEST_OUTCOME: "User-facing request outcomes by terminal status and failure code.",
+    METRIC_AUTH_OUTCOME: "Authentication outcomes by terminal status and failure code.",
     METRIC_SOURCE_OUTCOME: "Per-source retrieval outcomes by component and status.",
     METRIC_FALLBACK_ACTIVATED: "Reduced-capability fallback activations by component.",
     METRIC_SERVICE_DEGRADED: "Degraded-service (fail-open/backend outage) events by component and code.",

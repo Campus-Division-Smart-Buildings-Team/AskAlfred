@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -14,6 +15,7 @@ from auth.auth_manager import (
 )
 from core.alfred_exceptions import ConfigError
 from core.failure_codes import FailureCode
+from core.outcomes import OutcomeStatus
 from query_core import query_context
 
 
@@ -189,6 +191,52 @@ def test_invalid_token_claims_are_replaced_with_safe_ui_message(monkeypatch):
     assert failure["code"] == FailureCode.AUTH_CLAIMS_INVALID.value
     assert failure["retryable"] is False
     assert failure["correlation_id"].startswith("alf-")
+
+
+def test_successful_auth_callback_records_one_success_without_identity_labels(
+    monkeypatch,
+):
+    class SessionState(dict):
+        __getattr__ = dict.__getitem__
+        __setattr__ = dict.__setitem__
+
+    fake_streamlit = SimpleNamespace(
+        session_state=SessionState(
+            {
+                auth_manager.AUTH_FLOW_SESSION_KEY: {
+                    "auth_uri": "https://example.test/sign-in"
+                }
+            }
+        )
+    )
+    telemetry = Mock()
+
+    class FakeMsalApp:
+        def acquire_token_by_auth_code_flow(self, flow, auth_response):
+            return {
+                "id_token_claims": {
+                    "preferred_username": "user@bristol.ac.uk",
+                    "name": "Test User",
+                    "tid": "tenant-123",
+                }
+            }
+
+    monkeypatch.setattr(auth_manager, "st", fake_streamlit)
+    monkeypatch.setattr(
+        auth_manager,
+        "_get_query_params",
+        lambda: {"code": "code", "state": "state"},
+    )
+    monkeypatch.setattr(auth_manager, "_clear_auth_query_params", lambda: None)
+    monkeypatch.setattr(auth_manager, "_remove_cached_auth_flow", lambda state: None)
+    monkeypatch.setattr(auth_manager, "build_msal_app", lambda **kwargs: FakeMsalApp())
+    monkeypatch.setattr(auth_manager, "get_telemetry", lambda: telemetry)
+
+    auth_context = auth_manager._try_complete_authentication()
+
+    assert auth_context is not None
+    assert auth_context.authenticated is True
+    telemetry.record_auth_outcome.assert_called_once_with(OutcomeStatus.SUCCESS)
 
 
 def test_token_exchange_exception_has_structured_retryable_failure(

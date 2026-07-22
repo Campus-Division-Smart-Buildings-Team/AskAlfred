@@ -422,7 +422,9 @@ if is_safe_extension(filename):
   `askalfred_ingest_total_vectors`, `askalfred_ingest_duration_seconds`,
   `askalfred_ingest_vectors_per_second`. Output files use the `.prom` extension
   (git-ignored) and can be picked up by the Prometheus node-exporter textfile
-  collector.
+  collector. Point the collector at a dedicated directory containing only the
+  production `.prom` files; do not point it at the repository root because test
+  artifacts can contain duplicate metric filenames and invalidate a scrape.
 - **Live service metrics** are refreshed by a single process-wide publisher at
   `SERVICE_METRICS_FILE`. They include request outcomes, component readiness,
   and `askalfred_metrics_export_timestamp_seconds` so an operator can detect a
