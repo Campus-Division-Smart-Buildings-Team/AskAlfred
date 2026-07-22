@@ -3,8 +3,6 @@ import logging
 import re
 from typing import Optional
 
-from textblob import TextBlob
-
 from building import (
     BUILDING_ALIASES_CACHE,
     BUILDING_NAMES_CACHE,
@@ -18,11 +16,18 @@ class SpellCheckPreprocessor(BasePreprocessor):
     """
     Optional spell checker using TextBlob.
 
+    Disabled by default. TextBlob's ``.correct()`` is an edit-distance-1
+    corrector that silently rewrites valid proper nouns to more frequent
+    words (e.g. "Old Park Hill" -> "Old Dark Will"), corrupting the building
+    name — the most important entity in a query — with no user visibility.
+    The token-protection below cannot reliably cover partial/variant building
+    names or arbitrary street names, so the corrector stays off; genuine
+    near-misses are handled downstream by the fuzzy building resolver.
+
     Safety/UX rules:
-      - Enabled by default.
       - Skips when TextBlob isn't available (no hard dependency).
       - Protects building names, business terms, and common domain tokens
-        from being "corrected".
+        from being "corrected" (only relevant if re-enabled).
     """
 
     # Module-level cache of the import to satisfy type checkers
@@ -30,7 +35,7 @@ class SpellCheckPreprocessor(BasePreprocessor):
 
     def __init__(self) -> None:
         super().__init__()
-        self.enabled = True  # always on; protect building/domain tokens
+        self.enabled = False  # off: corrupts building names (see class docstring)
         self.logger = logging.getLogger(self.__class__.__name__)
         self.corrections_made = 0
 
@@ -154,10 +159,17 @@ class SpellCheckPreprocessor(BasePreprocessor):
 
     @classmethod
     def _lazy_import_textblob(cls) -> Optional[type]:
-        """Import TextBlob once; return None if not installed."""
+        """Import TextBlob on first use; return None if not installed.
+
+        Kept lazy so importing this module (and the query pipeline) never pulls
+        in TextBlob and its corpora. Since the corrector is disabled by default,
+        the import typically never happens at all.
+        """
         if cls._TextBlob is not None:
             return cls._TextBlob
         try:
+            from textblob import TextBlob
+
             cls._TextBlob = TextBlob
         except Exception:
             cls._TextBlob = None

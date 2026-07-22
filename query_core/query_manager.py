@@ -429,7 +429,7 @@ class QueryManager:
         Order matters.
         """
         return [
-            SpellCheckPreprocessor(),  # Optional: disabled by default
+            SpellCheckPreprocessor(),  # Disabled by default (self.enabled=False)
             BuildingExtractor(),
             BusinessTermExtractor(),
             QueryComplexityAnalyser(),

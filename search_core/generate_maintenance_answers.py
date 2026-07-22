@@ -18,6 +18,7 @@ from core.pinecone_utils import open_index
 from domain.maintenance_utils import (
     aggregate_request_metrics,
     aggregate_request_metrics_by_category,
+    extract_unresolved_building_phrase,
     filter_maintenance_buildings,
     format_multi_building_metrics,
     is_request_metrics,
@@ -91,13 +92,37 @@ def generate_maintenance_answer(
         or re.search(r"\bacross\s+(all\s+)?buildings?\b", q_l) is not None
     )
 
-    if (not building) and building_override and not is_global_buildings_query:
-        logging.info(
-            "%s Using building from context override: %s",
-            EMOJI_BRAIN,
-            building_override,
-        )
-        building = building_override
+    if (not building) and not is_global_buildings_query:
+        # The query resolved to no known building. Before inheriting the
+        # previous turn's building, check whether the user *explicitly named* a
+        # building we simply failed to recognise (e.g. a garbled speech-to-text
+        # name like "old dark will" for "Old Park Hill"). In that case, silently
+        # substituting the previous building would confidently answer about the
+        # wrong building — so ask for clarification instead. Only a genuinely
+        # scope-less query (no building named) inherits conversational context.
+        unresolved_building = extract_unresolved_building_phrase(query)
+        if unresolved_building:
+            logging.info(
+                "%s Query names an unrecognised building '%s' — requesting "
+                "clarification instead of inheriting previous building '%s'",
+                EMOJI_CAUTION,
+                unresolved_building,
+                building_override,
+            )
+            return (
+                f"{EMOJI_CROSS} I couldn't identify the building "
+                f"**'{unresolved_building.title()}'** in your request.\n\n"
+                "Could you confirm which building you mean? For example: "
+                '*"maintenance requests at Senate House"*.'
+            )
+
+        if building_override:
+            logging.info(
+                "%s Using building from context override: %s",
+                EMOJI_BRAIN,
+                building_override,
+            )
+            building = building_override
 
     logging.info("\n🔧 MAINTENANCE QUERY ANALYSIS")
     logging.info("  Building: %s", building)

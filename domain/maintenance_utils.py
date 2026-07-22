@@ -212,6 +212,75 @@ def extract_building_name_from_query(
     return None
 
 
+# Maintenance filter vocabulary that can legitimately follow a building
+# preposition ("... for completed jobs", "... in progress") but must never be
+# mistaken for a building name.  Multi-word keys (e.g. "in progress", "hot
+# water") are stripped as substrings, longest first, so their fragments do not
+# survive as spurious building tokens.
+_FILTER_KEYWORD_PHRASES = sorted(
+    set(STATUS_MAPPINGS) | set(MAINTENANCE_CATEGORIES) | set(PRIORITY_MAPPINGS),
+    key=len,
+    reverse=True,
+)
+
+# Generic query / recency words that scope a request without naming a building.
+_GENERIC_QUERY_WORDS = frozenset(
+    {
+        "the", "a", "an", "this", "that", "these", "those",
+        "all", "any", "some", "my", "our", "their", "its",
+        "request", "requests", "job", "jobs", "maintenance",
+        "and", "with", "status", "priority", "category", "type",
+        "are", "were", "was", "that's", "open", "outstanding", "current",
+        "logged", "raised", "reported",
+        # time / recency scoping
+        "today", "yesterday", "week", "weeks", "month", "months",
+        "year", "years", "day", "days", "past", "last", "recent", "recently",
+        "january", "february", "march", "april", "may", "june", "july",
+        "august", "september", "october", "november", "december",
+    }
+)
+
+# A building is typically named as "... at <name>" or "... for <name>".  "in"
+# is deliberately excluded because "in progress" is a status, not a location.
+_BUILDING_PREPOSITION_RE = re.compile(r"\b(?:at|for)\b\s+(.+?)\s*[?.!]*$", re.IGNORECASE)
+
+
+def extract_unresolved_building_phrase(query: str) -> Optional[str]:
+    """Return the building-like phrase a query names via "at/for <name>".
+
+    Returns the candidate building phrase (with maintenance filter vocabulary
+    stripped out) when the user appears to have named a building, or ``None``
+    when the query names no building at all.
+
+    This lets callers tell two cases apart:
+
+    * "the user named a building we could not recognise" (e.g. a garbled
+      speech-to-text name) — the caller should ask for clarification rather
+      than silently answering about a different building; and
+    * "the user named no building" — safe to inherit conversational context.
+    """
+    if not query:
+        return None
+
+    match = _BUILDING_PREPOSITION_RE.search(query.lower())
+    if not match:
+        return None
+
+    residual = match.group(1)
+    for phrase in _FILTER_KEYWORD_PHRASES:
+        if phrase in residual:
+            residual = residual.replace(phrase, " ")
+
+    leftover = [
+        tok
+        for tok in re.findall(r"[a-z0-9]+(?:-[a-z0-9]+)*", residual)
+        if tok not in _GENERIC_QUERY_WORDS and not tok.isdigit()
+    ]
+    if not leftover:
+        return None
+    return " ".join(leftover)
+
+
 # -----------------------------------------------------------------------------
 # Query parsing + formatting
 # -----------------------------------------------------------------------------
