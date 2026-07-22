@@ -17,6 +17,7 @@ __pycache__/
 *.bin
 *.log
 *.json
+!project-map-overrides.json
 !.safety-policy.json
 !ops/rollout_evidence.example.json
 *.pklz
@@ -43,6 +44,7 @@ data/
 *.md
 !README.md
 !ARCHITECTURE.md
+!AGENTS.md
 !plan/dependency_and_source_classification.md
 !plan/outstanding_tasks.md
 

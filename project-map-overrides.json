@@ -1,0 +1,113 @@
+{
+  "directories": {
+    ".": {
+      "purpose": "AskAlfred modular monolith: building-aware structured and semantic search."
+    },
+    "auth": {
+      "purpose": "Authentication, authorisation, access contexts, and credential handling.",
+      "layer": "identity_and_access"
+    },
+    "building": {
+      "purpose": "Canonical building identity, aliases, normalisation, and resolution.",
+      "layer": "domain"
+    },
+    "cli": {
+      "purpose": "Operational command-line entry points.",
+      "layer": "presentation"
+    },
+    "config": {
+      "purpose": "Environment-backed settings, constants, routing, and feature flags.",
+      "layer": "configuration"
+    },
+    "core": {
+      "purpose": "Shared runtime clients, sessions, telemetry, locks, readiness, and outcomes.",
+      "layer": "infrastructure"
+    },
+    "domain": {
+      "purpose": "Business terminology and maintenance-data helpers.",
+      "layer": "domain"
+    },
+    "fra": {
+      "purpose": "Fire Risk Assessment parsing, enrichment, triage, and supersession.",
+      "layer": "domain"
+    },
+    "ingest": {
+      "purpose": "Secure document discovery, extraction, vectorisation, and transactional ingestion.",
+      "layer": "application"
+    },
+    "interfaces": {
+      "purpose": "Infrastructure ports and their current adapters.",
+      "layer": "contracts"
+    },
+    "ops": {
+      "purpose": "Monitoring, alerting, and operational deployment configuration.",
+      "layer": "operations"
+    },
+    "plan": {
+      "purpose": "Design decisions, delivery plans, and outstanding work.",
+      "layer": "documentation"
+    },
+    "query_core": {
+      "purpose": "Query context, preprocessing, intent routing, execution, and conversation lifecycle.",
+      "layer": "application"
+    },
+    "query_handlers": {
+      "purpose": "Intent-specific chain-of-responsibility handlers.",
+      "layer": "application"
+    },
+    "query_preprocessors": {
+      "purpose": "Building and business-term extraction, spell checking, and complexity analysis.",
+      "layer": "application"
+    },
+    "scripts": {
+      "purpose": "Supported maintenance and security command implementations.",
+      "layer": "developer_tooling"
+    },
+    "search_core": {
+      "purpose": "Structured and semantic retrieval, ranking, deduplication, and answer generation.",
+      "layer": "application"
+    },
+    "security": {
+      "purpose": "Input, file, CSV, context, and log safety plus rate limiting.",
+      "layer": "cross_cutting"
+    },
+    "tests": {
+      "purpose": "Automated pytest regression and acceptance suite.",
+      "layer": "testing"
+    },
+    "tools": {
+      "purpose": "Developer utilities, diagnostics, analysis, and project-map generation.",
+      "layer": "developer_tooling"
+    },
+    "ui": {
+      "purpose": "Streamlit presentation components and shared UI constants.",
+      "layer": "presentation"
+    }
+  },
+  "files": {
+    "main.py": {
+      "purpose": "Streamlit application entry point and composition root.",
+      "entry_points": ["streamlit"]
+    },
+    "ARCHITECTURE.md": {
+      "purpose": "Canonical architectural overview, flows, boundaries, and design decisions."
+    },
+    "README.md": {
+      "purpose": "Developer and operator introduction, setup, usage, and package overview."
+    },
+    "AGENTS.md": {
+      "purpose": "Repository-wide instructions for coding agents."
+    },
+    "project-map.yaml": {
+      "purpose": "Generated file, directory, Python-symbol, import, test, and entry-point index.",
+      "generated_from": [
+        "Git working tree",
+        "Python AST",
+        "project-map-overrides.json"
+      ]
+    },
+    "project-map-overrides.json": {
+      "purpose": "Human-maintained architectural metadata merged into the generated project map."
+    }
+  }
+}

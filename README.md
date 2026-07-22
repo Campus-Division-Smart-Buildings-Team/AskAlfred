@@ -204,6 +204,19 @@ AskAlfred/
 > `Alfred/`, `data/`, `logs/`, `models/`, `*.prom` metric files, and the intent
 > embedding caches are local/runtime artefacts and are git-ignored.
 
+`project-map.yaml` is the generated, machine-readable index of Git-visible files,
+directories, Python public symbols, local imports, entry points, and conventionally
+matched tests. Durable descriptions belong in `project-map-overrides.json`; regenerate
+the index after structural changes:
+
+```powershell
+poetry run python tools/generate_project_map.py
+poetry run python tools/generate_project_map.py --check
+```
+
+CI runs the check and rejects a stale map. Repository-wide coding-agent guidance is
+in `AGENTS.md`.
+
 ---
 
 ## ⚙️ Key Components
